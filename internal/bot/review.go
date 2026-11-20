@@ -114,6 +114,36 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	_ = b.store.SavePR(cur)
 }
 
+// announceReview posts the review-started notice, or, when retrying the same
+// commit, turns the earlier notice back into one, so retries don't pile up
+// comments. It returns the comment's ID (0 if it couldn't be posted).
+func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.PR, n reviewNotice) int64 {
+	if pr.Attempts > 0 && pr.AttemptSHA == n.head {
+		if cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number); err == nil {
+			if id := findNotice(cs, b.BotLogin(), n.head); id != 0 {
+				if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err == nil {
+					return id
+				}
+			}
+		}
+	}
+	c, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, n.startedBody())
+	if err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not post the review-started comment: %v", err)
+		return 0
+	}
+	return c.ID
+}
+
+// updateNotice edits the review notice, even if the review was cancelled.
+func (b *Bot) updateNotice(cl *github.Client, pr *store.PR, id int64, body string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := cl.UpdateIssueComment(ctx, pr.Repo, id, body); err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not update the review-started comment: %v", err)
+	}
+}
+
 type batch struct {
 	text  string
 	paths []string
@@ -234,8 +264,18 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	if id, err := b.store.CreateReview(rec); err == nil {
 		rec.ID = id
 	}
+	notice := reviewNotice{head: head, model: st.LLM.Model, skill: sk.Name, started: time.Unix(rec.StartedAt, 0)}
+	var noticeID int64
 	var raw strings.Builder
 	defer func() {
+		if err != nil && !errors.Is(err, errSkip) && noticeID != 0 {
+			// Same count handleReview uses to decide on a retry.
+			attempts := 1
+			if pr.AttemptSHA == pr.HeadSHA {
+				attempts += pr.Attempts
+			}
+			b.updateNotice(cl, pr, noticeID, notice.failedBody(attempts < maxAttempts))
+		}
 		rec.FinishedAt = time.Now().Unix()
 		rec.Raw = textutil.Truncate(raw.String(), 500_000)
 		switch {
@@ -295,10 +335,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	if len(p.batches) > 0 {
 		// Only when there's code to review, so a PR with nothing reviewable
 		// doesn't get a notice that's never followed by a review.
-		started := time.Unix(rec.StartedAt, 0)
-		if _, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, reviewStartedBody(head, started, st.LLM.Model, sk.Name)); err != nil {
-			b.logf("warn", pr.Repo, pr.Number, "could not post the review-started comment: %v", err)
-		}
+		noticeID = b.announceReview(ctx, cl, pr, notice)
 	}
 
 	// First check whether earlier findings have since been fixed: confirmed

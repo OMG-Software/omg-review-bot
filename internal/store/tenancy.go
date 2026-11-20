@@ -288,6 +288,9 @@ func (s *Store) lastOwnerCheck(res sql.Result, err error, orgID, userID int64) e
 
 // GetMembership returns nil, nil when the person has no access to the organization.
 func (s *Store) GetMembership(orgID, userID int64) (*Member, error) {
+	if orgID <= 0 || userID <= 0 {
+		return nil, nil // 0 means "any" to queryMembers, never a person
+	}
 	ms, err := s.queryMembers(orgID, userID)
 	if err != nil || len(ms) == 0 {
 		return nil, err
@@ -446,7 +449,7 @@ type DayStats struct {
 // ReviewsPerDay returns one entry per day for the last `days` days (UTC), oldest first.
 func (s *Store) ReviewsPerDay(accountID int64, days int, now time.Time) ([]DayStats, error) {
 	today := now.UTC().Truncate(24 * time.Hour)
-	start := today.AddDate(0, 0, -(days - 1))
+	start := time.Unix(DayWindowStart(days, now), 0).UTC()
 	rows, err := s.db.Query(`SELECT date(started_at,'unixepoch'), COALESCE(SUM(status='posted'),0), COALESCE(SUM(status='error'),0),
   COALESCE(SUM(comments+notes),0), COALESCE(SUM(sev_p1+sev_p2),0)
 FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY 1`, start.Unix(), accountID, accountID)
@@ -548,6 +551,13 @@ func (s *Store) OrgSummaries(only []int64) ([]OrgSummary, error) {
 		out = append(out, sm)
 	}
 	return out, nil
+}
+
+// DayWindowStart is the start (midnight UTC) of the last `days` whole UTC
+// days up to now, today included: the range ReviewsPerDay charts. Totals
+// shown beside a chart use it too, so they add up to the chart's bars.
+func DayWindowStart(days int, now time.Time) int64 {
+	return now.UTC().Truncate(24*time.Hour).AddDate(0, 0, -(days - 1)).Unix()
 }
 
 // NormLogin lowercases a GitHub login for comparisons.

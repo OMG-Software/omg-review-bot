@@ -339,7 +339,7 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 		t.Fatalf("expected 1 review-started comment, got %d: %q", len(gh.posted), gh.posted)
 	}
 	for _, want := range []string{"**Review started** on `aaa111`", "- **Model:** `test-model`",
-		"- **Review skill:** `default-code-review`", time.Now().UTC().Format("2006-01-02 "), " UTC\n", "<!-- prbot:review-started -->"} {
+		"- **Review skill:** `default-code-review`", time.Now().UTC().Format("2006-01-02 "), " UTC\n", "<!-- prbot:review-started sha=aaa111 -->"} {
 		if !strings.Contains(gh.posted[0], want) {
 			t.Errorf("review-started comment missing %q:\n%s", want, gh.posted[0])
 		}
@@ -527,5 +527,40 @@ func TestStaleSnapshotIgnored(t *testing.T) {
 	}
 	if u, _ := b.applyPull(cfg, r, pull("ccc", "2026-01-01T00:15:00Z"), false); u.stale || !u.pushed {
 		t.Errorf("newer update not applied: %+v", u)
+	}
+}
+
+// TestReviewNotice: the notice names the commit, time, model and skill; a
+// failed review says so (with no error details, which can name internal
+// hosts); and a retry finds the bot's own notice for the same commit.
+func TestReviewNotice(t *testing.T) {
+	n := reviewNotice{head: "abc1234567", model: "m`x", skill: "", started: time.Date(2026, 11, 20, 14, 3, 5, 0, time.UTC)}
+	started := n.startedBody()
+	for _, want := range []string{"**Review started** on `abc1234`", "- **Started:** 2026-11-20 14:03:05 UTC",
+		"- **Model:** `mx`", "- **Review skill:** (none)", "<!-- prbot:review-started sha=abc1234567 -->"} {
+		if !strings.Contains(started, want) {
+			t.Errorf("started notice missing %q:\n%s", want, started)
+		}
+	}
+	if f := n.failedBody(true); !strings.Contains(f, "**Review didn't finish**") || !strings.Contains(f, "tried again automatically") ||
+		!strings.Contains(f, noticeMarker(n.head)) {
+		t.Errorf("failed notice (retrying):\n%s", f)
+	}
+	if f := n.failedBody(false); !strings.Contains(f, "won't be retried") {
+		t.Errorf("failed notice (final):\n%s", f)
+	}
+
+	bot := github.User{Login: botLogin}
+	cs := []github.IssueComment{
+		{ID: 1, User: bot, Body: noticeMarker("other")},
+		{ID: 2, User: github.User{Login: "mallory"}, Body: noticeMarker(n.head)}, // not the bot's
+		{ID: 3, User: bot, Body: started},
+		{ID: 4, User: bot, Body: "unrelated"},
+	}
+	if id := findNotice(cs, botLogin, n.head); id != 3 {
+		t.Errorf("findNotice = %d, want 3", id)
+	}
+	if id := findNotice(cs, botLogin, "nothing"); id != 0 {
+		t.Errorf("findNotice for an unknown commit = %d, want 0", id)
 	}
 }

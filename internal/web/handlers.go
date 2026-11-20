@@ -176,9 +176,9 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		s.orgsPage(w, r)
 		return
 	}
-	since := time.Now().Add(-30 * 24 * time.Hour).Unix()
-	stats, _ := s.store.ReviewStatsSince(store.AllAccounts, since)
-	days, _ := s.store.ReviewsPerDay(store.AllAccounts, 30, time.Now())
+	now := time.Now()
+	stats, _ := s.store.ReviewStatsSince(store.AllAccounts, store.DayWindowStart(30, now)) // the chart's days
+	days, _ := s.store.ReviewsPerDay(store.AllAccounts, 30, now)
 	reviews, _ := s.store.RecentReviews(store.AllAccounts, 10)
 	acts, _ := s.store.RecentActivity(store.AllAccounts, 15, "", 0)
 	counts, _ := s.store.CountPRsByStatus(store.AllAccounts)

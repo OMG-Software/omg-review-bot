@@ -285,3 +285,14 @@ func TestLastOwnerGuard(t *testing.T) {
 		t.Errorf("removing someone already gone: %v", err)
 	}
 }
+
+// TestDayWindowStart: totals and the per-day chart cover the same whole UTC days.
+func TestDayWindowStart(t *testing.T) {
+	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
+	if got, want := DayWindowStart(30, now), time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC).Unix(); got != want {
+		t.Errorf("DayWindowStart(30) = %s, want 1 May midnight", time.Unix(got, 0).UTC())
+	}
+	if got := DayWindowStart(1, now); got != time.Date(2026, 5, 30, 0, 0, 0, 0, time.UTC).Unix() {
+		t.Errorf("DayWindowStart(1) = %s, want today's midnight", time.Unix(got, 0).UTC())
+	}
+}

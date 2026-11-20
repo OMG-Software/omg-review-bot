@@ -528,6 +528,13 @@ func (c *Client) CreateIssueComment(ctx context.Context, fullName string, number
 	return &r, nil
 }
 
+// UpdateIssueComment replaces the text of a PR conversation comment.
+func (c *Client) UpdateIssueComment(ctx context.Context, fullName string, commentID int64, body string) error {
+	path := fmt.Sprintf("/repos/%s/issues/comments/%d", fullName, commentID)
+	_, err := c.do(ctx, http.MethodPatch, path, map[string]string{"body": body}, nil, nil)
+	return err
+}
+
 func (c *Client) Reviews(ctx context.Context, fullName string, number int) ([]Review, error) {
 	return list[Review](ctx, c, fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100", fullName, number), 0)
 }

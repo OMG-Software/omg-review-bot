@@ -74,7 +74,7 @@ func (s *Server) orgOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := time.Now()
-	since := now.Add(-time.Duration(days) * 24 * time.Hour).Unix()
+	since := store.DayWindowStart(days, now) // the chart's first day, so totals match it
 	stats, _ := s.store.ReviewStatsSince(org.ID, since)
 	perDay, _ := s.store.ReviewsPerDay(org.ID, days, now)
 	repoStats, _ := s.store.RepoStatsSince(org.ID, since, 15)
@@ -247,7 +247,11 @@ func (s *Server) memberFor(w http.ResponseWriter, r *http.Request) (*store.Org, 
 	if org == nil {
 		return nil, nil
 	}
-	uid, _ := strconv.ParseInt(r.PathValue("uid"), 10, 64)
+	uid, err := strconv.ParseInt(r.PathValue("uid"), 10, 64)
+	if err != nil || uid <= 0 {
+		s.notFound(w, r)
+		return nil, nil
+	}
 	m, err := s.store.GetMembership(org.ID, uid)
 	if err != nil || m == nil {
 		s.notFound(w, r)

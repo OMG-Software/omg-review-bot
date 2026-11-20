@@ -580,3 +580,25 @@ func TestAddFormDoesntChangeRoles(t *testing.T) {
 		t.Errorf("bob's role changed through the add form: %+v", m)
 	}
 }
+
+// TestMemberIDMustBeValid: a zero or malformed member ID matches nobody,
+// rather than the organization's first member.
+func TestMemberIDMustBeValid(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice owns acme
+	s.post("/orgs/acme/members", url.Values{"login": {"bob"}, "role": {"owner"}})
+	for _, p := range []string{"/orgs/acme/members/0/remove", "/orgs/acme/members/x/remove", "/orgs/acme/members/-1/role"} {
+		if code, _ := s.post(p, url.Values{"role": {"member"}}); code != http.StatusNotFound {
+			t.Errorf("POST %s = %d, want 404", p, code)
+		}
+	}
+	for _, id := range []int64{aliceID, bobID} {
+		if m, _ := s.st.GetMembership(acmeID, id); m == nil || m.Role != store.RoleOwner {
+			t.Errorf("member %d changed: %+v", id, m)
+		}
+	}
+	if m, _ := s.st.GetMembership(acmeID, 0); m != nil {
+		t.Errorf("GetMembership(org, 0) = %+v, want nil", m)
+	}
+}
