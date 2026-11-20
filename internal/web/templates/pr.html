@@ -15,11 +15,11 @@
   <div class="actions">
     <form method="post" action="/prs/{{.Repo}}/{{.Number}}/review" class="inline"><button class="primary">Review now</button></form>
     <form method="post" action="/prs/{{.Repo}}/{{.Number}}/replies" class="inline"><button>Check replies</button></form>
-    {{if .Skip}}
+    {{if $.D.CanManage}}{{if .Skip}}
     <form method="post" action="/prs/{{.Repo}}/{{.Number}}/skip" class="inline"><input type="hidden" name="skip" value="0"><button>Resume automatic reviews</button></form>
     {{else}}
     <form method="post" action="/prs/{{.Repo}}/{{.Number}}/skip" class="inline"><input type="hidden" name="skip" value="1"><button>Stop automatic reviews</button></form>
-    {{end}}
+    {{end}}{{end}}
   </div>
 </div>
 {{end}}
@@ -28,7 +28,7 @@
   <h2>Reviews</h2>
   {{if .D.Reviews}}
   <table>
-    <thead><tr><th>#</th><th>Commit</th><th>Result</th><th>Comments</th><th>Model</th><th>Tokens</th><th>When</th></tr></thead>
+    <thead><tr><th>#</th><th>Commit</th><th>Result</th><th>Findings</th><th>P1–P2</th><th>Fixed</th><th>Model</th><th>Tokens</th><th>When</th></tr></thead>
     <tbody>
     {{range .D.Reviews}}
     <tr>
@@ -36,6 +36,8 @@
       <td><code>{{short .HeadSHA}}</code></td>
       <td><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span>{{if .URL}} <a href="{{.URL}}" target="_blank" rel="noopener">view ↗</a>{{end}}</td>
       <td>{{.Comments}}{{if .Notes}} + {{.Notes}} notes{{end}}</td>
+      {{if .Detailed}}<td>{{add (index .Sev 0) (index .Sev 1)}}</td>
+      <td>{{.Fixed}}</td>{{else}}<td class="muted" title="Not recorded for reviews from before the upgrade">—</td><td class="muted">—</td>{{end}}
       <td><code>{{.Model}}</code></td>
       <td>{{.PromptTokens}} / {{.CompletionTokens}}</td>
       <td title="{{when .StartedAt}}">{{ago .StartedAt}}</td>
@@ -48,11 +50,11 @@
 
 <div class="card">
   <h2>Activity</h2>
-  {{template "activity-list" .D.Activity}}
+  {{template "pr-activity" .D.Activity}}
 </div>
 {{end}}
 
-{{define "activity-list"}}
+{{define "pr-activity"}}
 {{if .}}
 <ul class="log">
 {{range .}}<li class="lvl-{{.Level}}"><span class="ts" title="{{when .TS}}">{{ago .TS}}</span> <span class="msg">{{.Message}}</span></li>{{end}}

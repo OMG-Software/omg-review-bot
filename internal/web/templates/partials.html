@@ -1,0 +1,122 @@
+{{/* Pieces shared by several pages. */}}
+
+{{define "org-tabs"}}
+{{$b := orgPath .Org.Login}}
+<div class="orgbar">
+  <a class="orgname" href="{{$b}}">{{.Org.Login}}</a>
+  {{if .Org.Personal}}<span class="pill">personal account</span>{{end}}
+  {{if not .Org.Active}}<span class="pill s-error" title="The GitHub App is no longer installed here. History is kept.">App uninstalled</span>{{end}}
+  <span class="pill">{{if eq .Role "admin"}}administrator{{else}}{{.Role}}{{end}}</span>
+  <nav class="tabs">
+    <a href="{{$b}}" class="{{if eq .Tab "overview"}}active{{end}}">Overview</a>
+    <a href="{{$b}}/prs" class="{{if eq .Tab "prs"}}active{{end}}">Pull requests</a>
+    <a href="{{$b}}/reviews" class="{{if eq .Tab "reviews"}}active{{end}}">Reviews</a>
+    <a href="{{$b}}/repos" class="{{if eq .Tab "repos"}}active{{end}}">Repositories</a>
+    <a href="{{$b}}/members" class="{{if eq .Tab "members"}}active{{end}}">Members</a>
+    <a href="{{$b}}/settings" class="{{if eq .Tab "settings"}}active{{end}}">Review settings</a>
+    <a href="{{$b}}/activity" class="{{if eq .Tab "activity"}}active{{end}}">Activity</a>
+  </nav>
+</div>
+{{end}}
+
+{{define "activity-list"}}
+{{if .}}
+<ul class="log">
+{{range .}}
+  <li class="lvl-{{.Level}}"><span class="ts" title="{{when .TS}}">{{ago .TS}}</span>
+  {{if .Repo}}{{if and .Number (not (earlier .Repo))}}<a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a>{{else if .Number}}<span class="muted">{{.Repo}}#{{.Number}}</span>{{else}}<span class="muted">{{.Repo}}</span>{{end}}{{end}}
+  <span class="msg">{{.Message}}</span></li>
+{{end}}
+</ul>
+{{else}}<p class="muted">Nothing yet.</p>{{end}}
+{{end}}
+
+{{define "review-table"}}
+{{if .}}
+<table>
+  <thead><tr><th>PR</th><th>Commit</th><th>Result</th><th>Findings</th><th>P1–P2</th><th>Fixed</th><th>Duration</th><th>When</th></tr></thead>
+  <tbody>
+  {{range .}}
+    <tr>
+      <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}#{{.Number}}</span>{{else}}<a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a>{{end}}</td>
+      <td><code>{{short .HeadSHA}}</code></td>
+      <td><a href="/reviews/{{.ID}}"><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span></a>{{if eq .Event "APPROVE"}} <span class="pill s-reviewed">approved</span>{{end}}</td>
+      <td>{{.Comments}}{{if .Notes}} + {{.Notes}} notes{{end}}</td>
+      {{if .Detailed}}<td>{{$s := index .Sev 0}}{{$m := index .Sev 1}}{{if or $s $m}}<b>{{add $s $m}}</b>{{else}}<span class="muted">0</span>{{end}}</td>
+      <td>{{if .Fixed}}{{.Fixed}}{{else}}<span class="muted">0</span>{{end}}</td>{{else}}<td class="muted" title="Not recorded for reviews from before the upgrade">—</td><td class="muted">—</td>{{end}}
+      <td>{{dur .StartedAt .FinishedAt}}</td>
+      <td title="{{when .StartedAt}}">{{ago .StartedAt}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No reviews yet.</p>{{end}}
+{{end}}
+
+{{define "stat-tiles"}}
+<div class="stats">
+  <div class="stat"><span class="label">Reviews posted</span><span class="value">{{num .Posted}}</span>
+    <span class="sub">{{.PRs}} pull requests · {{.Repos}} repos</span></div>
+  <div class="stat"><span class="label">Findings posted</span><span class="value">{{num .Findings}}</span>
+    <span class="sub">{{.Comments}} inline · {{.Notes}} in summary</span></div>
+  <div class="stat"><span class="label">Critical + major</span><span class="value">{{add (index .Sev 0) (index .Sev 1)}}</span>
+    <span class="sub">{{index .Sev 0}} P1 · {{index .Sev 1}} P2</span>{{if .Undetailed}}<span class="sub muted">not known for {{.Undetailed}} earlier {{if eq .Undetailed 1}}review{{else}}reviews{{end}}</span>{{end}}</div>
+  <div class="stat"><span class="label">Confirmed fixed</span><span class="value">{{num .Fixed}}</span>
+    <span class="sub">earlier findings, confirmed in this period</span>{{if .Undetailed}}<span class="sub muted">not known for {{.Undetailed}} earlier {{if eq .Undetailed 1}}review{{else}}reviews{{end}}</span>{{end}}</div>
+  <div class="stat"><span class="label">Approvals</span><span class="value">{{.Approvals}}</span></div>
+  <div class="stat"><span class="label">Average review</span><span class="value small">{{secs .AvgSeconds}}</span>
+    <span class="sub">{{if .Errors}}<span class="bad">{{.Errors}} failed</span>{{else}}none failed{{end}}</span></div>
+  <div class="stat"><span class="label">Model tokens</span><span class="value small">{{num64 .PromptTokens}} in · {{num64 .CompletionTokens}} out</span></div>
+</div>
+{{end}}
+
+{{define "day-chart"}}
+<figure class="chart">
+  <figcaption><b>Reviews posted per day</b> <span class="muted">(UTC; hover a day for its findings)</span></figcaption>
+  {{dayChart .}}
+  <details class="table-view"><summary>Show as a table</summary>
+    <table><thead><tr><th>Day</th><th>Reviews posted</th><th>Findings</th><th>P1–P2</th><th>Failed</th></tr></thead><tbody>
+    {{range .}}<tr><td>{{.Day.Format "Mon 2 Jan"}}</td><td>{{.Posted}}</td><td>{{.Findings}}</td><td>{{.Serious}}</td><td>{{.Errors}}</td></tr>{{end}}
+    </tbody></table>
+  </details>
+</figure>
+{{end}}
+
+{{/* The review policy fields. Dot: a map with P (settings.Policy) and Severities. */}}
+{{define "policy-review"}}
+{{$p := .P}}
+<label class="check"><input type="checkbox" name="rv_enabled" {{if $p.Review.Enabled}}checked{{end}}> Review pull requests automatically</label>
+<label class="check"><input type="checkbox" name="rv_skip_drafts" {{if $p.Review.SkipDrafts}}checked{{end}}> Skip draft PRs until they're marked ready</label>
+<label class="check"><input type="checkbox" name="rv_existing" {{if $p.Review.ReviewExisting}}checked{{end}}> Also review PRs that were already open when a repository is first watched</label>
+<div class="row">
+  <label>Wait after push (s) <input name="rv_debounce" type="number" min="0" value="{{$p.Review.DebounceSeconds}}"></label>
+  <label>Max comments per review <input name="rv_max_comments" type="number" min="1" max="100" value="{{$p.Review.MaxComments}}"></label>
+  <label>Max files per PR <input name="rv_max_files" type="number" min="1" value="{{$p.Review.MaxFiles}}"></label>
+</div>
+<div class="row">
+  <label>Post comments at
+    <select name="rv_comment_level">{{range .Severities}}<option value="{{.ID}}" {{if eq .ID $p.Review.CommentLevel}}selected{{end}}>{{.Label}} and above</option>{{end}}</select>
+    <small>Less severe findings are counted in the review summary but not posted.</small></label>
+  <label>Approve when nothing is unresolved at
+    <select name="rv_approval_level"><option value="off" {{if eq "off" $p.Review.ApprovalLevel}}selected{{end}}>Never approve</option>{{range .Severities}}<option value="{{.ID}}" {{if eq .ID $p.Review.ApprovalLevel}}selected{{end}}>{{.Label}} and above</option>{{end}}</select>
+    <small>Can't be broader than the comment level. The bot withdraws its approval if a new push brings back a finding at this level.</small></label>
+</div>
+<p class="hint">Levels: {{range $i, $v := .Severities}}{{if $i}} · {{end}}<b>{{$v.Label}}</b> {{$v.Meaning}}{{end}}.
+  When a later push fixes a finding, the bot replies in its thread to confirm and then resolves it.</p>
+<div class="row">
+  <label class="grow">Skip PRs with these labels <textarea name="rv_skip_labels" rows="3">{{lines $p.Review.SkipLabels}}</textarea></label>
+  <label class="grow">Ignore files matching <small>(gitignore-style, one per line)</small><textarea name="rv_ignore" rows="6" class="mono">{{lines $p.Review.IgnorePatterns}}</textarea></label>
+</div>
+<label>Project guideline files <small>(gitignore-style, one per line; empty = don't read any)</small>
+  <textarea name="rv_guidelines" rows="5" class="mono">{{lines $p.Review.GuidelineFiles}}</textarea>
+  <small>The repository's own rules and conventions, read from the PR's base branch and applied in reviews and replies.
+    A pattern with a <code>/</code> matches from the repository root. <code>CLAUDE.md</code> and <code>AGENTS.md</code> in a subdirectory only apply to PRs that change files under it.
+    They get up to 15% of the model context.</small></label>
+{{end}}
+
+{{define "policy-replies"}}
+{{$p := .P}}
+<label class="check"><input type="checkbox" name="rp_enabled" {{if $p.Replies.Enabled}}checked{{end}}> Reply when someone responds to one of the bot's review comments</label>
+<label class="check"><input type="checkbox" name="rp_mentions" {{if $p.Replies.Mentions}}checked{{end}}> Answer when the bot is @mentioned in a PR conversation</label>
+<label>Max bot replies per thread <input name="rp_max" type="number" min="1" value="{{$p.Replies.MaxPerThread}}"></label>
+{{end}}

@@ -12,11 +12,48 @@
   <div class="stat"><span class="label">Bot account</span><span class="value small">{{if .BotLogin}}{{.BotLogin}}{{else}}—{{end}}</span></div>
   <div class="stat"><span class="label">Last poll</span><span class="value small">{{agoT .LastPoll}}</span>
     {{if .LastPollErr}}<span class="sub bad" title="{{.LastPollErr}}">{{.LastPollErr}}</span>{{end}}</div>
+  <div class="stat"><span class="label">Webhooks</span><span class="value small">{{if .WebhooksActive}}receiving · last {{agoT .LastWebhook}}{{else if not .LastWebhook.IsZero}}last {{agoT .LastWebhook}}{{else if $.D.WebhookOn}}none received yet{{else}}off (polling){{end}}</span>
+    <span class="sub"><a href="/admin/webhooks">{{$.D.Deliveries24h}} deliveries in 24h →</a></span></div>
   <div class="stat wide"><span class="label">Working on</span><span class="value small">{{if .Current}}{{.Current}} <span class="muted">({{agoT .CurrentSince}})</span>{{else}}idle{{end}}</span></div>
   <div class="stat"><span class="label">Queue</span><span class="value">{{.QueueLen}}</span></div>
   <div class="stat"><span class="label">GitHub API calls left</span><span class="value">{{if ge .RateRemaining 0}}{{.RateRemaining}}{{else}}—{{end}}</span></div>
 </div>
 {{end}}
+
+{{if not .D.SignIn}}
+<div class="card warn"><h3>GitHub sign-in is off</h3>
+  <p>Only the administrator password works. To let organizations sign in and see their reviews, add the App's <b>client ID and secret</b> in <a href="/settings#signin">Settings → Sign-in and webhooks</a>.</p></div>
+{{end}}
+
+<h2 class="section">Last 30 days, all organizations</h2>
+{{template "stat-tiles" .D.Stats}}
+<div class="grid2">
+  <div class="card">{{template "day-chart" .D.Days}}</div>
+  <div class="card"><figure class="chart"><figcaption><b>Findings posted by level</b>{{if .D.Stats.Undetailed}} <span class="muted">· not known for {{.D.Stats.Undetailed}} earlier {{if eq .D.Stats.Undetailed 1}}review{{else}}reviews{{end}}</span>{{end}}</figcaption>{{sevChart .D.Stats.Sev}}</figure></div>
+</div>
+
+<div class="card">
+  <h2>Organizations <a class="small" href="/orgs">all →</a></h2>
+  {{if .D.Orgs}}
+  <table>
+    <thead><tr><th>Organization</th><th>Members</th><th>Repositories</th><th>Open PRs</th><th>Reviews (30d)</th><th>Findings (30d)</th><th>Last review</th></tr></thead>
+    <tbody>
+    {{range .D.Orgs}}
+    <tr>
+      <td><a href="{{orgPath .Login}}">{{.Login}}</a>{{if not .Active}} <span class="pill s-error">uninstalled</span>{{end}}{{if not .Owners}} <span class="pill s-draft" title="Nobody has signed in as an owner yet">no owner</span>{{end}}</td>
+      <td>{{.Members}}</td>
+      <td>{{.EnabledRepos}} / {{.Repos}}</td>
+      <td>{{.OpenPRs}}</td>
+      <td>{{.Reviews30d}}</td>
+      <td>{{.Findings30d}}</td>
+      <td>{{if .LastReview}}{{ago .LastReview}}{{else}}<span class="muted">never</span>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <p class="hint">{{.D.Users}} people have signed in or been added. <a href="/admin/users">Manage users →</a></p>
+  {{else}}<p class="muted">No organizations yet. They appear once the GitHub App is installed somewhere and the repository list syncs.</p>{{end}}
+</div>
 
 <div class="card">
   <h2>Open pull requests</h2>
@@ -26,40 +63,12 @@
 </div>
 
 <div class="card">
-  <h2>Recent reviews</h2>
-  {{if .D.Reviews}}
-  <table>
-    <thead><tr><th>PR</th><th>Commit</th><th>Result</th><th>Comments</th><th>Duration</th><th>When</th></tr></thead>
-    <tbody>
-    {{range .D.Reviews}}
-      <tr>
-        <td><a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a></td>
-        <td><code>{{short .HeadSHA}}</code></td>
-        <td><a href="/reviews/{{.ID}}"><span class="pill s-{{.Status}}">{{.Status}}</span></a></td>
-        <td>{{.Comments}}{{if .Notes}} + {{.Notes}} notes{{end}}</td>
-        <td>{{dur .StartedAt .FinishedAt}}</td>
-        <td title="{{when .StartedAt}}">{{ago .StartedAt}}</td>
-      </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{else}}<p class="muted">No reviews yet.</p>{{end}}
+  <h2>Recent reviews <a class="small" href="/reviews">all →</a></h2>
+  {{template "review-table" .D.Reviews}}
 </div>
 
 <div class="card">
   <h2>Activity <a class="small" href="/activity">all →</a></h2>
   {{template "activity-list" .D.Activity}}
 </div>
-{{end}}
-
-{{define "activity-list"}}
-{{if .}}
-<ul class="log">
-{{range .}}
-  <li class="lvl-{{.Level}}"><span class="ts" title="{{when .TS}}">{{ago .TS}}</span>
-  {{if .Repo}}{{if .Number}}<a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a>{{else}}<span class="muted">{{.Repo}}</span>{{end}}{{end}}
-  <span class="msg">{{.Message}}</span></li>
-{{end}}
-</ul>
-{{else}}<p class="muted">Nothing yet.</p>{{end}}
 {{end}}

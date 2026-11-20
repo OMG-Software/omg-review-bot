@@ -1,0 +1,45 @@
+{{define "content"}}
+<h1>Reviews</h1>
+<form method="get" action="{{.D.Base}}" class="row filters">
+  <label>Repository
+    <select name="repo"><option value="">All repositories</option>
+      {{range .D.Repos}}<option value="{{.}}" {{if eq . $.D.Repo}}selected{{end}}>{{.}}</option>{{end}}
+    </select></label>
+  <label>Result
+    <select name="status"><option value="">Any result</option>
+      {{range .D.Statuses}}<option value="{{.}}" {{if eq . $.D.Status}}selected{{end}}>{{.}}</option>{{end}}
+    </select></label>
+  <div class="actions end"><button>Filter</button>{{if or .D.Repo .D.Status}} <a href="{{.D.Base}}">Clear</a>{{end}}</div>
+</form>
+<div class="card">
+  <p class="muted">{{.D.Total}} reviews{{if gt .D.Pages 1}} · page {{.D.Page}} of {{.D.Pages}}{{end}}</p>
+  {{if .D.Reviews}}
+  <table>
+    <thead><tr><th>#</th>{{if not $.Org}}<th>Organization</th>{{end}}<th>PR</th><th>Commit</th><th>Result</th><th>Findings</th><th>P1</th><th>P2</th><th>P3</th><th>P4</th><th>P5</th><th>Fixed</th><th>Model</th><th>Tokens</th><th>When</th></tr></thead>
+    <tbody>
+    {{range .D.Reviews}}
+    <tr>
+      <td><a href="/reviews/{{.ID}}">{{.ID}}</a></td>
+      {{if not $.Org}}<td>{{with index $.D.OrgNames .AccountID}}<a href="{{orgPath .}}">{{.}}</a>{{else}}<span class="muted">—</span>{{end}}</td>{{end}}
+      <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}#{{.Number}}</span>{{else}}<a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a>{{end}}</td>
+      <td><code>{{short .HeadSHA}}</code></td>
+      <td><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span>{{if eq .Event "APPROVE"}} <span class="pill s-reviewed">approved</span>{{end}}{{if .URL}} <a href="{{.URL}}" target="_blank" rel="noopener" title="Open on GitHub">↗</a>{{end}}</td>
+      <td>{{.Comments}}{{if .Notes}} + {{.Notes}}{{end}}</td>
+      {{if .Detailed}}{{range .Sev}}<td>{{if .}}{{.}}{{else}}<span class="muted">·</span>{{end}}</td>{{end}}
+      <td>{{if .Fixed}}{{.Fixed}}{{else}}<span class="muted">·</span>{{end}}</td>{{else}}<td class="muted" colspan="6" title="Not recorded for reviews from before the upgrade">—</td>{{end}}
+      <td><code>{{.Model}}</code></td>
+      <td>{{num .PromptTokens}} / {{num .CompletionTokens}}</td>
+      <td title="{{when .StartedAt}}">{{ago .StartedAt}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="muted">No reviews match.</p>{{end}}
+  {{if gt .D.Pages 1}}
+  <p class="pager">
+    {{if gt .D.Page 1}}<a href="{{query .D.Base "repo" .D.Repo "status" .D.Status "page" (sub .D.Page 1)}}">← Newer</a>{{end}}
+    {{if lt .D.Page .D.Pages}}<a href="{{query .D.Base "repo" .D.Repo "status" .D.Status "page" (add .D.Page 1)}}">Older →</a>{{end}}
+  </p>
+  {{end}}
+</div>
+{{end}}

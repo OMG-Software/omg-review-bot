@@ -61,10 +61,22 @@ var reviewSchema = map[string]any{
 }
 
 func (b *Bot) handleReview(ctx context.Context, j job) {
-	st := b.Settings()
 	b.prMu.Lock()
 	pr, err := b.store.GetPR(j.repo, j.number)
-	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" ||
+	var st settings.Settings
+	if err == nil && pr != nil {
+		if st, err = b.policySettings(b.Settings(), pr.AccountID); err != nil {
+			// Not reviewed with the wrong policy. enqueueDue tries again, but
+			// not a manual review if automatic ones are off: that's retried
+			// here.
+			b.logf("warn", pr.Repo, pr.Number, "review postponed: couldn't read the organization's policy: %v", err)
+			if j.force && pr.AccountID == j.account {
+				b.retryForced(j)
+			}
+		}
+	}
+	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" || !allowedRepo(st, pr.Repo) ||
+		(j.force && pr.AccountID != j.account) || // the name passed to another account since it was asked for
 		(!j.force && (pr.Status != "pending" || !st.Review.Enabled)) {
 		b.prMu.Unlock()
 		return
@@ -74,13 +86,15 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	_ = b.store.SavePR(pr)
 	b.prMu.Unlock()
 
-	b.setCurrent("Reviewing %s#%d", pr.Repo, pr.Number)
+	b.setCurrent(pr, "Reviewing %s#%d", pr.Repo, pr.Number)
 	sha, err := b.reviewPR(ctx, st, pr)
 
 	b.prMu.Lock()
 	defer b.prMu.Unlock()
 	cur, _ := b.store.GetPR(j.repo, j.number)
-	if cur == nil {
+	if cur == nil || cur.AccountID != pr.AccountID {
+		// Gone, or the name passed to another account while reviewing: this
+		// result isn't that PR's.
 		return
 	}
 	cur.Status = "" // leave "reviewing" so recompute can decide
@@ -109,6 +123,59 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		b.recompute(cur, st) // the head may have moved while we were reviewing
 	}
 	_ = b.store.SavePR(cur)
+	// The run loop may be asleep until a deadline worked out before this
+	// one (a retry, say) existed.
+	b.kickDue()
+}
+
+// retryForced queues a manual review again once its organization's policy
+// couldn't be read, waiting twice as long each time, up to half an hour.
+func (b *Bot) retryForced(j job) {
+	j.tries++
+	wait := b.policyRetry
+	for i := 1; i < j.tries && wait < 30*time.Minute; i++ {
+		wait *= 2
+	}
+	time.AfterFunc(min(wait, 30*time.Minute), func() { b.enqueue(j) })
+}
+
+// announceReview posts the review-started notice, or, when this commit
+// already has one, turns that back into one, so retries and reviews cut
+// short by a restart don't pile up comments (or leave one saying a review
+// is under way). It returns the comment's ID (0 if it couldn't be posted).
+func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.PR, n reviewNotice) int64 {
+	cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number)
+	if err != nil {
+		// This commit may have a notice already (from before a restart), and
+		// a second would leave that one saying a review is under way. The
+		// review goes ahead without one.
+		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier review-started comment, so none is posted: %v", err)
+		return 0
+	}
+	if id := findNotice(cs, b.BotLogin(), n.head); id != 0 {
+		// Even if it can't be edited now, it's this commit's notice: a
+		// second one would leave this one behind, never updated again.
+		// The edit when the review ends tries again.
+		if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err != nil {
+			b.logf("warn", pr.Repo, pr.Number, "could not update the review-started comment: %v", err)
+		}
+		return id
+	}
+	c, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, n.startedBody())
+	if err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not post the review-started comment: %v", err)
+		return 0
+	}
+	return c.ID
+}
+
+// updateNotice edits the review notice, even if the review was cancelled.
+func (b *Bot) updateNotice(cl *github.Client, pr *store.PR, id int64, body string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := cl.UpdateIssueComment(ctx, pr.Repo, id, body); err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not update the review-started comment: %v", err)
+	}
 }
 
 type batch struct {
@@ -227,12 +294,33 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	sk := b.loadSkill(st)
 
 	rec := &store.Review{Repo: pr.Repo, Number: pr.Number, HeadSHA: head, Model: st.LLM.Model, Skill: sk.Name,
-		Status: "running", StartedAt: time.Now().Unix()}
+		Status: "running", StartedAt: time.Now().Unix(), AccountID: pr.AccountID}
 	if id, err := b.store.CreateReview(rec); err == nil {
 		rec.ID = id
 	}
+	notice := reviewNotice{head: head, model: st.LLM.Model, skill: sk.Name, started: time.Unix(rec.StartedAt, 0)}
+	var noticeID int64
 	var raw strings.Builder
 	defer func() {
+		switch {
+		case noticeID == 0:
+		case err == nil:
+			// So the notice doesn't go on saying a review is under way.
+			b.updateNotice(cl, pr, noticeID, notice.postedBody(rec.URL))
+		case errors.Is(err, errSkip):
+			// Not returned once the notice is up today, but if it ever is,
+			// the notice shouldn't stay "under way" either.
+			b.updateNotice(cl, pr, noticeID, notice.skippedBody())
+		default:
+			// Same count handleReview uses to decide on a retry, from the PR
+			// as stored now: pr is from before the fetch, and a push since
+			// may have changed the head the attempts are counted against.
+			attempts := 1
+			if cur, _ := b.store.GetPR(pr.Repo, pr.Number); cur != nil && cur.AttemptSHA == cur.HeadSHA {
+				attempts += cur.Attempts
+			}
+			b.updateNotice(cl, pr, noticeID, notice.failedBody(attempts < maxAttempts))
+		}
 		rec.FinishedAt = time.Now().Unix()
 		rec.Raw = textutil.Truncate(raw.String(), 500_000)
 		switch {
@@ -289,6 +377,11 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	}
 	p := buildPlan(st, files, budget)
 	rec.Batches = len(p.batches)
+	if len(p.batches) > 0 {
+		// Only when there's code to review, so a PR with nothing reviewable
+		// doesn't get a notice that's never followed by a review.
+		noticeID = b.announceReview(ctx, cl, pr, notice)
+	}
 
 	// First check whether earlier findings have since been fixed: confirmed
 	// ones get a reply and are resolved, and no longer block approval.
@@ -296,6 +389,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	if threadsKnown {
 		vu := b.verifyFixes(ctx, st, lc, cl, pr, head, threads, files, &raw)
 		fixed = vu.fixed
+		rec.Fixed = fixed
 		rec.PromptTokens += vu.usage.PromptTokens
 		rec.CompletionTokens += vu.usage.CompletionTokens
 	}
@@ -311,7 +405,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	var summaries []string
 	for i, bt := range p.batches {
 		if len(p.batches) > 1 {
-			b.setCurrent("Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
+			b.setCurrent(pr, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
 		}
 		user := batchPrompt(header, i, len(p.batches), bt, previousFor(mine, bt.paths))
 		var out modelOutput
@@ -382,6 +476,12 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	}
 	rec.GHReviewID, rec.URL = rv.ID, rv.HTMLURL
 	rec.Summary, rec.Comments, rec.Notes, rec.Status = summary, len(drafts), len(ri.notes), "posted"
+	rec.Event = event
+	for _, f := range append(append([]finding{}, ri.inline...), ri.notes...) {
+		if r := settings.SeverityRank(f.Severity); r > 0 {
+			rec.Sev[r-1]++
+		}
+	}
 	b.logf("info", pr.Repo, pr.Number, "posted review of %s (%s): %d inline comments, %d notes, %d earlier findings resolved as fixed (%d parts, %d+%d tokens)",
 		short(head), strings.ToLower(event), len(drafts), len(ri.notes), fixed, len(p.batches), rec.PromptTokens, rec.CompletionTokens)
 	return head, nil

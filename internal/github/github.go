@@ -33,8 +33,11 @@ const DefaultBaseURL = "https://api.github.com"
 // ---------- API types (only the fields we use) ----------
 
 type User struct {
-	Login string `json:"login"`
-	Type  string `json:"type"`
+	ID        int64  `json:"id"`
+	Login     string `json:"login"`
+	Type      string `json:"type"` // User | Organization | Bot
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatar_url"`
 }
 
 type Installation struct {
@@ -53,6 +56,7 @@ type Repo struct {
 	ID       int64  `json:"id"`
 	FullName string `json:"full_name"`
 	Archived bool   `json:"archived"`
+	Owner    User   `json:"owner"`
 }
 
 type Ref struct {
@@ -378,6 +382,9 @@ func nextLink(h http.Header) string {
 	return ""
 }
 
+// Base is the REST API base URL the App talks to.
+func (a *App) Base() string { return a.base }
+
 // ---------- installation client ----------
 
 // Client calls the API as one App installation (i.e. as the bot in one org).
@@ -465,6 +472,15 @@ func (c *Client) OpenPulls(ctx context.Context, fullName, etag string) (pulls []
 	return pulls, resp.Header.Get("ETag"), false, nil
 }
 
+// UserByLogin looks up a GitHub user (for adding someone to an org by login).
+func (c *Client) UserByLogin(ctx context.Context, login string) (*User, error) {
+	var u User
+	if _, err := c.do(ctx, http.MethodGet, "/users/"+url.PathEscape(login), nil, nil, &u); err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
 func (c *Client) Pull(ctx context.Context, fullName string, number int) (*PullRequest, error) {
 	var pr PullRequest
 	if _, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/pulls/%d", fullName, number), nil, nil, &pr); err != nil {
@@ -510,6 +526,13 @@ func (c *Client) CreateIssueComment(ctx context.Context, fullName string, number
 		return nil, err
 	}
 	return &r, nil
+}
+
+// UpdateIssueComment replaces the text of a PR conversation comment.
+func (c *Client) UpdateIssueComment(ctx context.Context, fullName string, commentID int64, body string) error {
+	path := fmt.Sprintf("/repos/%s/issues/comments/%d", fullName, commentID)
+	_, err := c.do(ctx, http.MethodPatch, path, map[string]string{"body": body}, nil, nil)
+	return err
 }
 
 func (c *Client) Reviews(ctx context.Context, fullName string, number int) ([]Review, error) {

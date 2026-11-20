@@ -3,29 +3,39 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}} · PR Review Bot</title>
+<title>{{.Title}} · OMG Review Bot</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
-<body{{if eq .Nav "dash"}} data-refresh="15"{{end}}>
+<body{{if or (eq .Nav "dash") (eq .Tab "overview")}} data-refresh="30"{{end}}>
 {{if .Auth}}
 <header class="top">
-  <a class="brand" href="/">🤖 PR Review Bot</a>
+  <a class="brand" href="/">🤖 OMG Review Bot</a>
   <nav>
+    {{if .V.Admin}}
     <a href="/" class="{{if eq .Nav "dash"}}active{{end}}">Dashboard</a>
-    <a href="/prs" class="{{if eq .Nav "prs"}}active{{end}}">Pull requests</a>
+    <a href="/orgs" class="{{if eq .Nav "orgs"}}active{{end}}">Organizations</a>
+    <a href="/reviews" class="{{if and (eq .Nav "reviews") (not .Org)}}active{{end}}">Reviews</a>
+    <a href="/prs" class="{{if and (eq .Nav "prs") (not .Org)}}active{{end}}">Pull requests</a>
     <a href="/repos" class="{{if eq .Nav "repos"}}active{{end}}">Repositories</a>
+    <a href="/admin/users" class="{{if eq .Nav "users"}}active{{end}}">Users</a>
     <a href="/skill" class="{{if eq .Nav "skill"}}active{{end}}">Skill</a>
     <a href="/settings" class="{{if eq .Nav "settings"}}active{{end}}">Settings</a>
     <a href="/activity" class="{{if eq .Nav "activity"}}active{{end}}">Activity</a>
+    {{else}}
+    <a href="/orgs" class="{{if and (eq .Nav "orgs") (not .Org)}}active{{end}}">Organizations</a>
+    {{range .V.Orgs}}<a href="{{orgPath .OrgLogin}}" class="{{if and $.Org (eq $.Org.ID .OrgID)}}active{{end}}">{{.OrgLogin}}</a>{{end}}
+    {{end}}
   </nav>
   <div class="right">
-    <a href="/account" class="{{if eq .Nav "account"}}active{{end}}">Account</a>
+    {{if .V.Avatar}}<img class="avatar" src="{{.V.Avatar}}" alt="" width="24" height="24">{{end}}
+    <a href="/account" class="{{if eq .Nav "account"}}active{{end}}">{{.V.Display}}{{if and .V.Admin (not .V.Local)}} <span class="pill">admin</span>{{end}}</a>
     <form method="post" action="/logout" class="inline"><button class="link">Sign out</button></form>
   </div>
 </header>
 {{end}}
 <main>
+{{if .Org}}{{template "org-tabs" .}}{{end}}
 {{if .Msg}}<div class="flash ok">{{.Msg}}</div>{{end}}
 {{if .Err}}<div class="flash bad">{{.Err}}</div>{{end}}
 {{template "content" .}}

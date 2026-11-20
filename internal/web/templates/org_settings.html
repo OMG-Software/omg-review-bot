@@ -1,0 +1,26 @@
+{{define "content"}}
+<h1>Review settings</h1>
+<p class="lead">{{if .D.Custom}}{{.Org.Login}} uses its own review settings.{{else}}{{.Org.Login}} uses the instance's default review settings. Saving this form gives it its own.{{end}}</p>
+{{if .D.ReadOnly}}<div class="flash warn">Only owners can change these.</div>{{end}}
+<form method="post" action="{{orgPath .Org.Login}}/settings" class="settings">
+<fieldset class="plain" {{if .D.ReadOnly}}disabled{{end}}>
+<section class="card">
+  <h2>Reviews</h2>
+  {{template "policy-review" .D}}
+</section>
+<section class="card">
+  <h2>Conversations</h2>
+  {{template "policy-replies" .D}}
+</section>
+<p class="hint">The model, the review skill and how often GitHub is checked are set for the whole bot by its administrators.</p>
+{{if not .D.ReadOnly}}
+<div class="savebar"><button class="primary">Save review settings</button></div>
+{{end}}
+</fieldset>
+</form>
+{{if and .D.Custom (not .D.ReadOnly)}}
+<form method="post" action="{{orgPath .Org.Login}}/settings" data-confirm="Throw away {{.Org.Login}}'s own review settings and use the instance's defaults?">
+  <input type="hidden" name="inherit" value="1"><button>Use instance defaults instead</button>
+</form>
+{{end}}
+{{end}}

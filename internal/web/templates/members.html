@@ -1,0 +1,58 @@
+{{define "content"}}
+<h1>Members</h1>
+<div class="card">
+<table>
+  <thead><tr><th>Person</th><th>Role</th><th>How</th><th>Last sign-in</th>{{if .CanManage}}<th></th>{{end}}</tr></thead>
+  <tbody>
+  {{range .D.Members}}
+  <tr>
+    <td>{{if .AvatarURL}}<img class="avatar" src="{{.AvatarURL}}" alt="" width="20" height="20"> {{end}}@{{.Login}}{{if .Name}} <span class="muted">{{.Name}}</span>{{end}}{{if .Disabled}} <span class="pill s-error">blocked</span>{{end}}</td>
+    <td><span class="pill {{if eq .Role "owner"}}s-reviewed{{end}}">{{.Role}}</span></td>
+    <td class="muted">{{if eq .Source "github"}}from GitHub role{{else}}added here{{end}}</td>
+    <td>{{if .LastLogin}}{{ago .LastLogin}}{{else}}<span class="muted">not yet</span>{{end}}</td>
+    {{if $.CanManage}}
+    <td class="nowrap">
+      <form method="post" action="{{orgPath $.Org.Login}}/members/{{.ID}}/role" class="inline">
+        {{if eq .Role "owner"}}<input type="hidden" name="role" value="member"><button class="small">Make member</button>
+        {{else}}<input type="hidden" name="role" value="owner"><button class="small">Make owner</button>{{end}}
+      </form>
+      <form method="post" action="{{orgPath $.Org.Login}}/members/{{.ID}}/remove" class="inline" data-confirm="Remove @{{.Login}} from {{$.Org.Login}}?"><button class="small">Remove</button></form>
+    </td>
+    {{end}}
+  </tr>
+  {{else}}
+  <tr><td colspan="5" class="muted">Nobody yet. Admins of the GitHub organization become owners when they sign in.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+{{if .CanManage}}
+<div class="card">
+  <h2>Add someone</h2>
+  <form method="post" action="{{orgPath .Org.Login}}/members" class="row">
+    <label class="grow">GitHub username <input name="login" required placeholder="octocat" autocomplete="off"></label>
+    <label>Role <select name="role"><option value="member">Member: sees stats and reviews</option><option value="owner">Owner: also manages settings and people</option></select></label>
+    <div class="actions end"><button class="primary">Add</button></div>
+  </form>
+  <p class="hint">They sign in with GitHub. Members can see this organization's statistics, pull requests, reviews (including the model's raw output) and activity, and can ask for a review. Owners can also change review settings, repositories and people.</p>
+</div>
+
+<div class="card">
+  <h2>Access from GitHub</h2>
+  <p>Admins of the <b>{{.Org.Login}}</b> GitHub {{if .Org.Personal}}account{{else}}organization{{end}} always become owners here when they sign in.</p>
+  {{if not .Org.Personal}}
+  <form method="post" action="{{orgPath .Org.Login}}/autojoin" class="actions">
+    {{if .Org.AutoJoin}}
+    <span><span class="pill s-reviewed">on</span> Every member of the GitHub organization gets member access when they sign in.</span>
+    <input type="hidden" name="on" value="0"><button>Turn off</button>
+    {{else}}
+    <span><span class="pill">off</span> Other members of the GitHub organization need to be added here.</span>
+    <input type="hidden" name="on" value="1"><button>Let every GitHub org member in</button>
+    {{end}}
+  </form>
+  <p class="hint">Access that came from GitHub is re-checked each time a person signs in, and removed if they've left the organization. Removing someone here doesn't stop that: remove them on GitHub too, or ask an administrator to block them.</p>
+  {{end}}
+</div>
+{{end}}
+{{end}}

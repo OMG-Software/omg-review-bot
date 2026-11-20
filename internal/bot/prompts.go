@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
@@ -95,6 +96,73 @@ func previousFor(mine []github.ReviewComment, paths []string) []string {
 		}
 	}
 	return out
+}
+
+// ---------- the review-started notice ----------
+
+// reviewNotice is the PR comment posted when a review begins: which commit,
+// when (UTC), and the model and skill doing it. It's edited to say so if the
+// review fails, and a retry of the same commit reuses it.
+type reviewNotice struct {
+	head, model, skill string
+	started            time.Time
+}
+
+func (n reviewNotice) startedBody() string {
+	return n.body("🔍 **Review started**", "The review will be posted here when it's done.")
+}
+
+// postedBody says the review is done, with a link to it.
+func (n reviewNotice) postedBody(url string) string {
+	note := "The review is posted below."
+	if url != "" {
+		note = "The review is posted [here](" + url + ")."
+	}
+	return n.body("✅ **Review posted**", note)
+}
+
+// skippedBody says no review was posted after all (the PR closed, say).
+func (n reviewNotice) skippedBody() string {
+	return n.body("⏭️ **Review skipped**", "Nothing was posted for this commit.")
+}
+
+// failedBody says the review didn't finish. The error itself isn't shown: it
+// can name internal hosts. The bot's own pages have it.
+func (n reviewNotice) failedBody(retrying bool) string {
+	next := "It won't be retried until the next push, or until someone asks for a review in the bot."
+	if retrying {
+		next = "It will be tried again automatically."
+	}
+	return n.body("⚠️ **Review didn't finish**", next)
+}
+
+func (n reviewNotice) body(title, note string) string {
+	return fmt.Sprintf("%s on `%s`\n\n- **Started:** %s\n- **Model:** %s\n- **Review skill:** %s\n\n<sub>%s</sub>\n%s",
+		title, short(n.head), n.started.UTC().Format("2006-01-02 15:04:05 UTC"), inlineCode(n.model), inlineCode(n.skill),
+		note, noticeMarker(n.head))
+}
+
+func noticeMarker(head string) string { return "<!-- prbot:review-started sha=" + head + " -->" }
+
+// findNotice returns the bot's latest review notice for a commit (0 if none).
+func findNotice(comments []github.IssueComment, botLogin, head string) int64 {
+	var id int64
+	for _, c := range comments {
+		if strings.EqualFold(c.User.Login, botLogin) && strings.Contains(c.Body, noticeMarker(head)) {
+			id = c.ID
+		}
+	}
+	return id
+}
+
+// inlineCode shows a name as inline code, or "(none)". Backticks are dropped
+// so a name (such as a skill's, from its SKILL.md) can't break out of the span.
+func inlineCode(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "`", ""))
+	if s == "" {
+		return "(none)"
+	}
+	return "`" + s + "`"
 }
 
 // ---------- the bot's own finding comments ----------

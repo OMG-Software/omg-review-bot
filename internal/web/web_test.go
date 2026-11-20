@@ -81,9 +81,10 @@ func TestPagesRender(t *testing.T) {
 	}
 	post("/setup", url.Values{"password": {"supersecret1"}, "confirm": {"supersecret1"}}, ts.URL)
 
-	for _, p := range []string{"/", "/prs", "/prs?all=1", "/repos", "/settings", "/skill", "/activity", "/account"} {
+	for _, p := range []string{"/", "/prs", "/prs?all=1", "/repos", "/settings", "/skill", "/activity", "/account",
+		"/orgs", "/reviews", "/reviews?status=posted&page=2", "/admin/users", "/admin/webhooks"} {
 		code, body := get(p)
-		if code != http.StatusOK || !strings.Contains(body, "PR Review Bot") {
+		if code != http.StatusOK || !strings.Contains(body, "OMG Review Bot") {
 			t.Errorf("GET %s = %d", p, code)
 		}
 	}
@@ -124,10 +125,17 @@ func TestPagesRender(t *testing.T) {
 		t.Error("saved skill not shown")
 	}
 
-	// Signed-out clients are bounced to /login.
+	// Signed-out clients are bounced to /login, which sends them on to the
+	// administrator's page while GitHub sign-in isn't set up.
 	c.Jar, _ = cookiejar.New(nil)
-	if _, body := get("/settings"); !strings.Contains(body, `action="/login"`) {
-		t.Error("expected login page when signed out")
+	if _, body := get("/settings"); !strings.Contains(body, `action="/admin-login"`) || !strings.Contains(body, `name="next" value="/settings"`) {
+		t.Error("expected the administrator sign-in page, keeping the page asked for")
+	}
+	if r := post("/admin-login", url.Values{"password": {"supersecret1"}}, ts.URL); r.StatusCode != http.StatusOK {
+		t.Fatalf("admin sign-in = %d", r.StatusCode)
+	}
+	if code, _ := get("/settings"); code != http.StatusOK {
+		t.Errorf("signed back in, /settings = %d", code)
 	}
 }
 

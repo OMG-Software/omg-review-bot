@@ -40,6 +40,18 @@
     });
   }
 
+  // "Generate" fills a secret field with a random value and shows it, so it
+  // can be copied into the GitHub App's settings before saving.
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-generate]");
+    if (!btn) return;
+    const field = document.getElementById(btn.dataset.generate);
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    field.value = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    field.type = "text";
+    field.select();
+  });
+
   // Confirmation for destructive forms.
   document.addEventListener("submit", (e) => {
     const msg = e.target.dataset.confirm;

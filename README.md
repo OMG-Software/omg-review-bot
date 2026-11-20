@@ -5,8 +5,13 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
 **Ollama Cloud**. It follows a **review skill** (`SKILL.md`) that you install. We recommend
 [code-change-review](https://github.com/OMG-Software/code-change-review-skill).
 
-- **No public endpoint needed.** It connects as a GitHub App and polls, so it works on a laptop
-  behind NAT with no webhook, open port or tunnel.
+- **Webhooks or polling.** It connects as a GitHub App. With a public address it acts on webhooks
+  straight away. Without one it polls, so it also works on a laptop behind NAT with no open port
+  or tunnel.
+- **Many organizations, GitHub sign-in.** One bot can serve every org that installs its App.
+  People sign in with GitHub and see only their own orgs' stats, pull requests, reviews and
+  activity. Org owners manage their members and can give the org its own review settings. An
+  administrator sees everything.
 - **Reviews every push.** New PRs are reviewed, and each new commit triggers a re-review after
   a short wait. It doesn't repeat issues it has already raised.
 - **Inline comments, graded P1–P5.** Each finding is posted on the exact changed line, labelled
@@ -21,16 +26,19 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
 - **Conversations.** It replies when someone answers one of its comments, and answers when
   `@<app-name>` is mentioned in the PR conversation.
 - **Web UI** for settings, the skill, repositories, PR status, review history (including the raw
-  model output) and an activity log.
+  model output), review statistics with charts, and an activity log.
 
 ## Contents
 
 - [Quick start](#quick-start)
+- [Organizations and sign-in](#organizations-and-sign-in)
+- [Webhooks](#webhooks)
 - [Choosing a model](#choosing-a-model)
 - [The review skill](#the-review-skill)
 - [How it works](#how-it-works)
 - [Settings](#settings)
 - [Running as a service](#running-as-a-service)
+- [Behind a reverse proxy (nginx)](#behind-a-reverse-proxy-nginx)
 - [Troubleshooting](#troubleshooting)
 - [Security](#security)
 - [Development](#development)
@@ -49,7 +57,10 @@ prbot
 Linux), so add that folder to your PATH or run the binary from there. To build from a clone
 instead: `go build -o prbot.exe ./cmd/prbot` (on Linux, `-o prbot`).
 
-Open **http://127.0.0.1:8080** and choose an admin password. Then do the following.
+Open **http://127.0.0.1:8080**. On the first visit every page leads to a setup page where you
+choose the administrator password. That signs you in and takes you to **Settings** to connect
+GitHub and a model, as below. To sign in with the password again later, go to
+**http://127.0.0.1:8080/admin-login** (see [Administrator sign-in](#administrator-sign-in)).
 
 ### 1. Create the GitHub App
 
@@ -60,9 +71,11 @@ Developer Program.
 | Field | Value |
 |---|---|
 | Homepage URL | anything, e.g. your org's page |
-| Webhook → Active | **unticked** (the bot polls) |
+| Callback URL | `<bot address>/auth/github/callback`, for [GitHub sign-in](#organizations-and-sign-in). The bot shows the exact URL in **Settings → Sign-in and webhooks**. |
+| Webhook → Active | **unticked** to poll, or ticked to use [webhooks](#webhooks) |
 | Repository permissions | **Pull requests: Read and write** · **Contents: Read-only** · **Metadata: Read-only** |
-| Where can this App be installed | Only on this account |
+| Organization permissions | **Members: Read-only** (lets sign-in read each person's role in the org) |
+| Where can this App be installed | Only on this account, or **Any account** to serve several orgs (see [Adding more organizations](#adding-more-organizations)) |
 
 After creating it, note the **App ID**. It's a number, not the `Iv1…` Client ID. Then click
 **Generate a private key**, which downloads a `.pem` file.
@@ -132,6 +145,145 @@ reviewed.
 > so a backlog doesn't tie up your GPU for hours. To review one, open it on the **Pull requests**
 > page and click **Review now**. To review the whole backlog, tick *Also review PRs that were
 > already open* in Settings before syncing.
+
+## Organizations and sign-in
+
+Each GitHub account (an organization or a personal account) that installs the App becomes an
+**organization** in the bot, and its repositories, PRs, reviews and activity belong to it. Only the
+administrator password works until GitHub sign-in is set up:
+
+1. On the App's GitHub page, copy the **Client ID** and click **Generate a new client secret**.
+2. In the bot, open **Settings → Sign-in and webhooks**. Enter the client ID and secret, and set
+   **Public URL** to the address people use to reach the bot (e.g. `https://prbot.example.com`).
+   The section shows the callback URL to paste into the App's **Callback URL** field.
+3. Save. The sign-in page now shows **Sign in with GitHub**.
+
+**Who gets access.** Access is worked out from GitHub each time someone signs in:
+
+| On GitHub | In the bot |
+|---|---|
+| Admin of an org that installed the App | **Owner** of that org |
+| Member of that org | **Member**, once an owner clicks **Let every GitHub org member in** on the org's Members page; otherwise an owner adds them |
+| Owner of a personal account that installed the App | **Owner** of it |
+
+Owners can also add people by GitHub username on the org's **Members** page, change roles and
+remove people. People added this way keep their access, and the role an owner gave them,
+whatever their GitHub role. Access that came from GitHub is removed at the next sign-in once it
+no longer applies. Removing someone in the bot doesn't stop GitHub giving their access back at
+their next sign-in, so remove them on GitHub too, or have an administrator block them.
+
+Owners can't remove or demote the last owner of an org. For access that came from GitHub,
+though, GitHub decides: if an org's only owner stops being a GitHub admin of it, they lose the
+owner role at their next sign-in, even if that leaves the org with no owner. It gets one back as
+soon as one of its current GitHub admins signs in, or an administrator makes someone an owner.
+
+| Role | Can |
+|---|---|
+| Member | See the org's overview and statistics, pull requests, reviews (including the model's raw output) and activity, and ask for a review with **Review now** |
+| Owner | Also turn repositories on and off, stop reviews on a PR, manage members, and change the org's review settings |
+| Administrator | Everything, in every org: the instance settings, model, skill, users and webhook deliveries |
+
+The password administrator is always an administrator. On the **Users** page they can make a
+GitHub user an administrator, or block someone, which signs them out at once.
+
+### Administrator sign-in
+
+The administrator password has its own sign-in page, **`/admin-login`** (for example
+`https://prbot.example.com/admin-login`). The normal sign-in page, `/login`, only offers
+**Sign in with GitHub** and doesn't link to it, so bookmark it.
+
+- **First run.** You set the password on the setup page and are signed in at once, so you don't
+  need `/admin-login` until you next sign in.
+- **Before GitHub sign-in is set up**, the password is the only way in, so `/login` sends you to
+  `/admin-login` automatically.
+- **Signing out** as the administrator returns you to `/admin-login`; GitHub users return to
+  `/login`.
+- **Forgot the password?** Stop the bot and run `prbot -reset-password`, then set a new one on the
+  setup page. Setting it signs everyone out, so sessions from before the reset stop working.
+  Until a password is set, **anyone who can reach the bot can set it**, so do this before the bot
+  is reachable from the internet again (keep it stopped, or block `/setup` at the proxy), and set it
+  straight away.
+
+Keeping the page separate keeps the password form away from everyday users. It isn't a secret,
+though; the password is what protects it. To limit who can reach it, restrict the path in your
+reverse proxy (see [Behind a reverse proxy](#behind-a-reverse-proxy-nginx)). GitHub users who are
+administrators sign in with GitHub as usual.
+
+**Statistics.** Each org's **Overview** shows, for the last 7, 30 or 90 days: reviews posted,
+findings by level, confirmed fixes, approvals, average review time and model tokens, plus a chart
+of reviews per day and a breakdown by repository. Hover a bar for its numbers, or open **Show as a
+table**. The administrator's dashboard shows the same totals for every org.
+
+**Per-org review settings.** An org uses the instance's review settings until an owner saves its
+**Review settings** page. From then on it has its own: wait after push, comment and approval
+levels, comment cap, drafts, skip labels, guideline and ignore files, and replies. **Use instance
+defaults instead** removes them. The model, the skill and the review queue stay shared, so every
+org's reviews take turns on the same GPU.
+
+### Adding more organizations
+
+One bot can review any number of organizations and personal accounts. Each one installs the same
+GitHub App, and the bot finds the new installation at its next repository sync (every 15 minutes,
+or straight away with **Repositories → Sync from GitHub**).
+
+1. **Let other accounts install the App.** An App set to *Only on this account* can only be
+   installed on the account that owns it. On the App's GitHub page, open **Advanced → Make
+   public**. Public means any GitHub account *can* install it; it isn't listed in the Marketplace.
+   GitHub lets you make it private again only while it's installed on its own account alone.
+2. **Limit which accounts are reviewed.** In **Settings → GitHub App**, list the orgs you serve
+   under **Only these orgs/accounts**, one per line, *before* you share the install link. While
+   the list is empty every installation is reviewed, so anyone who installs the public App gets
+   their PRs reviewed on your model (and your API key, with Ollama Cloud). An installation the list
+   leaves out never becomes an organization in the bot: its repositories aren't listed, polled or
+   reviewed, and nobody gets access through it. Taking an org that's already in the bot off the
+   list pauses it instead; its repositories, settings and history are kept.
+3. **Send the install link** to an owner of each org. It's on the bot's **Organizations** page
+   (**Add an organization → Install the GitHub App**), and is
+   `https://github.com/apps/<app-name>/installations/new`. They pick their org and choose all
+   repositories or only some. Installing needs an org owner or the *GitHub App manager* role; for
+   anyone else, GitHub sends a request that the org's owners approve.
+4. **Sync.** Click **Repositories → Sync from GitHub**, or wait for the next sync. New
+   repositories are watched straight away while *Watch newly discovered repositories
+   automatically* is on (the default). PRs that are already open are marked `baseline`, as in
+   [Start reviewing](#5-start-reviewing).
+5. **Give people access.** With GitHub sign-in set up, the org's GitHub admins become its owners
+   when they sign in, and can add their team (see *Who gets access* above).
+
+To change which repositories are reviewed later, an owner of that org edits the installation on
+GitHub (**the org's Settings → GitHub Apps → the App → Configure → Repository access**). The bot
+picks up the change at its next sync. Uninstalling the App marks the org *App uninstalled* in the
+bot.
+
+**When one bot isn't enough.** Every org shares the model, the skill and the review queue. If an
+org needs its own model or must be kept fully separate, give it its own private App and run a
+second instance with its own data folder and port:
+
+```powershell
+prbot -data C:\prbot\data-other -listen 127.0.0.1:8081
+```
+
+## Webhooks
+
+Polling works anywhere but reacts within a poll interval. With webhooks, GitHub tells the bot about
+pushes, new PRs, replies and installations as they happen. The bot must be reachable from GitHub
+at its **Public URL**.
+
+1. In the bot's **Settings → Sign-in and webhooks**, click **Generate** next to **Webhook secret**,
+   copy it and save.
+2. In the App's GitHub settings, tick **Webhook → Active**. Set **Webhook URL** to
+   `<public URL>/webhooks/github` and **Webhook secret** to the same value.
+3. Under **Subscribe to events**, tick **Pull request**, **Pull request review**, **Pull request
+   review comment**, **Pull request review thread**, **Issue comment** and **Repository**.
+   Installation events are always sent.
+
+The **Webhooks** page (administrators) lists recent deliveries and what the bot did with each.
+Every delivery's `X-Hub-Signature-256` is checked against the secret; unsigned or wrongly signed
+ones are refused, and a redelivery of the same event is ignored. With no secret set, the endpoint
+returns `404`.
+
+Polling carries on as a safety net. While deliveries are arriving (one in the last 24 hours), the
+bot polls only every *While webhooks arrive, poll every* seconds (15 minutes by default) instead of
+every *Poll interval*.
 
 ## Choosing a model
 
@@ -242,7 +394,9 @@ bot fetches them and puts them in the prompt.
 
 **Polling.** Every poll, the bot lists open PRs in each enabled repo, sending the ETag from the
 previous response. Repos with no changes return `304 Not Modified`, which doesn't count against
-the API rate limit. The repo list itself refreshes every 15 minutes by default.
+the API rate limit. The repo list itself refreshes every 15 minutes by default. With
+[webhooks](#webhooks), a pull request event updates the PR at once, and a reply or review-thread
+event checks it for replies, so polling only catches anything missed.
 
 **Reviewing.**
 
@@ -251,7 +405,12 @@ the API rate limit. The repo list itself refreshes every 15 minutes by default.
 2. Files that are ignored, deleted or binary are skipped. Each remaining diff line is labelled
    with its new-file line number, so the model doesn't have to work out line numbers inside diff
    hunks. Large diffs are split into parts that fit the context, and the parts' summaries are
-   combined at the end.
+   combined at the end. If there's anything to review, the bot first posts a PR comment saying the
+   review has started, with the commit, the start time (UTC), the model and the review skill.
+   A PR with nothing reviewable gets no such comment. When the review is posted, the comment is
+   edited to say so, with a link to it. If the review fails, the comment is edited to say that
+   instead (without the error, which is on the PR's page in the bot), and a retry of the same
+   commit reuses it.
 3. The model returns JSON findings. The bot checks each finding's file and line against the
    diff, moving it to the nearest changed line up to 3 lines away if needed. It drops findings
    the bot already raised in an earlier review. It drops findings below the *comment level* and
@@ -305,7 +464,10 @@ reviews* on its page in the UI.
 
 ## Settings
 
-Everything except the command-line flags is set in the web UI and stored in the database.
+Everything except the command-line flags is set in the web UI and stored in the database. The
+review settings below (from *Wait after push* to *Replies / mentions*) are the instance
+defaults; an org owner can override them for their org (see
+[Per-org review settings](#organizations-and-sign-in)).
 
 | Setting | Default | |
 |---|---|---|
@@ -320,6 +482,8 @@ Everything except the command-line flags is set in the web UI and stored in the 
 | Ignore files | lockfiles, `go.sum`, `vendor/`, `node_modules/`, `dist/`, `*.min.js`, `*.map`, `*.pb.go`, `*.snap`, `*.svg` | gitignore-style patterns |
 | Replies / mentions | on / on | Max 5 bot replies per thread |
 | Poll interval | 60 s | Repo list refreshes every 15 min |
+| While webhooks arrive, poll every | 900 s | Used instead of *Poll interval* while webhook deliveries arrive (one in the last 24 h) |
+| Public URL / Client ID / Client secret / Webhook secret | empty | See [Organizations and sign-in](#organizations-and-sign-in) and [Webhooks](#webhooks) |
 | Context tokens / Max output tokens | 32768 / 4096 | Must match how the model is loaded |
 | Temperature | 0.2 | |
 
@@ -352,6 +516,87 @@ install commands. It writes logs to the journal: `journalctl -u prbot -f`.
 **Updating.** Run `go install github.com/OMG-Software/omg-review-bot/cmd/prbot@latest` (or
 rebuild), then restart the bot. Reviews that were interrupted are re-queued on startup.
 
+## Behind a reverse proxy (nginx)
+
+GitHub sign-in and webhooks need the bot to be reachable over HTTPS. The usual way is to keep the
+bot on its default `127.0.0.1:8080` and put nginx in front of it to handle TLS.
+
+**1. Get a certificate first.** nginx refuses a configuration whose certificate files don't
+exist yet, so start with only the port-80 block below (the first `server { … }`), reload nginx,
+and get the certificate:
+
+```bash
+sudo certbot certonly --nginx -d prbot.example.com
+```
+
+**2. Add the HTTPS block** and reload nginx (`sudo nginx -t && sudo systemctl reload nginx`):
+
+```nginx
+server {
+    listen 80;
+    server_name prbot.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name prbot.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/prbot.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/prbot.example.com/privkey.pem;
+
+    # Keep browsers on HTTPS (see the note on cookies below).
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # Skill zip uploads can be up to 25 MB, and webhook payloads up to 5 MB (nginx allows 1 MB by default).
+    client_max_body_size 25m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+
+        # Required: the bot blocks a form post unless the browser's Origin matches this host.
+        proxy_set_header Host $host;
+
+        # "Test model" waits for the model's reply, up to the LLM timeout (600 s by default).
+        proxy_read_timeout 600s;
+    }
+}
+```
+
+Then, in the bot:
+
+1. Open **Settings → Sign-in and webhooks** and set **Public URL** to `https://prbot.example.com`.
+   The bot must be at the root of its host name: a path such as `https://example.com/prbot` isn't
+   supported, and the setting refuses one. Behind a proxy the bot only sees a plain HTTP connection from nginx, so this is how it knows the
+   address to use for the sign-in callback and the webhook URL.
+2. Copy the callback and webhook URLs the section shows into the GitHub App, as in
+   [Organizations and sign-in](#organizations-and-sign-in) and [Webhooks](#webhooks).
+
+Notes:
+
+- **Keep the `Host` header.** Without `proxy_set_header Host $host`, nginx sends `127.0.0.1:8080`,
+  and every save, sign-out and button press fails with *cross-origin request blocked*. If nginx
+  listens on a port other than 443, use `$http_host` instead, which includes the port.
+- **Cookies.** The bot marks its cookies `Secure` when a request arrives on an `https://`
+  **Public URL** (which is why nginx must pass the `Host` header) or when it terminates TLS
+  itself. A direct plain-HTTP visit, such as `http://127.0.0.1:8080` on the server, gets ordinary
+  cookies so it still works. The `Strict-Transport-Security` header keeps browsers on HTTPS.
+- **Don't expose port 8080.** Keep `-listen 127.0.0.1:8080` so the only way in is through nginx.
+- **Restricting the administrator sign-in (optional).** To allow the password sign-in only from
+  your own network, add this inside the `server` block. Everyone else gets `403` there and can
+  still sign in with GitHub:
+
+  ```nginx
+  location = /admin-login {
+      allow 10.0.0.0/8;     # your office or VPN range
+      deny  all;
+      proxy_pass http://127.0.0.1:8080;
+      proxy_set_header Host $host;
+  }
+  ```
+- **Renewing the certificate.** certbot's timer renews it; `sudo certbot renew --dry-run` checks
+  that renewal works.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -359,6 +604,7 @@ rebuild), then restart the bot. Reviews that were interrupted are re-queued on s
 | GitHub test fails with `401` or `404` | Wrong App ID (use the number, not the `Iv1…` Client ID), the wrong App's key, or the PEM is missing its `BEGIN`/`END` lines. Also check the PC's clock: the App's sign-in token is time-limited. |
 | GitHub test: "isn't installed anywhere yet" | The credentials work; install the App on your org (step 2). |
 | No repositories listed | The App isn't installed on them, or the *Only these orgs* setting excludes the org. Click **Sync from GitHub**. |
+| An org's PRs aren't reviewed any more | The *Only these orgs* setting excludes it. That pauses the org: its repositories, settings and history are kept and people keep their access, but nothing is polled, reviewed or replied to until it's allowed again. |
 | An open PR is never reviewed | It's probably `baseline` (it was open before the repo was watched). Push to it or click **Review now**. |
 | Reviews post with zero findings | Open the review's **Raw model output**. An empty `"comments": []` means the model found nothing, which small models often do, so try a larger code model. If the raw output has comments that weren't posted, they were filtered as duplicates or below the comment level. |
 | Fixed findings aren't resolved, or the bot never approves | Thread states come from GitHub's GraphQL API. Check the activity log for "could not read review thread states". While they can't be read, every finding counts as open, so the bot doesn't approve. The model's fix checks are in the review's raw output under `fix check:`. |
@@ -367,6 +613,13 @@ rebuild), then restart the bot. Reviews that were interrupted are re-queued on s
 | "model context … is too small" | Raise **Context tokens** (and the model's loaded context), or shorten the skill. |
 | "did not return valid JSON" | Turn on **Enforce JSON schema output**. If your server rejects it, use a stronger model. |
 | Forgot the admin password | Stop the bot and run `prbot -reset-password`. |
+| The sign-in page has no password field | It's on its own page: go to `/admin-login`. See [Administrator sign-in](#administrator-sign-in). |
+| GitHub sign-in: "redirect_uri is not associated with this application" | The App's **Callback URL** doesn't match. Copy it from **Settings → Sign-in and webhooks**, and set **Public URL** if the bot is behind a proxy. |
+| Signed in but no organizations listed | The App isn't installed on your org, or you're a plain member and the org hasn't let members in: ask an owner to add you. |
+| "Couldn't read your role in …" | Give the App the **Members: Read-only** organization permission, then accept the new permission on the org's installation page. Until GitHub can confirm someone's role, access that came from GitHub is paused; access added by hand isn't affected. |
+| Behind a proxy, every save or button fails with "cross-origin request blocked" | The proxy isn't passing the original `Host` header. See [Behind a reverse proxy](#behind-a-reverse-proxy-nginx). |
+| Webhook deliveries fail with `413` | The proxy's request size limit is too small; set `client_max_body_size 25m` in nginx. |
+| Webhook deliveries fail with `401` | The secret in GitHub differs from the bot's. Set them to the same value. |
 
 ## Security
 
@@ -382,6 +635,20 @@ rebuild), then restart the bot. Reviews that were interrupted are re-queued on s
   actions.
 - The UI uses an HMAC-signed session cookie and PBKDF2-hashed password. It rejects
   cross-origin POSTs (CSRF) and sends a strict Content-Security-Policy.
+- GitHub sign-in uses a one-time `state` check. The bot keeps each person's GitHub ID, login,
+  name and avatar, never their GitHub token. A person sees only the orgs they belong to; asking
+  for another org's page, PR or review returns `404`.
+- **Sign out everywhere** (Account page) ends all of a GitHub user's sessions, and blocking a user
+  ends theirs at once. Changing the administrator password signs everyone out.
+- If sign-in can't update someone's access, their sessions end. Should neither the database
+  nor the data directory accept that, the bot keeps them out in memory and retries. So that a
+  crash can't let them back in, a bot that didn't stop cleanly signs everyone out when it
+  starts (it keeps a `running` file in the data directory while it runs).
+- The administrator password is entered only at `/admin-login`, which the normal sign-in page
+  doesn't link to. Wrong passwords are slowed down; you can also restrict the path in your
+  reverse proxy.
+- The client secret and webhook secret are stored in `data/prbot.db` like the other keys.
+  Webhook deliveries must carry a valid `X-Hub-Signature-256`.
 
 ## Development
 
@@ -400,17 +667,19 @@ go run ./cmd/prbot -data data-dev -listen 127.0.0.1:8087
 | Package | Responsibility |
 |---|---|
 | `cmd/prbot` | Entry point, flags, Windows service / signal handling |
-| `internal/bot` | Polling, the job queue and worker, reviews, replies, prompts, fix checks and approval (`resolve.go`) |
-| `internal/github` | GitHub App auth (JWT, installation tokens), the REST calls used, and GraphQL for review threads |
+| `internal/bot` | Polling, webhook events (`webhook.go`), the job queue and worker, reviews, replies, prompts, fix checks and approval (`resolve.go`) |
+| `internal/github` | GitHub App auth (JWT, installation tokens), the REST calls used, GraphQL for review threads, and sign-in and webhook signatures (`oauth.go`) |
 | `internal/llm` | OpenAI-compatible and native Ollama clients, JSON extraction |
 | `internal/skill` | `SKILL.md` parsing, zip install, language-aware reference selection |
 | `internal/diff` | Unified-diff parsing and line-numbered rendering |
-| `internal/store` | SQLite schema and queries |
-| `internal/settings` | Settings model and defaults |
-| `internal/web` | Web UI: handlers, auth, embedded templates and static files |
+| `internal/store` | SQLite schema, migrations and queries; users, orgs, memberships, deliveries and statistics (`tenancy.go`) |
+| `internal/settings` | Settings model, defaults and per-org review policy |
+| `internal/web` | Web UI: handlers, sessions (`auth.go`), GitHub sign-in (`oauth.go`), org pages (`orgs.go`), admin pages and the webhook endpoint (`admin.go`), SVG charts (`charts.go`), embedded templates and static files |
 
 `internal/bot/bot_test.go` runs the bot end to end against fake GitHub and fake model servers.
 It's the best place to start when changing review or reply behaviour.
+`internal/web/multiuser_test.go` covers GitHub sign-in, org access and webhook deliveries against
+a fake GitHub.
 
 ## License
 

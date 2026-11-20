@@ -1,6 +1,6 @@
 {{define "content"}}
 <h1>Pull requests</h1>
-<p>{{if .D.All}}<a href="/prs">Show open only</a>{{else}}<a href="/prs?all=1">Include closed</a>{{end}}</p>
+<p>{{if .D.All}}<a href="{{.D.Base}}">Show open only</a>{{else}}<a href="{{.D.Base}}?all=1">Include closed</a>{{end}}</p>
 <div class="card">
 {{if .D.PRs}}
 <table>
@@ -16,14 +16,14 @@
     <td><code>{{short .ReviewedSHA}}</code></td>
     <td>{{ago .UpdatedAt}}</td>
     <td>
-      <form method="post" action="/prs/{{.Repo}}/{{.Number}}/review" class="inline"><button class="small">Review now</button></form>
+      {{if .Open}}<form method="post" action="/prs/{{.Repo}}/{{.Number}}/review" class="inline"><button class="small">Review now</button></form>{{end}}
     </td>
   </tr>
   {{end}}
   </tbody>
 </table>
 {{else}}
-<p class="muted">No pull requests tracked yet. Once your GitHub App is set up and repositories are enabled, open PRs appear here after the next poll.</p>
+<p class="muted">No pull requests tracked yet. Open PRs appear here once repositories are watched and the bot has checked them.</p>
 {{end}}
 </div>
 {{end}}

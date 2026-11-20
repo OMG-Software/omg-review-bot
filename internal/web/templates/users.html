@@ -1,0 +1,30 @@
+{{define "content"}}
+<h1>Users</h1>
+<p class="lead">Everyone who has signed in with GitHub or been added to an organization.</p>
+<div class="card">
+{{if .D.Users}}
+<table>
+  <thead><tr><th>Person</th><th>Organizations</th><th>Last sign-in</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {{range .D.Users}}
+  <tr>
+    <td>{{if .AvatarURL}}<img class="avatar" src="{{.AvatarURL}}" alt="" width="20" height="20"> {{end}}@{{.Login}}{{if .Name}} <span class="muted">{{.Name}}</span>{{end}}</td>
+    <td>{{range $i, $m := index $.D.Orgs .ID}}{{if $i}}, {{end}}<a href="{{orgPath $m.OrgLogin}}">{{$m.OrgLogin}}</a> <span class="muted">({{$m.Role}})</span>{{else}}<span class="muted">none</span>{{end}}</td>
+    <td>{{if .LastLogin}}<span title="{{when .LastLogin}}">{{ago .LastLogin}}</span>{{else}}<span class="muted">never</span>{{end}}</td>
+    <td>{{if .Admin}}<span class="pill s-reviewed">administrator</span>{{end}}{{if .Disabled}} <span class="pill s-error">blocked</span>{{end}}</td>
+    <td class="nowrap">
+      {{if ne .ID $.D.Me}}
+      <form method="post" action="/admin/users/{{.ID}}/admin" class="inline" {{if not .Admin}}data-confirm="Make @{{.Login}} an administrator? Administrators can see and change everything, including the GitHub App key."{{end}}>
+        <input type="hidden" name="on" value="{{if .Admin}}0{{else}}1{{end}}"><button class="small">{{if .Admin}}Remove admin{{else}}Make admin{{end}}</button></form>
+      <form method="post" action="/admin/users/{{.ID}}/disable" class="inline" {{if not .Disabled}}data-confirm="Block @{{.Login}}? They're signed out everywhere and can't sign in again until unblocked."{{end}}>
+        <input type="hidden" name="on" value="{{if .Disabled}}0{{else}}1{{end}}"><button class="small">{{if .Disabled}}Unblock{{else}}Block{{end}}</button></form>
+      {{else}}<span class="muted">you</span>{{end}}
+    </td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">Nobody has signed in with GitHub yet.</p>{{end}}
+</div>
+<p class="hint">The administrator password always works as well; change it on the <a href="/account">Account</a> page. Organization owners manage their own members on each organization's Members page.</p>
+{{end}}

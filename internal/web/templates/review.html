@@ -1,7 +1,7 @@
 {{define "content"}}
 {{with .D}}
 <h1>Review {{.ID}} <span class="pill s-{{.Status}}">{{.Status}}</span></h1>
-<p><a href="/prs/{{.Repo}}/{{.Number}}">← {{.Repo}}#{{.Number}}</a>{{if .URL}} · <a href="{{.URL}}" target="_blank" rel="noopener">open on GitHub ↗</a>{{end}}</p>
+<p>{{if earlier .Repo}}<span class="muted">{{.Repo}}#{{.Number}}</span>{{else}}<a href="/prs/{{.Repo}}/{{.Number}}">← {{.Repo}}#{{.Number}}</a>{{end}}{{if .URL}} · <a href="{{.URL}}" target="_blank" rel="noopener">open on GitHub ↗</a>{{end}}</p>
 <div class="card">
   <dl class="kv">
     <dt>Commit</dt><dd><code>{{.HeadSHA}}</code></dd>
@@ -11,7 +11,9 @@
     <dt>Tokens</dt><dd>{{.PromptTokens}} prompt / {{.CompletionTokens}} completion</dd>
     <dt>Started</dt><dd>{{when .StartedAt}}</dd>
     <dt>Duration</dt><dd>{{dur .StartedAt .FinishedAt}}</dd>
-    <dt>Posted</dt><dd>{{.Comments}} inline comments, {{.Notes}} notes</dd>
+    <dt>Posted</dt><dd>{{.Comments}} inline comments, {{.Notes}} notes{{if eq .Event "APPROVE"}} · <span class="pill s-reviewed">approved</span>{{end}}</dd>
+    {{if .Detailed}}<dt>By level</dt><dd>{{range $i, $n := .Sev}}{{if $i}} · {{end}}P{{add $i 1}}: {{$n}}{{end}}</dd>
+    <dt>Earlier findings fixed</dt><dd>{{.Fixed}}</dd>{{else}}<dt>By level</dt><dd class="muted">not recorded for reviews from before the upgrade</dd>{{end}}
     {{if .Error}}<dt>Error</dt><dd class="bad">{{.Error}}</dd>{{end}}
   </dl>
 </div>

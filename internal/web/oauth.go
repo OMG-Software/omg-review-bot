@@ -1,0 +1,427 @@
+package web
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/OMG-Software/omg-review-bot/internal/github"
+	"github.com/OMG-Software/omg-review-bot/internal/settings"
+	"github.com/OMG-Software/omg-review-bot/internal/store"
+)
+
+const oauthCookie = "prbot_oauth"
+
+// publicURL is the bot's address as people and GitHub see it.
+func (s *Server) publicURL(r *http.Request) string {
+	if u := s.bot.Settings().GitHub.PublicURL; u != "" && settings.CheckPublicURL(u) == nil {
+		return u
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+func (s *Server) callbackURL(r *http.Request) string { return s.publicURL(r) + "/auth/github/callback" }
+
+// githubStart sends the browser to GitHub to sign in.
+func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
+	st := s.bot.Settings()
+	if !st.GitHub.SignInOn() {
+		s.render(w, r, "login.html", page{Title: "Sign in", Err: "Sign in with GitHub isn't set up yet. An administrator has to add the App's client ID and secret in Settings.", D: s.loginData(r)})
+		return
+	}
+	next := safeNext(r.URL.Query().Get("next"))
+	if pub, err := url.Parse(st.GitHub.PublicURL); err == nil && pub.Host != "" && !strings.EqualFold(pub.Host, r.Host) &&
+		r.URL.Query().Get("hop") == "" {
+		// GitHub returns to the Public URL, and the browser only sends the
+		// state cookie back to the host that set it: start there. Only once:
+		// a proxy that passes on another Host would send it round again.
+		http.Redirect(w, r, strings.TrimRight(st.GitHub.PublicURL, "/")+"/auth/github?next="+url.QueryEscape(next)+"&hop=1", http.StatusSeeOther)
+		return
+	}
+	state := randomToken()
+	exp := time.Now().Add(10 * time.Minute).Unix()
+	payload := fmt.Sprintf("%s|%d|%s", state, exp, base64.RawURLEncoding.EncodeToString([]byte(next)))
+	s.setCookie(w, r, oauthCookie, s.signed(payload), "/auth/github", 600)
+	web := github.WebBaseURL(st.GitHub.APIBaseURL)
+	http.Redirect(w, r, github.AuthorizeURL(web, st.GitHub.ClientID, s.callbackURL(r), state), http.StatusSeeOther)
+}
+
+// githubCallback finishes sign-in: it checks the state, trades the code for a
+// token, records the person, derives their organization access from GitHub,
+// then discards the token.
+func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
+	fail := func(msg string) {
+		s.render(w, r, "login.html", page{Title: "Sign in", Err: msg, D: s.loginData(r)})
+	}
+	q := r.URL.Query()
+	c, err := r.Cookie(oauthCookie)
+	s.setCookie(w, r, oauthCookie, "", "/auth/github", -1)
+	if err != nil {
+		fail("The sign-in took too long or started in another browser. Try again.")
+		return
+	}
+	payload, ok := s.unsign(c.Value)
+	parts := strings.Split(payload, "|")
+	if !ok || len(parts) != 3 {
+		fail("Sign-in failed. Try again.")
+		return
+	}
+	exp, _ := strconv.ParseInt(parts[1], 10, 64)
+	if subtle.ConstantTimeCompare([]byte(parts[0]), []byte(q.Get("state"))) != 1 || time.Now().Unix() > exp {
+		fail("Sign-in failed (the request didn't match). Try again.")
+		return
+	}
+	nextB, _ := base64.RawURLEncoding.DecodeString(parts[2])
+	next := safeNext(string(nextB))
+	if e := q.Get("error"); e != "" {
+		fail("GitHub sign-in was cancelled: " + q.Get("error_description"))
+		return
+	}
+
+	st := s.bot.Settings()
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	token, err := github.ExchangeCode(ctx, github.WebBaseURL(st.GitHub.APIBaseURL), st.GitHub.ClientID, st.GitHub.ClientSecret,
+		q.Get("code"), s.callbackURL(r))
+	// What went wrong is logged, not shown: anyone can sign in, and the
+	// error can name internal hosts.
+	if err != nil {
+		s.log.Warn("GitHub sign-in: exchange the code", "err", err)
+		fail(signInFailed)
+		return
+	}
+	uc := github.NewUserClient(st.GitHub.APIBaseURL, token)
+	gu, err := uc.Me(ctx)
+	if err != nil {
+		s.log.Warn("GitHub sign-in: read the profile", "err", err)
+		fail(signInFailed)
+		return
+	}
+	if old, _ := s.store.GetUser(gu.ID); old != nil && old.Disabled {
+		fail("Your account has been blocked on this bot. Ask an administrator.")
+		return
+	}
+	// One sign-in or retry at a time for this person (see userLocks).
+	mu := s.userLock(gu.ID)
+	mu.Lock()
+	defer mu.Unlock()
+	u, err := s.store.RecordSignIn(gu.ID, gu.Login, gu.Name, gu.AvatarURL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	notes, err := s.syncAccess(ctx, uc, u)
+	if err != nil {
+		// Don't sign them in with access that should have changed, and end
+		// the sessions they already have, which could still use it: at once
+		// here, and in the database so it lasts a restart. If the database
+		// write fails too, it's retried until it's stored. The next sign-in
+		// that gets through updates the access and lets them back in.
+		s.log.Error("update access at sign-in", "user", u.Login, "err", err)
+		s.unreconciled.Store(u.ID, true)
+		if err := s.endSessions(u.ID); err != nil {
+			s.log.Error("end sessions after a failed access update; will retry", "user", u.Login, "err", err)
+			// Noted on disk too, so a restart before a retry gets through
+			// still keeps them out. If that fails as well, the retry tries
+			// both until one is stored.
+			noted := true
+			if err := s.pending.add(u.ID); err != nil {
+				s.log.Error("note sessions to end after a restart; will retry", "user", u.Login, "err", err)
+				noted = false
+			}
+			s.startRetry(u.ID, u.Login, noted)
+		}
+		fail("Couldn't update your access, so you weren't signed in. Try again; if it keeps happening, tell an administrator.")
+		return
+	}
+	s.unreconciled.Delete(u.ID)
+	if err := s.pending.remove(u.ID); err != nil {
+		s.log.Warn("clear sessions to end", "user", u.Login, "err", err)
+	}
+	s.store.Log("info", "", 0, fmt.Sprintf("@%s signed in with GitHub", u.Login))
+	s.issueSession(w, r, u.ID, u.Epoch)
+	if len(notes) > 0 {
+		redirectMsg(w, r, next, strings.Join(notes, " "))
+		return
+	}
+	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// signInFailed is shown when GitHub couldn't be reached or refused.
+const signInFailed = "Couldn't finish signing in with GitHub. Try again; if it keeps happening, tell an administrator."
+
+// userLock returns the lock for one person's sign-ins and retries.
+func (s *Server) userLock(id int64) *sync.Mutex {
+	mu, _ := s.userLocks.LoadOrStore(id, new(sync.Mutex))
+	return mu.(*sync.Mutex)
+}
+
+// startRetry starts retryEndSessions for id unless it's already running.
+// noted says whether the pending file already lists them. Callers hold the
+// person's lock, as retryEndSessions does when it stops.
+func (s *Server) startRetry(id int64, login string, noted bool) {
+	if _, already := s.retrying.LoadOrStore(id, true); !already {
+		go s.retryEndSessions(id, login, noted)
+	}
+}
+
+// checkCleanStop, at startup, ends every session if the last run didn't stop
+// cleanly, then marks this run as running. A run can have sessions to end
+// that it couldn't record anywhere (the database and the disk both refused);
+// only it knew of them, in memory. Close removes the mark only when no such
+// sessions remain, so a crash, or a stop that leaves some, means a new
+// signing key here. It's the one case that signs everyone out unasked.
+func (s *Server) checkCleanStop() error {
+	if _, err := os.Stat(s.runMarker); err == nil {
+		s.log.Warn("the last run didn't stop cleanly, so it may have had sessions to end that it couldn't record; ending every session")
+		if err := s.rotateSecret(); err != nil {
+			return fmt.Errorf("end every session after a run that didn't stop cleanly: %w", err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("check %s: %w", s.runMarker, err)
+	}
+	if err := writeDurably(s.runMarker, []byte("prbot is running; removed when it stops cleanly")); err != nil {
+		return fmt.Errorf("mark the run in %s: %w", s.runMarker, err)
+	}
+	return nil
+}
+
+// Close is called once the server has stopped taking requests. It records a
+// clean stop, unless sessions are still waiting to be ended in the database:
+// then the next start ends every session instead (see checkCleanStop).
+func (s *Server) Close() error {
+	busy := false
+	s.retrying.Range(func(any, any) bool { busy = true; return false })
+	if busy {
+		s.log.Warn("stopping with sessions still to end in the database; the next start ends every session")
+		return nil
+	}
+	if err := os.Remove(s.runMarker); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// resumePendingEnds, at startup, keeps out the people whose sessions an
+// earlier run couldn't end in the database, and ends them now (or keeps
+// retrying). The database works for reads by now, but the stored epoch was
+// never bumped, so without this their old sessions would work again.
+func (s *Server) resumePendingEnds() error {
+	ids, err := s.pending.load()
+	if err != nil {
+		// Whose sessions it lists is unknown, so end everyone's: a new
+		// signing key. The unreadable file is set aside for inspection.
+		s.log.Error("read sessions to end; ending every session", "file", s.pending.path, "err", err)
+		if rerr := s.rotateSecret(); rerr != nil {
+			return fmt.Errorf("can't read %s (%v), nor end every session instead: %w", s.pending.path, err, rerr)
+		}
+		if err := os.Rename(s.pending.path, s.pending.path+".unreadable"); err != nil {
+			s.log.Error("set aside the unreadable file", "file", s.pending.path, "err", err)
+		}
+		return nil
+	}
+	for _, id := range ids {
+		s.unreconciled.Store(id, true)
+		if err := s.endSessions(id); err != nil {
+			s.log.Error("end sessions noted by an earlier run; will retry", "user", id, "err", err)
+			s.startRetry(id, fmt.Sprint(id), true)
+			continue
+		}
+		s.log.Info("ended sessions noted by an earlier run", "user", id)
+		if err := s.pending.remove(id); err != nil {
+			s.log.Warn("clear sessions to end", "user", id, "err", err)
+		}
+	}
+	return nil
+}
+
+// retryEndSessions keeps trying to end someone's sessions in the database,
+// backing off to every five minutes, until it works or a sign-in has updated
+// their access. Until then only the in-memory block stops their sessions, and
+// that wouldn't last a restart.
+func (s *Server) retryEndSessions(id int64, login string, noted bool) {
+	wait := s.retryWait
+	for {
+		time.Sleep(wait)
+		if s.retryEndOnce(id, login, &noted) {
+			return
+		}
+		wait = min(wait*2, 5*time.Minute)
+	}
+}
+
+// retryEndOnce is one try of retryEndSessions; it reports whether it's done.
+// It holds the person's lock throughout, so no sign-in comes between ending
+// the sessions and clearing the note: a failure recorded after it is left for
+// a retry of its own, which can start once this one has stopped.
+func (s *Server) retryEndOnce(id int64, login string, noted *bool) bool {
+	mu := s.userLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, still := s.unreconciled.Load(id); !still {
+		s.retrying.Delete(id)
+		return true
+	}
+	if !*noted {
+		if err := s.pending.add(id); err == nil {
+			*noted = true
+		} else {
+			s.log.Error("note sessions to end after a restart; will retry", "user", login, "err", err)
+		}
+	}
+	if err := s.endSessions(id); err != nil {
+		s.log.Error("end sessions after a failed access update; will retry", "user", login, "err", err)
+		return false
+	}
+	s.log.Info("ended sessions after a failed access update", "user", login)
+	if err := s.pending.remove(id); err != nil {
+		s.log.Warn("clear sessions to end", "user", login, "err", err)
+	}
+	s.retrying.Delete(id)
+	return true
+}
+
+// syncMemberships derives the person's organization access from GitHub:
+// admins of a GitHub organization the App is installed on become its owners
+// here, the account owner of a personal installation becomes its owner, and
+// members join as members when the organization allows it. Access added by
+// hand is left alone, whatever the GitHub role.
+// Access that came from GitHub and no longer applies is removed, and so is
+// access GitHub couldn't confirm this time: it's restored at the next sign-in
+// that can. An error means the access couldn't be updated; the caller must
+// not sign the person in.
+func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error) {
+	st := s.bot.Settings()
+	var notes []string
+	insts, err := uc.Installations(ctx)
+	if err != nil {
+		s.log.Warn("list user installations", "user", u.Login, "err", err)
+		notes = append(notes, "Couldn't read your organizations from GitHub, so access that comes from GitHub is paused until you sign in again.")
+		insts = nil // the clean-up below removes GitHub-derived access
+	}
+	seen := map[int64]bool{}
+	for _, in := range insts {
+		acct := in.Account
+		if acct.ID == 0 {
+			continue
+		}
+		// An account the allow-list excludes is paused, not gone: GitHub-
+		// derived access to it is still kept up to date (and removed when
+		// GitHub withdraws it), but nobody gains new access to it.
+		excluded := len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, acct.Login)
+		org, err := s.store.GetOrg(acct.ID)
+		if err != nil {
+			return notes, fmt.Errorf("read organization %s: %w", acct.Login, err)
+		}
+		if org == nil && excluded {
+			continue // never added, so nobody has access to keep
+		}
+		if org == nil {
+			// Installed since the last repository sync: record it now.
+			if err := s.store.UpsertOrg(acct.ID, acct.Login, acct.Type, in.ID); err != nil {
+				return notes, fmt.Errorf("record organization %s: %w", acct.Login, err)
+			}
+			s.bot.Wake()
+			if org, err = s.store.GetOrg(acct.ID); err != nil || org == nil {
+				return notes, fmt.Errorf("read organization %s after recording it: %w", acct.Login, err)
+			}
+		}
+		seen[org.ID] = true
+		role := ""
+		if acct.Type == "User" {
+			if acct.ID == u.ID {
+				role = store.RoleOwner
+			}
+		} else {
+			m, err := uc.OrgMembership(ctx, acct.Login)
+			switch {
+			case err != nil && !github.IsStatus(err, http.StatusNotFound):
+				// Unconfirmed: treat as no role, so access from GitHub is
+				// paused (access added by hand stays).
+				s.log.Warn("read GitHub organization role", "user", u.Login, "org", acct.Login, "err", err)
+				notes = append(notes, fmt.Sprintf("Couldn't read your role in %s, so access that comes from GitHub is paused until you sign in again. The GitHub App needs the \"Members: Read-only\" organization permission.", acct.Login))
+			case err != nil:
+			case m.State == "active" && m.Role == "admin":
+				role = store.RoleOwner
+			case m.State == "active" && org.AutoJoin:
+				role = store.RoleMember
+			}
+		}
+		cur, err := s.store.GetMembership(org.ID, u.ID)
+		if err != nil {
+			return notes, err
+		}
+		// Access added by hand stays as an owner set it, whatever the GitHub
+		// role: a role from GitHub is only stored as coming from GitHub, so it
+		// can't outlast GitHub taking it back. The store checks the source
+		// again as it writes, so access added by hand meanwhile isn't touched.
+		var removed bool
+		switch {
+		case cur == nil && role != "" && !excluded:
+			err = s.store.SetGitHubMembership(org.ID, u.ID, role)
+			if err == nil {
+				s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("@%s joined %s as %s (from their GitHub role)", u.Login, org.Login, role))
+			}
+		case cur == nil:
+		case cur.Source == store.SourceGitHub && role == "":
+			removed, err = s.store.RemoveGitHubMembership(org.ID, u.ID)
+			if removed {
+				s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("@%s lost access to %s (not confirmed as an admin or member on GitHub)", u.Login, org.Login))
+			}
+		case cur.Source == store.SourceGitHub && role != cur.Role && excluded:
+			// Kept up to date, but if it was removed since it was read, it
+			// stays removed: nobody gains access to a paused organization.
+			_, err = s.store.UpdateGitHubMembership(org.ID, u.ID, role)
+		case cur.Source == store.SourceGitHub && role != cur.Role:
+			err = s.store.SetGitHubMembership(org.ID, u.ID, role)
+		}
+		if err != nil {
+			return notes, fmt.Errorf("update access to %s: %w", org.Login, err)
+		}
+	}
+	// Access derived from GitHub for installations the person can no longer
+	// see. An organization the App was uninstalled from isn't listed either,
+	// but it's kept, history and all, so access to it stays as it was when
+	// the App was removed: there's nothing new to see, and an owner can
+	// still manage it.
+	ms, err := s.store.UserMemberships(u.ID)
+	if err != nil {
+		return notes, err
+	}
+	for _, m := range ms {
+		if m.Source == store.SourceGitHub && !seen[m.OrgID] && m.OrgActive {
+			removed, err := s.store.RemoveGitHubMembership(m.OrgID, u.ID)
+			if err != nil {
+				return notes, fmt.Errorf("remove access to %s: %w", m.OrgLogin, err)
+			}
+			if !removed {
+				continue // added by hand meanwhile
+			}
+			s.store.LogFor(m.OrgID, "info", "", 0, fmt.Sprintf("@%s lost access to %s (the App's installation isn't visible to them on GitHub)", u.Login, m.OrgLogin))
+		}
+	}
+	return notes, nil
+}
+
+func containsFold(list []string, s string) bool {
+	for _, v := range list {
+		if strings.EqualFold(strings.TrimSpace(v), s) {
+			return true
+		}
+	}
+	return false
+}

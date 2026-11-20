@@ -1,7 +1,9 @@
 {{define "content"}}
 <h1>Account</h1>
+{{if .V.Local}}
 <div class="narrow card">
-  <h2>Change password</h2>
+  <h2>Administrator password</h2>
+  <p class="hint">You're signed in with the administrator password. Changing it signs everyone out, including people who signed in with GitHub.</p>
   <form method="post" action="/account" class="stack">
     <label>Current password <input type="password" name="current" required autocomplete="current-password"></label>
     <label>New password <input type="password" name="password" minlength="10" required autocomplete="new-password"></label>
@@ -9,4 +11,21 @@
     <button class="primary">Change password</button>
   </form>
 </div>
+{{else}}
+<div class="card">
+  <h2>{{if .V.Avatar}}<img class="avatar" src="{{.V.Avatar}}" alt="" width="32" height="32"> {{end}}@{{.V.Login}}{{if .V.Name}} <span class="muted">{{.V.Name}}</span>{{end}}</h2>
+  <p>{{if .V.Admin}}You're an <b>administrator</b>: you can see and manage every organization.{{else}}You sign in with GitHub.{{end}}</p>
+  <h3>Your organizations</h3>
+  {{if .V.Orgs}}
+  <ul>{{range .V.Orgs}}<li><a href="{{orgPath .OrgLogin}}">{{.OrgLogin}}</a>: {{.Role}} <span class="muted">({{if eq .Source "github"}}from your GitHub role{{else}}added by an owner{{end}})</span></li>{{end}}</ul>
+  {{else}}<p class="muted">None yet.</p>{{end}}
+  {{if .D.SignIn}}<p><a href="/auth/github?next=/account">Refresh my access from GitHub</a></p>{{end}}
+</div>
+<div class="card">
+  <h2>Sessions</h2>
+  <form method="post" action="/account/signout-all" class="actions" data-confirm="Sign out on every device, including this one?">
+    <button>Sign out everywhere</button>
+  </form>
+</div>
+{{end}}
 {{end}}

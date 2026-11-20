@@ -1,4 +1,5 @@
-// Package store persists bot state (settings, repos, PRs, reviews, activity) in SQLite.
+// Package store persists bot state (settings, repos, PRs, reviews, activity,
+// users and organizations) in SQLite.
 package store
 
 import (
@@ -94,12 +95,123 @@ CREATE TABLE IF NOT EXISTS activity (
   message TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_activity_pr ON activity(repo, number);
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY, -- GitHub user ID
+  login         TEXT NOT NULL,
+  name          TEXT NOT NULL DEFAULT '',
+  avatar_url    TEXT NOT NULL DEFAULT '',
+  is_admin      INTEGER NOT NULL DEFAULT 0,
+  disabled      INTEGER NOT NULL DEFAULT 0,
+  session_epoch INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL DEFAULT 0,
+  last_login    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_users_login ON users(login COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS orgs (
+  id              INTEGER PRIMARY KEY, -- GitHub account ID: stable across renames and reinstalls
+  login           TEXT NOT NULL,
+  type            TEXT NOT NULL DEFAULT 'Organization',
+  installation_id INTEGER NOT NULL DEFAULT 0,
+  active          INTEGER NOT NULL DEFAULT 1,
+  auto_join       INTEGER NOT NULL DEFAULT 0,
+  policy          TEXT NOT NULL DEFAULT '',
+  created_at      INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS memberships (
+  org_id     INTEGER NOT NULL,
+  user_id    INTEGER NOT NULL,
+  role       TEXT NOT NULL,                  -- owner | member
+  source     TEXT NOT NULL DEFAULT 'manual', -- manual | github
+  created_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (org_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  id          TEXT PRIMARY KEY,
+  event       TEXT NOT NULL,
+  action      TEXT NOT NULL DEFAULT '',
+  repo        TEXT NOT NULL DEFAULT '',
+  account_id  INTEGER NOT NULL DEFAULT 0,
+  result      TEXT NOT NULL DEFAULT '',
+  received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_time ON webhook_deliveries(received_at);
 `
+
+// addedColumns were added after the first release. Opening an older database
+// adds them with ALTER TABLE.
+var addedColumns = []struct{ table, column, alter string }{
+	{"repos", "account_id", `ALTER TABLE repos ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"pulls", "account_id", `ALTER TABLE pulls ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "account_id", `ALTER TABLE reviews ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "event", `ALTER TABLE reviews ADD COLUMN event TEXT NOT NULL DEFAULT ''`},
+	{"reviews", "fixed", `ALTER TABLE reviews ADD COLUMN fixed INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p1", `ALTER TABLE reviews ADD COLUMN sev_p1 INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p2", `ALTER TABLE reviews ADD COLUMN sev_p2 INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p3", `ALTER TABLE reviews ADD COLUMN sev_p3 INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p4", `ALTER TABLE reviews ADD COLUMN sev_p4 INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p5", `ALTER TABLE reviews ADD COLUMN sev_p5 INTEGER NOT NULL DEFAULT 0`},
+	{"activity", "account_id", `ALTER TABLE activity ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"webhook_deliveries", "claim", `ALTER TABLE webhook_deliveries ADD COLUMN claim INTEGER NOT NULL DEFAULT 0`},
+	// detailed: the review's severity and fixed counts were recorded (0 for
+	// reviews from before they were, whose counts read as zero).
+	{"reviews", "detailed", `ALTER TABLE reviews ADD COLUMN detailed INTEGER NOT NULL DEFAULT 0`},
+}
+
+// postMigrate indexes the added columns, so it runs after they exist.
+const postMigrate = `
+CREATE INDEX IF NOT EXISTS idx_repos_account ON repos(account_id);
+CREATE INDEX IF NOT EXISTS idx_pulls_account ON pulls(account_id, open);
+CREATE INDEX IF NOT EXISTS idx_reviews_account ON reviews(account_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_activity_account ON activity(account_id, id);
+
+-- A login belongs to one organization at a time. UpsertOrg keeps it that way
+-- by renaming an earlier account still stored under a login another has
+-- taken; the unique index makes it a rule rather than a habit. Databases from
+-- before the index may hold duplicates, so these get the same rename first:
+-- the active one (else the newest) keeps the login.
+UPDATE orgs SET login=login || ' (earlier account ' || id || ')'
+WHERE EXISTS(SELECT 1 FROM orgs o WHERE o.login=orgs.login COLLATE NOCASE AND o.id<>orgs.id
+  AND (o.active>orgs.active OR (o.active=orgs.active AND (o.created_at>orgs.created_at
+  OR (o.created_at=orgs.created_at AND o.id>orgs.id)))));
+DROP INDEX IF EXISTS idx_orgs_login;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orgs_login_unique ON orgs(login COLLATE NOCASE);
+
+-- The views fix each table's column order for the scan functions (scanRepo,
+-- scanPR, scanReview, scanUser, scanOrg), so queries can select * from them.
+-- They're recreated on every start, so a changed column list takes effect.
+DROP VIEW IF EXISTS repos_v;
+CREATE VIEW repos_v AS SELECT id, installation_id, account_id, full_name, enabled, synced, etag, last_polled FROM repos;
+DROP VIEW IF EXISTS pulls_v;
+CREATE VIEW pulls_v AS SELECT repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
+  head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
+  not_before, tracked_at, updated_at, account_id FROM pulls;
+DROP VIEW IF EXISTS reviews_v;
+CREATE VIEW reviews_v AS SELECT id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
+  status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at,
+  account_id, event, fixed, sev_p1, sev_p2, sev_p3, sev_p4, sev_p5, detailed FROM reviews;
+DROP VIEW IF EXISTS users_v;
+CREATE VIEW users_v AS SELECT id, login, name, avatar_url, is_admin, disabled, session_epoch, created_at, last_login FROM users;
+DROP VIEW IF EXISTS orgs_v;
+CREATE VIEW orgs_v AS SELECT id, login, type, installation_id, active, auto_join, policy, created_at FROM orgs;
+`
+
+// AllAccounts, passed as an account ID, selects the rows of every
+// organization. Only administrator views use it. Account 0 matches rows not
+// yet linked to an organization.
+const AllAccounts int64 = -1
+
+// acct returns the two arguments of the literal filter (?=-1 OR account_id=?)
+// that queries use to select one organization's rows, or every row when the
+// account is AllAccounts (-1). Keeping the condition in the SQL text, rather
+// than building it, means every query is a single literal string.
+func acct(accountID int64) []any { return []any{accountID, accountID} }
 
 // Store wraps the SQLite database.
 type Store struct {
-	db   *sql.DB
-	logs atomic.Int64
+	db         *sql.DB
+	logs       atomic.Int64 // activity writes, for pruning
+	deliveries atomic.Int64 // webhook deliveries recorded, for pruning
 }
 
 // Open opens (and migrates) the database at path.
@@ -109,11 +221,70 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if err := s.BackfillAccounts(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate database: %w", err)
+	}
+	return s, nil
+}
+
+func migrate(db *sql.DB) error {
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	for _, c := range addedColumns {
+		has, err := hasColumn(db, c.table, c.column)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := db.Exec(c.alter); err != nil {
+				return fmt.Errorf("add %s.%s: %w", c.table, c.column, err)
+			}
+		}
+	}
+	_, err := db.Exec(postMigrate)
+	return err
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=? COLLATE NOCASE`, table, column).Scan(&n)
+	return n > 0, err
+}
+
+// BackfillAccounts links pull requests, reviews and activity that aren't yet
+// linked to an organization (recorded before organizations existed, or before
+// their repository was synced) to the organization that owns the repository.
+func (s *Store) BackfillAccounts() error {
+	for _, q := range []string{
+		// A name alone isn't proof: it may since have passed to another
+		// account. A PR must also have the repository's installation, and
+		// reviews and activity must come after the PR they're matched to
+		// was tracked (a later account's PR of the same number came after
+		// them). What can't be matched stays unassigned: administrators only.
+		`UPDATE pulls SET account_id=(SELECT r.account_id FROM repos r WHERE r.full_name=pulls.repo
+		 AND r.installation_id=pulls.installation_id AND r.account_id<>0 LIMIT 1)
+		 WHERE account_id=0 AND EXISTS(SELECT 1 FROM repos r WHERE r.full_name=pulls.repo
+		 AND r.installation_id=pulls.installation_id AND r.account_id<>0)`,
+		`UPDATE reviews SET account_id=(SELECT p.account_id FROM pulls p WHERE p.repo=reviews.repo AND p.number=reviews.number)
+		 WHERE account_id=0 AND EXISTS(SELECT 1 FROM pulls p WHERE p.repo=reviews.repo AND p.number=reviews.number
+		 AND p.account_id<>0 AND p.tracked_at<=reviews.started_at)`,
+		`UPDATE activity SET account_id=(SELECT p.account_id FROM pulls p WHERE p.repo=activity.repo
+		 AND (activity.number=0 OR p.number=activity.number) AND p.account_id<>0 AND p.tracked_at<=activity.ts LIMIT 1)
+		 WHERE account_id=0 AND repo<>'' AND EXISTS(SELECT 1 FROM pulls p WHERE p.repo=activity.repo
+		 AND (activity.number=0 OR p.number=activity.number) AND p.account_id<>0 AND p.tracked_at<=activity.ts)`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -170,6 +341,7 @@ func (s *Store) SetJSON(key string, v any) error {
 type Repo struct {
 	ID             int64
 	InstallationID int64
+	AccountID      int64 // the GitHub org or user that owns the repository
 	FullName       string
 	Enabled        bool
 	Synced         bool
@@ -177,30 +349,199 @@ type Repo struct {
 	LastPolled     int64
 }
 
-func (s *Store) UpsertRepo(id, installationID int64, fullName string, defaultEnabled bool) error {
-	_, err := s.db.Exec(`INSERT INTO repos(id, installation_id, full_name, enabled) VALUES(?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id, full_name=excluded.full_name`,
-		id, installationID, fullName, b2i(defaultEnabled))
+// UpsertRepo records a repository. When one was renamed (same ID, new name),
+// its PRs, reviews and activity move to the new name, as GitHub keeps a repository's PRs
+// and their numbers through a rename; otherwise the PRs left under the old name
+// would stay due, and the new name's would all be reviewed again. A repository
+// moved to another account starts afresh there: its old PRs are closed.
+// EarlierRepoSuffix marks the reviews and activity of a repository whose
+// name another repository of the same account has since taken.
+const EarlierRepoSuffix = " (earlier repository)"
+
+// RepoTarget is a repository's name and owner as GitHub has them now.
+type RepoTarget struct {
+	FullName  string
+	AccountID int64
+}
+
+// parkedName is where a renamed repository's records wait during a sync
+// (see ParkRenamedRepos). It can't be a GitHub name: those have a slash.
+func parkedName(id int64) string { return fmt.Sprintf("(repository %d, being renamed)", id) }
+
+// ParkRenamedRepos, before a sync records the new names, moves each renamed
+// repository (its row, PRs, reviews and activity) to a name of its own.
+// Repositories can be renamed in a chain or a swap (a to b while b goes to
+// c); recorded one at a time, the first would take the second's records
+// along with its name. Parked first, each moves from its own placeholder to
+// its new name, so a name then only holds records of a repository that's
+// gone, which stay as history as before. A repository moved to another
+// account isn't parked: it starts afresh there, and its records stay under
+// the old name.
+func (s *Store) ParkRenamedRepos(current map[int64]RepoTarget) (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	rows, err := tx.Query(`SELECT id, full_name, account_id FROM repos`)
+	if err != nil {
+		return err
+	}
+	type renamed struct {
+		id, account int64
+		name        string
+	}
+	var park []renamed
+	for rows.Next() {
+		var r renamed
+		if err = rows.Scan(&r.id, &r.name, &r.account); err != nil {
+			rows.Close()
+			return err
+		}
+		t, ok := current[r.id]
+		if ok && t.FullName != r.name && r.name != parkedName(r.id) && (r.account == t.AccountID || r.account == 0) {
+			park = append(park, r)
+		}
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range park {
+		to := parkedName(r.id)
+		if _, err = tx.Exec(`UPDATE repos SET full_name=? WHERE id=?`, to, r.id); err != nil {
+			return err
+		}
+		for _, q := range []string{
+			`UPDATE pulls SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+			`UPDATE reviews SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+			`UPDATE activity SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+		} {
+			if _, err = tx.Exec(q, to, r.name, r.account); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) UpsertRepo(id, installationID, accountID int64, fullName string, defaultEnabled bool) (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var oldName string
+	var oldAccount int64
+	switch err = tx.QueryRow(`SELECT full_name, account_id FROM repos WHERE id=?`, id).Scan(&oldName, &oldAccount); {
+	case errors.Is(err, sql.ErrNoRows):
+		err = nil
+	case err != nil:
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO repos(id, installation_id, account_id, full_name, enabled) VALUES(?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id, account_id=excluded.account_id, full_name=excluded.full_name`,
+		id, installationID, accountID, fullName, b2i(defaultEnabled)); err != nil {
+		return err
+	}
+	if oldName != "" && oldName != fullName {
+		// Account 0: stored before organizations existed and not backfilled
+		// yet. It's the same repository, so it's the same owner.
+		if oldAccount == accountID || oldAccount == 0 {
+			// A name belongs to one repository at a time, so PRs still stored
+			// under the new one are left over from an earlier repository that
+			// had it. They give way, so each PR moves together with its reviews.
+			// That repository's reviews and activity stay as history, under a
+			// name of their own, so they aren't taken for the renamed
+			// repository's PRs, which reuse the numbers.
+			if _, err = tx.Exec(`DELETE FROM pulls WHERE repo=?`, fullName); err != nil {
+				return err
+			}
+			for _, q := range []string{
+				`UPDATE reviews SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+				`UPDATE activity SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+			} {
+				if _, err = tx.Exec(q, fullName+EarlierRepoSuffix, fullName, accountID); err != nil {
+					return err
+				}
+			}
+			for _, q := range []string{
+				`UPDATE pulls SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+				`UPDATE reviews SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+				`UPDATE activity SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+			} {
+				if _, err = tx.Exec(q, fullName, oldName, oldAccount); err != nil {
+					return err
+				}
+			}
+		}
+		// Whatever is left under the old name (all of it after a move to
+		// another account) is no longer this repository's.
+		if err = closePRs(tx, oldName, oldAccount); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// closePRs marks a repository's open PRs closed, so none stays due.
+func closePRs(tx *sql.Tx, repo string, accountID int64) error {
+	_, err := tx.Exec(`UPDATE pulls SET open=0 WHERE repo=? AND open=1 AND (account_id=? OR account_id=0)`, repo, accountID)
 	return err
 }
 
-func (s *Store) ListRepos() ([]Repo, error) {
-	rows, err := s.db.Query(`SELECT id, installation_id, full_name, enabled, synced, etag, last_polled FROM repos ORDER BY full_name COLLATE NOCASE`)
+func scanRepo(sc scanner) (*Repo, error) {
+	var r Repo
+	var en, sy int
+	if err := sc.Scan(&r.ID, &r.InstallationID, &r.AccountID, &r.FullName, &en, &sy, &r.ETag, &r.LastPolled); err != nil {
+		return nil, err
+	}
+	r.Enabled, r.Synced = en == 1, sy == 1
+	return &r, nil
+}
+
+// ListRepos lists one organization's repositories, or every one with AllAccounts.
+func (s *Store) ListRepos(accountID int64) ([]Repo, error) {
+	rows, err := s.db.Query(`SELECT * FROM repos_v WHERE (?=-1 OR account_id=?) ORDER BY full_name COLLATE NOCASE`, acct(accountID)...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Repo
 	for rows.Next() {
-		var r Repo
-		var en, sy int
-		if err := rows.Scan(&r.ID, &r.InstallationID, &r.FullName, &en, &sy, &r.ETag, &r.LastPolled); err != nil {
+		r, err := scanRepo(rows)
+		if err != nil {
 			return nil, err
 		}
-		r.Enabled, r.Synced = en == 1, sy == 1
-		out = append(out, r)
+		out = append(out, *r)
 	}
 	return out, rows.Err()
+}
+
+// GetRepo returns nil, nil for an unknown repository.
+func (s *Store) GetRepo(id int64) (*Repo, error) {
+	r, err := scanRepo(s.db.QueryRow(`SELECT * FROM repos_v WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return r, err
+}
+
+// GetRepoByName returns nil, nil for an unknown repository.
+func (s *Store) GetRepoByName(fullName string) (*Repo, error) {
+	r, err := scanRepo(s.db.QueryRow(`SELECT * FROM repos_v WHERE full_name=? COLLATE NOCASE LIMIT 1`, fullName))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return r, err
 }
 
 func (s *Store) SetRepoEnabled(id int64, enabled bool) error {
@@ -209,8 +550,9 @@ func (s *Store) SetRepoEnabled(id int64, enabled bool) error {
 	return err
 }
 
-func (s *Store) SetAllReposEnabled(enabled bool) error {
-	_, err := s.db.Exec(`UPDATE repos SET enabled=?, etag=''`, b2i(enabled))
+// SetAllReposEnabled switches every repository of one organization (or of all, with AllAccounts).
+func (s *Store) SetAllReposEnabled(accountID int64, enabled bool) error {
+	_, err := s.db.Exec(`UPDATE repos SET enabled=?, etag='' WHERE (?=-1 OR account_id=?)`, b2i(enabled), accountID, accountID)
 	return err
 }
 
@@ -225,15 +567,30 @@ func (s *Store) PruneRepos(keep []int64) error {
 	for _, id := range keep {
 		set[id] = true
 	}
-	repos, err := s.ListRepos()
+	repos, err := s.ListRepos(AllAccounts)
 	if err != nil {
 		return err
 	}
 	for _, r := range repos {
-		if !set[r.ID] {
-			if _, err := s.db.Exec(`DELETE FROM repos WHERE id=?`, r.ID); err != nil {
-				return err
-			}
+		if set[r.ID] {
+			continue
+		}
+		// Its PRs go too, or they'd stay due and be retried against a
+		// repository the App can no longer see.
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		if err := closePRs(tx, r.FullName, r.AccountID); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM repos WHERE id=?`, r.ID); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -265,11 +622,8 @@ type PR struct {
 	NotBefore      int64
 	TrackedAt      int64
 	UpdatedAt      int64
+	AccountID      int64
 }
-
-const prCols = `repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
-head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
-not_before, tracked_at, updated_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -279,7 +633,7 @@ func scanPR(sc scanner) (*PR, error) {
 	var labels string
 	err := sc.Scan(&p.Repo, &p.Number, &p.InstallationID, &p.Title, &p.Author, &p.URL, &p.BaseRef, &p.HeadRef,
 		&draft, &open, &labels, &p.HeadSHA, &p.ReviewedSHA, &p.AttemptSHA, &p.Attempts, &p.GHUpdatedAt,
-		&p.CommentsSeen, &p.Status, &p.LastError, &skip, &p.NotBefore, &p.TrackedAt, &p.UpdatedAt)
+		&p.CommentsSeen, &p.Status, &p.LastError, &skip, &p.NotBefore, &p.TrackedAt, &p.UpdatedAt, &p.AccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +663,7 @@ func (s *Store) queryPRs(q string, args ...any) ([]PR, error) {
 
 // GetPR returns nil, nil when the PR is not tracked.
 func (s *Store) GetPR(repo string, number int) (*PR, error) {
-	p, err := scanPR(s.db.QueryRow(`SELECT `+prCols+` FROM pulls WHERE repo=? AND number=?`, repo, number))
+	p, err := scanPR(s.db.QueryRow(`SELECT * FROM pulls_v WHERE repo=? AND number=?`, repo, number))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -318,34 +672,45 @@ func (s *Store) GetPR(repo string, number int) (*PR, error) {
 
 func (s *Store) SavePR(p *PR) error {
 	p.UpdatedAt = time.Now().Unix()
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO pulls(`+prCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO pulls(repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
+  head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
+  not_before, tracked_at, updated_at, account_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.Repo, p.Number, p.InstallationID, p.Title, p.Author, p.URL, p.BaseRef, p.HeadRef,
 		b2i(p.Draft), b2i(p.Open), strings.Join(p.Labels, "\n"), p.HeadSHA, p.ReviewedSHA, p.AttemptSHA,
 		p.Attempts, p.GHUpdatedAt, p.CommentsSeen, p.Status, p.LastError, b2i(p.Skip), p.NotBefore,
-		p.TrackedAt, p.UpdatedAt)
+		p.TrackedAt, p.UpdatedAt, p.AccountID)
 	return err
 }
 
-func (s *Store) ListPRs(includeClosed bool, limit int) ([]PR, error) {
-	where := `WHERE open=1`
-	if includeClosed {
-		where = ``
-	}
-	return s.queryPRs(`SELECT `+prCols+` FROM pulls `+where+` ORDER BY updated_at DESC LIMIT ?`, limit)
+// ListPRs lists one organization's PRs (or all, with AllAccounts), most recently updated first.
+func (s *Store) ListPRs(accountID int64, includeClosed bool, limit int) ([]PR, error) {
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE (?=-1 OR account_id=?) AND (?=1 OR open=1) ORDER BY updated_at DESC LIMIT ?`,
+		accountID, accountID, b2i(includeClosed), limit)
 }
 
 func (s *Store) OpenPRs(repo string) ([]PR, error) {
-	return s.queryPRs(`SELECT `+prCols+` FROM pulls WHERE repo=? AND open=1`, repo)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE repo=? AND open=1`, repo)
 }
 
 // DuePRs returns PRs waiting for review whose debounce/backoff window has passed.
 func (s *Store) DuePRs(now int64) ([]PR, error) {
-	return s.queryPRs(`SELECT `+prCols+` FROM pulls WHERE status='pending' AND open=1 AND skip=0 AND not_before<=? ORDER BY not_before`, now)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='pending' AND open=1 AND skip=0 AND not_before<=? ORDER BY not_before`, now)
+}
+
+// NextDue returns when the next pending review becomes due after the given
+// time (0 if none). Reviews already due aren't counted: they're queued by
+// every poll and wake-up, and may stay pending for a while (waiting in the
+// queue, or in an organization with reviews switched off), so counting them
+// would keep the run loop waking every second.
+func (s *Store) NextDue(after int64) int64 {
+	var n sql.NullInt64
+	_ = s.db.QueryRow(`SELECT MIN(not_before) FROM pulls WHERE status='pending' AND open=1 AND skip=0 AND not_before>?`, after).Scan(&n)
+	return n.Int64
 }
 
 // ReviewedOpenPRs returns open PRs the bot has reviewed (candidates for the reply sweep).
 func (s *Store) ReviewedOpenPRs() ([]PR, error) {
-	return s.queryPRs(`SELECT ` + prCols + ` FROM pulls WHERE open=1 AND status IN ('reviewed','pending')`)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE open=1 AND status IN ('reviewed','pending')`)
 }
 
 // ResetReviewing re-queues reviews interrupted by a shutdown.
@@ -354,8 +719,8 @@ func (s *Store) ResetReviewing() error {
 	return err
 }
 
-func (s *Store) CountPRsByStatus() (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM pulls WHERE open=1 GROUP BY status`)
+func (s *Store) CountPRsByStatus(accountID int64) (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM pulls WHERE open=1 AND (?=-1 OR account_id=?) GROUP BY status`, acct(accountID)...)
 	if err != nil {
 		return nil, err
 	}
@@ -394,22 +759,25 @@ type Review struct {
 	CompletionTokens int
 	StartedAt        int64
 	FinishedAt       int64
+	AccountID        int64
+	Event            string // APPROVE or COMMENT once posted
+	Fixed            int    // earlier findings this review confirmed fixed and resolved
+	Sev              [5]int // findings posted (inline and notes) at P1..P5
+	Detailed         bool   // Sev and Fixed were recorded; false for reviews from before they were
 }
-
-const reviewCols = `id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
-status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at`
 
 func scanReview(sc scanner) (*Review, error) {
 	var r Review
 	err := sc.Scan(&r.ID, &r.Repo, &r.Number, &r.HeadSHA, &r.GHReviewID, &r.URL, &r.Summary, &r.Comments,
 		&r.Notes, &r.Model, &r.Skill, &r.Status, &r.Error, &r.Raw, &r.Batches, &r.PromptTokens,
-		&r.CompletionTokens, &r.StartedAt, &r.FinishedAt)
+		&r.CompletionTokens, &r.StartedAt, &r.FinishedAt,
+		&r.AccountID, &r.Event, &r.Fixed, &r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.Detailed)
 	return &r, err
 }
 
 func (s *Store) CreateReview(r *Review) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO reviews(repo, number, head_sha, model, skill, status, started_at) VALUES(?,?,?,?,?,?,?)`,
-		r.Repo, r.Number, r.HeadSHA, r.Model, r.Skill, r.Status, r.StartedAt)
+	res, err := s.db.Exec(`INSERT INTO reviews(repo, number, head_sha, model, skill, status, started_at, account_id, detailed) VALUES(?,?,?,?,?,?,?,?,1)`,
+		r.Repo, r.Number, r.HeadSHA, r.Model, r.Skill, r.Status, r.StartedAt, r.AccountID)
 	if err != nil {
 		return 0, err
 	}
@@ -418,14 +786,16 @@ func (s *Store) CreateReview(r *Review) (int64, error) {
 
 func (s *Store) UpdateReview(r *Review) error {
 	_, err := s.db.Exec(`UPDATE reviews SET head_sha=?, gh_review_id=?, url=?, summary=?, comments=?, notes=?, model=?,
-skill=?, status=?, error=?, raw=?, batches=?, prompt_tokens=?, completion_tokens=?, finished_at=? WHERE id=?`,
+skill=?, status=?, error=?, raw=?, batches=?, prompt_tokens=?, completion_tokens=?, finished_at=?,
+event=?, fixed=?, sev_p1=?, sev_p2=?, sev_p3=?, sev_p4=?, sev_p5=? WHERE id=?`,
 		r.HeadSHA, r.GHReviewID, r.URL, r.Summary, r.Comments, r.Notes, r.Model, r.Skill, r.Status, r.Error,
-		r.Raw, r.Batches, r.PromptTokens, r.CompletionTokens, r.FinishedAt, r.ID)
+		r.Raw, r.Batches, r.PromptTokens, r.CompletionTokens, r.FinishedAt,
+		r.Event, r.Fixed, r.Sev[0], r.Sev[1], r.Sev[2], r.Sev[3], r.Sev[4], r.ID)
 	return err
 }
 
 func (s *Store) GetReview(id int64) (*Review, error) {
-	r, err := scanReview(s.db.QueryRow(`SELECT `+reviewCols+` FROM reviews WHERE id=?`, id))
+	r, err := scanReview(s.db.QueryRow(`SELECT * FROM reviews_v WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -450,17 +820,67 @@ func (s *Store) queryReviews(q string, args ...any) ([]Review, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ListReviews(repo string, number, limit int) ([]Review, error) {
-	return s.queryReviews(`SELECT `+reviewCols+` FROM reviews WHERE repo=? AND number=? ORDER BY id DESC LIMIT ?`, repo, number, limit)
+func (s *Store) ListReviews(accountID int64, repo string, number, limit int) ([]Review, error) {
+	return s.queryReviews(`SELECT * FROM reviews_v WHERE account_id=? AND repo=? AND number=? ORDER BY id DESC LIMIT ?`,
+		accountID, repo, number, limit)
 }
 
-func (s *Store) RecentReviews(limit int) ([]Review, error) {
-	return s.queryReviews(`SELECT `+reviewCols+` FROM reviews ORDER BY id DESC LIMIT ?`, limit)
+// ReviewFilter selects reviews for the review history pages.
+type ReviewFilter struct {
+	AccountID int64  // AllAccounts for every organization
+	Repo      string // "" = any
+	Status    string // "" = any
+	Limit     int
+	Offset    int
+}
+
+// QueryReviews returns the reviews matching f, newest first, and how many match in total.
+func (s *Store) QueryReviews(f ReviewFilter) ([]Review, int, error) {
+	// An empty Repo or Status matches every review.
+	args := []any{f.AccountID, f.AccountID, f.Repo, f.Repo, f.Status, f.Status}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM reviews
+WHERE (?=-1 OR account_id=?) AND (?='' OR repo=?) AND (?='' OR status=?)`, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if f.Limit <= 0 {
+		f.Limit = 50
+	}
+	out, err := s.queryReviews(`SELECT * FROM reviews_v
+WHERE (?=-1 OR account_id=?) AND (?='' OR repo=?) AND (?='' OR status=?) ORDER BY id DESC LIMIT ? OFFSET ?`,
+		append(args, f.Limit, max(0, f.Offset))...)
+	return out, total, err
+}
+
+// RecentReviews lists one organization's newest reviews (or all, with AllAccounts).
+func (s *Store) RecentReviews(accountID int64, limit int) ([]Review, error) {
+	out, _, err := s.QueryReviews(ReviewFilter{AccountID: accountID, Limit: limit})
+	return out, err
+}
+
+// ReviewRepoNames lists the repository names one organization's reviews (or
+// everyone's, with AllAccounts) are filed under, earlier repositories' too.
+func (s *Store) ReviewRepoNames(accountID int64) ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT repo FROM reviews WHERE (?=-1 OR account_id=?) ORDER BY repo COLLATE NOCASE`, acct(accountID)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 // LatestPostedReview returns the most recent review that was posted to GitHub, or nil.
-func (s *Store) LatestPostedReview(repo string, number int) (*Review, error) {
-	r, err := scanReview(s.db.QueryRow(`SELECT `+reviewCols+` FROM reviews WHERE repo=? AND number=? AND status='posted' ORDER BY id DESC LIMIT 1`, repo, number))
+func (s *Store) LatestPostedReview(accountID int64, repo string, number int) (*Review, error) {
+	r, err := scanReview(s.db.QueryRow(`SELECT * FROM reviews_v WHERE account_id=? AND repo=? AND number=? AND status='posted' ORDER BY id DESC LIMIT 1`,
+		accountID, repo, number))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -484,32 +904,44 @@ func (s *Store) MarkHandled(commentID int64, kind, repo string, number int, repl
 // ---------- activity log ----------
 
 type Activity struct {
-	ID      int64
-	TS      int64
-	Level   string
-	Repo    string
-	Number  int
-	Message string
+	ID        int64
+	TS        int64
+	Level     string
+	Repo      string
+	Number    int
+	Message   string
+	AccountID int64
 }
 
+// Log records an activity entry. An entry about a repository is linked to the
+// organization that owns it; the rest (account 0) only administrators see.
 func (s *Store) Log(level, repo string, number int, msg string) {
-	_, _ = s.db.Exec(`INSERT INTO activity(ts, level, repo, number, message) VALUES(?,?,?,?,?)`,
-		time.Now().Unix(), level, repo, number, msg)
+	s.LogFor(0, level, repo, number, msg)
+}
+
+// LogFor records an activity entry under an organization. With accountID 0
+// it's worked out from the PR, then the repository (the most recently
+// created one, if a name has belonged to two accounts); an entry about
+// neither is instance-wide, shown only to administrators.
+func (s *Store) LogFor(accountID int64, level, repo string, number int, msg string) {
+	_, _ = s.db.Exec(`INSERT INTO activity(ts, level, repo, number, message, account_id)
+VALUES(?,?,?,?,?,COALESCE(NULLIF(?,0),
+  (SELECT account_id FROM pulls WHERE repo=? AND number=? AND account_id<>0),
+  (SELECT account_id FROM repos WHERE full_name=? AND account_id<>0 ORDER BY id DESC LIMIT 1),
+  0))`,
+		time.Now().Unix(), level, repo, number, msg, accountID, repo, number, repo)
 	if s.logs.Add(1)%200 == 0 {
-		_, _ = s.db.Exec(`DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 5000`)
+		_, _ = s.db.Exec(`DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 20000`)
 	}
 }
 
-func (s *Store) RecentActivity(limit int, repo string, number int) ([]Activity, error) {
-	q := `SELECT id, ts, level, repo, number, message FROM activity`
-	var args []any
-	if repo != "" {
-		q += ` WHERE repo=? AND number=?`
-		args = append(args, repo, number)
-	}
-	q += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.Query(q, args...)
+// RecentActivity lists one organization's activity (or all, with
+// AllAccounts), optionally only one PR's.
+func (s *Store) RecentActivity(accountID int64, limit int, repo string, number int) ([]Activity, error) {
+	// An empty repo lists everything; otherwise only that PR's entries.
+	rows, err := s.db.Query(`SELECT id, ts, level, repo, number, message, account_id FROM activity
+WHERE (?=-1 OR account_id=?) AND (?='' OR (repo=? AND number=?)) ORDER BY id DESC LIMIT ?`,
+		accountID, accountID, repo, repo, number, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +949,7 @@ func (s *Store) RecentActivity(limit int, repo string, number int) ([]Activity, 
 	var out []Activity
 	for rows.Next() {
 		var a Activity
-		if err := rows.Scan(&a.ID, &a.TS, &a.Level, &a.Repo, &a.Number, &a.Message); err != nil {
+		if err := rows.Scan(&a.ID, &a.TS, &a.Level, &a.Repo, &a.Number, &a.Message, &a.AccountID); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
