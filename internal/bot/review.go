@@ -65,7 +65,10 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	pr, err := b.store.GetPR(j.repo, j.number)
 	var st settings.Settings
 	if err == nil && pr != nil {
-		st = b.SettingsFor(pr.AccountID)
+		if st, err = b.policySettings(b.Settings(), pr.AccountID); err != nil {
+			// Not reviewed with the wrong policy; enqueueDue tries again.
+			b.logf("warn", pr.Repo, pr.Number, "review postponed: couldn't read the organization's policy: %v", err)
+		}
 	}
 	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" || !allowedRepo(st, pr.Repo) ||
 		(!j.force && (pr.Status != "pending" || !st.Review.Enabled)) {

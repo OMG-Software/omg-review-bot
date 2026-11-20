@@ -147,14 +147,33 @@ func (s *Store) queryOrgs(q string, args ...any) ([]Org, error) {
 }
 
 // UpsertOrg records an App installation's account as an active organization.
-func (s *Store) UpsertOrg(id int64, login, typ string, installationID int64) error {
+func (s *Store) UpsertOrg(id int64, login, typ string, installationID int64) (err error) {
 	if typ == "" {
 		typ = "Organization"
 	}
-	_, err := s.db.Exec(`INSERT INTO orgs(id, login, type, installation_id, active, created_at) VALUES(?,?,?,?,1,?)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	// A login belongs to one GitHub account at a time, so another
+	// organization still stored under it is an earlier account that has
+	// since been renamed or deleted. It keeps its history under a name of
+	// its own, so its pages (addressed by login) stay reachable.
+	if _, err = tx.Exec(`UPDATE orgs SET login=login || ' (earlier account ' || id || ')'
+WHERE login=? COLLATE NOCASE AND id<>?`, login, id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO orgs(id, login, type, installation_id, active, created_at) VALUES(?,?,?,?,1,?)
 ON CONFLICT(id) DO UPDATE SET login=excluded.login, type=excluded.type, installation_id=excluded.installation_id, active=1`,
-		id, login, typ, installationID, time.Now().Unix())
-	return err
+		id, login, typ, installationID, time.Now().Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeactivateOrgsExcept marks organizations whose installation is gone as inactive.
@@ -211,10 +230,14 @@ func (s *Store) SetOrgPolicy(id int64, policy string) error {
 }
 
 // OrgPolicy returns the organization's policy JSON ("" when it uses the defaults or is unknown).
-func (s *Store) OrgPolicy(id int64) string {
+// An organization that isn't stored has no policy ("", nil).
+func (s *Store) OrgPolicy(id int64) (string, error) {
 	var p string
-	_ = s.db.QueryRow(`SELECT policy FROM orgs WHERE id=?`, id).Scan(&p)
-	return p
+	err := s.db.QueryRow(`SELECT policy FROM orgs WHERE id=?`, id).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return p, err
 }
 
 // ---------- memberships ----------

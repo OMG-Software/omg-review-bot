@@ -1068,3 +1068,26 @@ func TestEarlierRepoHistoryNotLinked(t *testing.T) {
 		t.Error("the earlier repository's review links to a PR page")
 	}
 }
+
+// TestEarlierOrgPageReachable: an organization whose login another account
+// has since taken keeps its own page, under its new name.
+func TestEarlierOrgPageReachable(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if err := s.st.UpsertOrg(900, "other", "Organization", 30); err != nil { // takes "other"'s login
+		t.Fatal(err)
+	}
+	if _, err := s.st.AddMember(otherID, aliceID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn()
+	old, _ := s.st.GetOrg(otherID)
+	code, body, _ := s.get("/orgs/" + url.PathEscape(old.Login))
+	if code != http.StatusOK || !strings.Contains(body, "other/secret") {
+		t.Errorf("earlier organization's page (%s) = %d; want its own history", old.Login, code)
+	}
+	code, body, _ = s.get("/orgs")
+	if code != http.StatusOK || !strings.Contains(body, `/orgs/other%20%28earlier%20account`) {
+		t.Errorf("/orgs doesn't link to the earlier organization by its new name")
+	}
+}

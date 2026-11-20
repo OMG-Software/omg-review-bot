@@ -1069,3 +1069,28 @@ func TestInterruptedReviewReusesNotice(t *testing.T) {
 		t.Errorf("notice for a new commit = %d, %d posted; want a new one", other, len(gh.posted))
 	}
 }
+
+// TestUnreadablePolicyFailsClosed: if an organization's policy can't be
+// read, its automatic reviews and replies are off, rather than the
+// instance's settings applying to it.
+func TestUnreadablePolicyFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := settings.Defaults()
+	cfg.Review.Enabled, cfg.Replies.Enabled = true, true
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if got := b.settingsFor(cfg, 500); !got.Review.Enabled {
+		t.Fatal("an organization with no policy of its own doesn't get the instance's settings")
+	}
+	st.Close() // every read fails from here
+	got := b.settingsFor(cfg, 500)
+	if got.Review.Enabled || conversationsOn(got) {
+		t.Errorf("settings with an unreadable policy = reviews %v, conversations %v; want both off", got.Review.Enabled, conversationsOn(got))
+	}
+}

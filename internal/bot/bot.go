@@ -192,15 +192,33 @@ func (b *Bot) kickDue() {
 }
 
 // settingsFor returns the settings with an organization's own review policy
-// applied, if it has one.
+// applied, if it has one. If the policy can't be read, the organization's
+// automatic reviews and replies are off until it can: falling back to the
+// instance's settings could review an organization that turned them off.
 func (b *Bot) settingsFor(st settings.Settings, accountID int64) settings.Settings {
+	out, err := b.policySettings(st, accountID)
+	if err != nil {
+		b.log.Warn("read organization policy; skipping its automatic work", "account", accountID, "err", err)
+		out.Review.Enabled, out.Review.ApprovalLevel = false, ""
+		out.Replies.Enabled, out.Replies.Mentions = false, false
+	}
+	return out
+}
+
+// policySettings is settingsFor without the fallback: an error means the
+// organization's policy couldn't be read.
+func (b *Bot) policySettings(st settings.Settings, accountID int64) (settings.Settings, error) {
 	if accountID == 0 {
-		return st
+		return st, nil
 	}
-	if p, ok := settings.ParsePolicy(b.store.OrgPolicy(accountID)); ok {
-		return st.WithPolicy(p)
+	raw, err := b.store.OrgPolicy(accountID)
+	if err != nil {
+		return st, err
 	}
-	return st
+	if p, ok := settings.ParsePolicy(raw); ok {
+		return st.WithPolicy(p), nil
+	}
+	return st, nil
 }
 
 // SettingsFor returns the settings that apply to an organization's repositories.
@@ -382,10 +400,10 @@ func llmConfig(st settings.Settings) llm.Config {
 	}
 }
 
-// SkillDir is where the active review skill lives.
 // DataDir is the directory the bot keeps its files in.
 func (b *Bot) DataDir() string { return b.dataDir }
 
+// SkillDir is where the active review skill lives.
 func (b *Bot) SkillDir(st settings.Settings) string {
 	if st.Review.SkillDir != "" {
 		return st.Review.SkillDir

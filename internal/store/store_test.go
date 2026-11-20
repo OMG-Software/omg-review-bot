@@ -625,3 +625,55 @@ func TestActivityAccount(t *testing.T) {
 		}
 	}
 }
+
+// TestReusedOrgLogin: when another GitHub account takes an earlier
+// organization's login, the earlier one keeps its history under a name of
+// its own, so each is found by its own login.
+func TestReusedOrgLogin(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeactivateOrgsExcept(nil); err != nil { // uninstalled
+		t.Fatal(err)
+	}
+	if err := st.UpsertOrg(900, "Acme", "Organization", 20); err != nil { // the login, now another account's
+		t.Fatal(err)
+	}
+	if o, _ := st.GetOrgByLogin("acme"); o == nil || o.ID != 900 {
+		t.Errorf("acme = %+v, want the account that has the login now", o)
+	}
+	old, _ := st.GetOrg(500)
+	if old == nil || old.Login != "acme (earlier account 500)" {
+		t.Fatalf("earlier organization = %+v", old)
+	}
+	if o, _ := st.GetOrgByLogin(old.Login); o == nil || o.ID != 500 {
+		t.Errorf("earlier organization by its new name = %+v", o)
+	}
+	// It comes back under its current login if it installs the App again.
+	if err := st.UpsertOrg(500, "acme-old", "Organization", 30); err != nil {
+		t.Fatal(err)
+	}
+	if o, _ := st.GetOrg(500); o == nil || o.Login != "acme-old" || !o.Active {
+		t.Errorf("earlier organization reinstalled = %+v", o)
+	}
+}
+
+// TestOrgPolicyError: a policy that can't be read is an error, not "none".
+func TestOrgPolicyError(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := st.OrgPolicy(1); p != "" || err != nil {
+		t.Errorf("policy of an unknown organization = %q, %v", p, err)
+	}
+	st.Close()
+	if _, err := st.OrgPolicy(1); err == nil {
+		t.Error("reading a policy from a closed database reported no error")
+	}
+}

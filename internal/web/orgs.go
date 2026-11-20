@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -30,7 +31,7 @@ func (s *Server) orgFor(w http.ResponseWriter, r *http.Request, manage bool) *st
 	return org
 }
 
-func orgBase(o *store.Org) string { return "/orgs/" + o.Login }
+func orgBase(o *store.Org) string { return "/orgs/" + url.PathEscape(o.Login) }
 
 // orgsPage lists the organizations the viewer can see.
 func (s *Server) orgsPage(w http.ResponseWriter, r *http.Request) {
