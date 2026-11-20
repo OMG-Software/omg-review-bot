@@ -75,7 +75,7 @@ Developer Program.
 | Webhook → Active | **unticked** to poll, or ticked to use [webhooks](#webhooks) |
 | Repository permissions | **Pull requests: Read and write** · **Contents: Read-only** · **Metadata: Read-only** |
 | Organization permissions | **Members: Read-only** (lets sign-in read each person's role in the org) |
-| Where can this App be installed | Only on this account, or **Any account** to serve several orgs |
+| Where can this App be installed | Only on this account, or **Any account** to serve several orgs (see [Adding more organizations](#adding-more-organizations)) |
 
 After creating it, note the **App ID**. It's a number, not the `Iv1…` Client ID. Then click
 **Generate a private key**, which downloads a `.pem` file.
@@ -215,6 +215,48 @@ table**. The administrator's dashboard shows the same totals for every org.
 levels, comment cap, drafts, skip labels, guideline and ignore files, and replies. **Use instance
 defaults instead** removes them. The model, the skill and the review queue stay shared, so every
 org's reviews take turns on the same GPU.
+
+### Adding more organizations
+
+One bot can review any number of organizations and personal accounts. Each one installs the same
+GitHub App, and the bot finds the new installation at its next repository sync (every 15 minutes,
+or straight away with **Repositories → Sync from GitHub**).
+
+1. **Let other accounts install the App.** An App set to *Only on this account* can only be
+   installed on the account that owns it. On the App's GitHub page, open **Advanced → Make
+   public**. Public means any GitHub account *can* install it; it isn't listed in the Marketplace.
+   GitHub lets you make it private again only while it's installed on its own account alone.
+2. **Limit which accounts are reviewed.** In **Settings → GitHub App**, list the orgs you serve
+   under **Only these orgs/accounts**, one per line, *before* you share the install link. While
+   the list is empty every installation is reviewed, so anyone who installs the public App gets
+   their PRs reviewed on your model (and your API key, with Ollama Cloud). An installation the list
+   leaves out never becomes an organization in the bot: its repositories aren't listed, polled or
+   reviewed, and nobody gets access through it. Taking an org that's already in the bot off the
+   list pauses it instead; its repositories, settings and history are kept.
+3. **Send the install link** to an owner of each org. It's on the bot's **Organizations** page
+   (**Add an organization → Install the GitHub App**), and is
+   `https://github.com/apps/<app-name>/installations/new`. They pick their org and choose all
+   repositories or only some. Installing needs an org owner or the *GitHub App manager* role; for
+   anyone else, GitHub sends a request that the org's owners approve.
+4. **Sync.** Click **Repositories → Sync from GitHub**, or wait for the next sync. New
+   repositories are watched straight away while *Watch newly discovered repositories
+   automatically* is on (the default). PRs that are already open are marked `baseline`, as in
+   [Start reviewing](#5-start-reviewing).
+5. **Give people access.** With GitHub sign-in set up, the org's GitHub admins become its owners
+   when they sign in, and can add their team (see *Who gets access* above).
+
+To change which repositories are reviewed later, an owner of that org edits the installation on
+GitHub (**the org's Settings → GitHub Apps → the App → Configure → Repository access**). The bot
+picks up the change at its next sync. Uninstalling the App marks the org *App uninstalled* in the
+bot.
+
+**When one bot isn't enough.** Every org shares the model, the skill and the review queue. If an
+org needs its own model or must be kept fully separate, give it its own private App and run a
+second instance with its own data folder and port:
+
+```powershell
+prbot -data C:\prbot\data-other -listen 127.0.0.1:8081
+```
 
 ## Webhooks
 
