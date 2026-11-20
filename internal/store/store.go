@@ -117,7 +117,6 @@ CREATE TABLE IF NOT EXISTS orgs (
   policy          TEXT NOT NULL DEFAULT '',
   created_at      INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_orgs_login ON orgs(login COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS memberships (
   org_id     INTEGER NOT NULL,
   user_id    INTEGER NOT NULL,
@@ -165,6 +164,18 @@ CREATE INDEX IF NOT EXISTS idx_repos_account ON repos(account_id);
 CREATE INDEX IF NOT EXISTS idx_pulls_account ON pulls(account_id, open);
 CREATE INDEX IF NOT EXISTS idx_reviews_account ON reviews(account_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_activity_account ON activity(account_id, id);
+
+-- A login belongs to one organization at a time. UpsertOrg keeps it that way
+-- by renaming an earlier account still stored under a login another has
+-- taken; the unique index makes it a rule rather than a habit. Databases from
+-- before the index may hold duplicates, so these get the same rename first:
+-- the active one (else the newest) keeps the login.
+UPDATE orgs SET login=login || ' (earlier account ' || id || ')'
+WHERE EXISTS(SELECT 1 FROM orgs o WHERE o.login=orgs.login COLLATE NOCASE AND o.id<>orgs.id
+  AND (o.active>orgs.active OR (o.active=orgs.active AND (o.created_at>orgs.created_at
+  OR (o.created_at=orgs.created_at AND o.id>orgs.id)))));
+DROP INDEX IF EXISTS idx_orgs_login;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orgs_login_unique ON orgs(login COLLATE NOCASE);
 
 -- The views fix each table's column order for the scan functions (scanRepo,
 -- scanPR, scanReview, scanUser, scanOrg), so queries can select * from them.

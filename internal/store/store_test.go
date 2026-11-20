@@ -742,3 +742,42 @@ func TestReviewsWithoutBreakdown(t *testing.T) {
 		t.Errorf("stats = %+v, %v; want 1 review without a breakdown", stats, err)
 	}
 }
+
+// TestOrgLoginsUnique: the database itself refuses two organizations under
+// one login, and opening a database from before that rule renames any it
+// holds (the active one, else the newest, keeps the login).
+func TestOrgLoginsUnique(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As an earlier build left it: no unique index, and duplicates.
+	for _, q := range []string{
+		`DROP INDEX idx_orgs_login_unique`,
+		`INSERT INTO orgs(id, login, active, created_at) VALUES(500, 'acme', 0, 100)`,
+		`INSERT INTO orgs(id, login, active, created_at) VALUES(900, 'Acme', 1, 50)`,
+		`INSERT INTO orgs(id, login, active, created_at) VALUES(600, 'beta', 0, 100)`,
+		`INSERT INTO orgs(id, login, active, created_at) VALUES(700, 'beta', 0, 200)`,
+	} {
+		if _, err := st.db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	st.Close()
+	if st, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for id, want := range map[int64]string{
+		900: "Acme", 500: "acme (earlier account 500)", // the active one keeps it
+		700: "beta", 600: "beta (earlier account 600)", // else the newest
+	} {
+		if o, _ := st.GetOrg(id); o == nil || o.Login != want {
+			t.Errorf("org %d = %+v, want login %q", id, o, want)
+		}
+	}
+	if _, err := st.db.Exec(`INSERT INTO orgs(id, login) VALUES(800, 'ACME')`); err == nil {
+		t.Error("a second organization under a taken login was stored")
+	}
+}
