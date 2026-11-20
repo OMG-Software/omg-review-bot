@@ -246,19 +246,11 @@ func WriteSkillFile(dir, content string) error {
 func InstallZip(data []byte, dest string) error {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return fmt.Errorf("not a valid zip: %w", err)
+		return errors.New("that file isn't a valid zip archive")
 	}
-	root, found := "", false
-	for _, f := range zr.File {
-		name := path.Clean(strings.ReplaceAll(f.Name, "\\", "/"))
-		if strings.EqualFold(path.Base(name), skillFileName) {
-			if d := path.Dir(name); !found || len(d) < len(root) {
-				root, found = d, true
-			}
-		}
-	}
-	if !found {
-		return fmt.Errorf("zip does not contain a %s", skillFileName)
+	root, err := zipSkillRoot(zr.File)
+	if err != nil {
+		return err
 	}
 	dest = filepath.Clean(dest)
 	tmp := dest + ".new"
@@ -297,6 +289,39 @@ func InstallZip(data []byte, dest string) error {
 		}
 	}
 	return swapDir(tmp, dest)
+}
+
+// zipSkillRoot finds the skill inside an archive: the shallowest folder with a
+// SKILL.md. Several at that depth means several skills, which is refused
+// rather than installing one of them by chance.
+func zipSkillRoot(files []*zip.File) (string, error) {
+	var roots []string
+	best := -1
+	for _, f := range files {
+		name := path.Clean(strings.ReplaceAll(f.Name, "\\", "/"))
+		if f.FileInfo().IsDir() || !strings.EqualFold(path.Base(name), skillFileName) || strings.HasPrefix(name, "__MACOSX/") {
+			continue
+		}
+		d := path.Dir(name)
+		depth := 0
+		if d != "." {
+			depth = strings.Count(d, "/") + 1
+		}
+		switch {
+		case best < 0 || depth < best:
+			best, roots = depth, []string{d}
+		case depth == best:
+			roots = append(roots, d)
+		}
+	}
+	switch len(roots) {
+	case 0:
+		return "", fmt.Errorf("zip does not contain a %s", skillFileName)
+	case 1:
+		return roots[0], nil
+	}
+	sort.Strings(roots)
+	return "", fmt.Errorf("zip contains %d skills (%s); upload a zip with just one", len(roots), strings.Join(roots, ", "))
 }
 
 func extract(f *zip.File, target string) error {

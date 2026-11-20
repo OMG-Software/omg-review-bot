@@ -39,8 +39,9 @@ var (
 		".ts": {"typescript", "ts"}, ".mts": {"typescript", "ts"}, ".cts": {"typescript", "ts"}, ".tsx": {"typescript", "ts", "react"},
 		".vue": {"javascript", "typescript", "vue"}, ".svelte": {"javascript", "typescript", "svelte"},
 		".php": {"php"},
-		".py":  {"python", "py"}, ".pyi": {"python", "py"},
-		".rb": {"ruby", "rb"}, ".rake": {"ruby"}, ".gemspec": {"ruby"}, ".erb": {"ruby"},
+		".py":  {"python", "py"}, ".pyi": {"python", "py"}, ".pyw": {"python", "py"}, ".ipynb": {"python", "py"},
+		".astro": {"javascript", "typescript"},
+		".rb":    {"ruby", "rb"}, ".rake": {"ruby"}, ".gemspec": {"ruby"}, ".erb": {"ruby"},
 		".rs": {"rust", "rs"},
 		".sh": {"shell", "bash", "sh"}, ".bash": {"shell", "bash", "sh"}, ".zsh": {"shell", "zsh"}, ".ksh": {"shell"},
 		".ps1": {"powershell", "shell"}, ".psm1": {"powershell", "shell"}, ".bat": {"batch", "shell"}, ".cmd": {"batch", "shell"},
@@ -101,6 +102,12 @@ func LanguageTokens(paths []string) map[string]bool {
 		for _, k := range []string{"k8s/", "kubernetes/", "helm/", "charts/", "terraform/", "ansible/", "deploy/"} {
 			if strings.Contains("/"+lp, "/"+k) {
 				add(infra)
+			}
+		}
+		// Migrations need the SQL guidance whatever language they're written in.
+		for _, k := range []string{"migration/", "migrations/", "migrate/", "alembic/versions/", "flyway/", "liquibase/"} {
+			if strings.Contains("/"+lp, "/"+k) {
+				add([]string{"sql"})
 			}
 		}
 	}

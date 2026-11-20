@@ -80,7 +80,7 @@ func TestPrepareFindings(t *testing.T) {
 		{Path: "pkg/a.go", Line: 1, Severity: "nit", Title: "Over the cap", Body: "..."},
 	}
 	inline, notes, dropped := prepareFindings(st, p, all, mine)
-	if len(inline) != 2 || inline[0].Severity != "major" || inline[0].Path != "pkg/a.go" || inline[1].Line != 3 {
+	if len(inline) != 2 || inline[0].Severity != "P2" || inline[0].Path != "pkg/a.go" || inline[1].Line != 3 {
 		t.Errorf("inline = %+v", inline)
 	}
 	if len(notes) != 1 || notes[0].Title != "Elsewhere" {
@@ -103,5 +103,105 @@ func TestMentionRegexp(t *testing.T) {
 		if re.MatchString(s) != want {
 			t.Errorf("%q: got %v want %v", s, !want, want)
 		}
+	}
+}
+
+func TestNormSeverity(t *testing.T) {
+	for in, want := range map[string]string{
+		"P1": "P1", "p4": "P4", "[P3] MINOR (Defect)": "P3", "MINOR (Quality)": "P4", "critical": "P1",
+		"HIGH": "P2", "minor": "P3", "nitpick": "P5", "maintainability": "P4", "whatever": "P3",
+	} {
+		if got := normSeverity(in); got != want {
+			t.Errorf("normSeverity(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestFindingCommentRoundTrip(t *testing.T) {
+	body := commentBody(finding{Severity: "P4", Title: "Duplicated parsing logic", Body: "**Issue:** x"})
+	if !strings.HasPrefix(body, "**[P4] MINOR (Quality)** Duplicated parsing logic\n") {
+		t.Errorf("comment = %q", body)
+	}
+	if s := findingSeverity(body); s != "P4" {
+		t.Errorf("severity = %q", s)
+	}
+	if s := findingTitle(body); s != "Duplicated parsing logic" {
+		t.Errorf("title = %q", s)
+	}
+	// Comments from before the P1..P5 scale.
+	if s, ti := findingSeverity("🟠 **Possible nil dereference**\n\nx"), findingTitle("🟠 **Possible nil dereference**"); s != "P2" || ti != "Possible nil dereference" {
+		t.Errorf("legacy = %q / %q", s, ti)
+	}
+}
+
+func TestBlockingCounts(t *testing.T) {
+	st := settings.Defaults()
+	st.Review.ApprovalLevel = "P3"
+	mk := func(sev string, resolved bool) botThread {
+		return botThread{root: &github.ReviewComment{Body: commentBody(finding{Severity: sev, Title: "t"})}, resolved: resolved}
+	}
+	threads := []botThread{mk("P1", true), mk("P2", false), mk("P3", false), mk("P4", false),
+		{root: &github.ReviewComment{Body: "no severity at all"}}} // unreadable: counts, to be safe
+	if n := countBlocking(st, threads); n != 3 {
+		t.Errorf("blocking threads = %d, want 3", n)
+	}
+	if n := countBlockingFindings(st, []finding{{Severity: "P3"}, {Severity: "P5"}}); n != 1 {
+		t.Errorf("blocking findings = %d, want 1", n)
+	}
+	sevs, ok := noteSeverities(reviewBody(reviewInfo{notes: []finding{{Severity: "P2"}, {Severity: "P5"}}}))
+	if !ok || strings.Join(sevs, ",") != "P2,P5" {
+		t.Errorf("note severities = %v %v", sevs, ok)
+	}
+	if _, ok := noteSeverities("<!-- prbot:approval -->"); ok {
+		t.Error("approval body read as a review")
+	}
+}
+
+func TestFileView(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= 500; i++ {
+		sb.WriteString("line " + itoa(i) + "\n")
+	}
+	if v := fileView("a\nb", nil, 1000); v != "    1 | a\n    2 | b\n" {
+		t.Errorf("small file = %q", v)
+	}
+	v := fileView(sb.String(), []int{250, 255}, 8000)
+	if !strings.Contains(v, "  250 | line 250") || strings.Contains(v, "  100 | line 100") || !strings.Contains(v, "  ... |") {
+		t.Errorf("excerpt view wrong:\n%s", v)
+	}
+}
+
+func TestProjectDocScoping(t *testing.T) {
+	changed := []string{"main.go", "svc/api/handler.go"}
+	for doc, want := range map[string]bool{
+		"CLAUDE.md":                 true,
+		"CONTRIBUTING.md":           true,
+		"docs/CONVENTIONS.md":       true, // not a scoped doc: applies everywhere
+		"svc/CLAUDE.md":             true,
+		"svc/api/AGENTS.md":         true,
+		"svc/web/CLAUDE.md":         false,
+		"svcx/CLAUDE.md":            false, // prefix of a directory name, not a parent
+		"svc/api/handler/CLAUDE.md": false,
+	} {
+		if got := docApplies(doc, changed); got != want {
+			t.Errorf("docApplies(%q) = %v, want %v", doc, got, want)
+		}
+	}
+
+	docs := []projectDoc{
+		{Path: "CLAUDE.md", Content: strings.Repeat("a", 3000)},
+		{Path: "svc/web/CLAUDE.md", Content: "web only"},
+		{Path: "CONTRIBUTING.md", Content: strings.Repeat("b", 3000)},
+		{Path: "svc/CLAUDE.md", Content: strings.Repeat("c", 100)},
+	}
+	text, used, left := selectDocs(docs, changed, 5000)
+	if strings.Join(used, ",") != "CLAUDE.md,CONTRIBUTING.md" || strings.Join(left, ",") != "svc/CLAUDE.md" {
+		t.Errorf("used=%v left=%v", used, left)
+	}
+	if len(text) > 5000 || !strings.Contains(text, "(truncated to fit the model context)") || strings.Contains(text, "web only") {
+		t.Errorf("selected text (%d chars) wrong", len(text))
+	}
+	if guidelinesPrompt("main", "") != "" {
+		t.Error("no docs should add no prompt section")
 	}
 }

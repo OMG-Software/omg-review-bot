@@ -37,10 +37,23 @@ type Review struct {
 	IgnorePatterns  []string `json:"ignore_patterns"`
 	DebounceSeconds int      `json:"debounce_seconds"`
 	MaxComments     int      `json:"max_comments"`
-	MinSeverity     string   `json:"min_severity"`
-	MaxFiles        int      `json:"max_files"`
-	ReviewExisting  bool     `json:"review_existing"`
+	// CommentLevel is the least severe level ("P1".."P5") posted on the PR.
+	CommentLevel string `json:"comment_level"`
+	// ApprovalLevel ("P1".."P5", or ApprovalOff): the bot approves once no
+	// finding at this level or above is unresolved.
+	ApprovalLevel  string `json:"approval_level"`
+	MaxFiles       int    `json:"max_files"`
+	ReviewExisting bool   `json:"review_existing"`
+	// GuidelineFiles are gitignore-style patterns for the repository's own
+	// rules and conventions docs, read from the PR's base branch. Empty = off.
+	GuidelineFiles []string `json:"guideline_files"`
+
+	// LegacyMinSeverity is the pre-P1..P5 setting; Normalize migrates it.
+	LegacyMinSeverity string `json:"min_severity,omitempty"`
 }
+
+// ApprovalOn reports whether the bot approves pull requests at all.
+func (r Review) ApprovalOn() bool { return SeverityRank(r.ApprovalLevel) > 0 }
 
 type Replies struct {
 	Enabled      bool `json:"enabled"`
@@ -82,7 +95,56 @@ func DefaultBaseURL(provider string) string {
 	return ""
 }
 
-var Severities = []string{"nit", "minor", "major", "critical"}
+// Severity is one finding level. Rank 1 (P1) is the most severe.
+type Severity struct {
+	ID, Label, Icon, Meaning string
+}
+
+// Severities lists the levels from most to least severe.
+var Severities = []Severity{
+	{"P1", "[P1] CRITICAL", "🔴", "security hole, data loss or corruption, crash on a main path"},
+	{"P2", "[P2] MAJOR", "🟠", "wrong behaviour people will hit, or a serious risk under realistic conditions"},
+	{"P3", "[P3] MINOR (Defect)", "🟡", "a real defect with limited impact, such as an edge case or a missing timeout"},
+	{"P4", "[P4] MINOR (Quality)", "🔵", "not a bug: maintainability, duplication, missing tests, clarity"},
+	{"P5", "[P5] NIT", "⚪", "style or taste with no behavioural effect"},
+}
+
+// ApprovalOff is the ApprovalLevel that disables approvals.
+const ApprovalOff = "off"
+
+// SeverityRank returns 1 (P1) .. 5 (P5), or 0 for an unknown level.
+func SeverityRank(id string) int {
+	for i, s := range Severities {
+		if s.ID == id {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// SeverityInfo returns the level's metadata (P3's for an unknown ID).
+func SeverityInfo(id string) Severity {
+	if r := SeverityRank(id); r > 0 {
+		return Severities[r-1]
+	}
+	return Severities[2]
+}
+
+// DefaultGuidelineFiles are the project docs read by default. A pattern with
+// a slash is anchored at the repository root; CLAUDE.md and AGENTS.md match
+// in any directory and apply to the files under it.
+func DefaultGuidelineFiles() []string {
+	return []string{
+		"CLAUDE.md", "AGENTS.md",
+		"/CONTRIBUTING.md", "/.github/CONTRIBUTING.md", "/docs/CONTRIBUTING.md",
+		"/.github/copilot-instructions.md",
+		"/STYLEGUIDE.md", "/STYLE_GUIDE.md", "/CODING_STANDARDS.md", "/CONVENTIONS.md",
+		"/docs/STYLEGUIDE.md", "/docs/CODING_STANDARDS.md", "/docs/CONVENTIONS.md",
+	}
+}
+
+// legacySeverity maps the old four-level min_severity values.
+var legacySeverity = map[string]string{"critical": "P1", "major": "P2", "minor": "P4", "nit": "P5"}
 
 func Defaults() Settings {
 	return Settings{
@@ -106,8 +168,10 @@ func Defaults() Settings {
 			},
 			DebounceSeconds: 60,
 			MaxComments:     20,
-			MinSeverity:     "nit",
+			CommentLevel:    "P5",
+			ApprovalLevel:   ApprovalOff,
 			MaxFiles:        150,
+			GuidelineFiles:  DefaultGuidelineFiles(),
 		},
 		Replies: Replies{Enabled: true, Mentions: true, MaxPerThread: 5},
 		Poll:    Poll{IntervalSeconds: 60, RepoRefreshMinutes: 15},
@@ -139,8 +203,22 @@ func (s *Settings) Normalize() {
 	s.Review.DebounceSeconds = clamp(s.Review.DebounceSeconds, 0, 3600)
 	s.Review.MaxComments = clamp(s.Review.MaxComments, 1, 100)
 	s.Review.MaxFiles = clamp(s.Review.MaxFiles, 1, 3000)
-	if severityIndex(s.Review.MinSeverity) < 0 {
-		s.Review.MinSeverity = "nit"
+	if p, ok := legacySeverity[s.Review.LegacyMinSeverity]; ok {
+		s.Review.CommentLevel = p // old "minor" covered quality issues too, hence P4
+	}
+	s.Review.LegacyMinSeverity = ""
+	s.Review.CommentLevel = strings.ToUpper(strings.TrimSpace(s.Review.CommentLevel))
+	if SeverityRank(s.Review.CommentLevel) == 0 {
+		s.Review.CommentLevel = "P5"
+	}
+	s.Review.ApprovalLevel = strings.ToUpper(strings.TrimSpace(s.Review.ApprovalLevel))
+	switch r := SeverityRank(s.Review.ApprovalLevel); {
+	case r == 0:
+		s.Review.ApprovalLevel = ApprovalOff
+	case r > SeverityRank(s.Review.CommentLevel):
+		// Findings below the comment level are never posted, so they can't
+		// be "unresolved"; an approval level broader than that means the same.
+		s.Review.ApprovalLevel = s.Review.CommentLevel
 	}
 	s.Replies.MaxPerThread = clamp(s.Replies.MaxPerThread, 1, 50)
 	s.Poll.IntervalSeconds = clamp(s.Poll.IntervalSeconds, 15, 3600)
@@ -166,15 +244,6 @@ func (s Settings) Issues() []string {
 		out = append(out, "Ollama Cloud needs an API key")
 	}
 	return out
-}
-
-func severityIndex(s string) int {
-	for i, v := range Severities {
-		if v == s {
-			return i
-		}
-	}
-	return -1
 }
 
 func Load(st *store.Store) (Settings, error) {
