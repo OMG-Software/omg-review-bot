@@ -515,18 +515,36 @@ func TestStaleSnapshotIgnored(t *testing.T) {
 		return p
 	}
 
-	if _, err := b.applyPull(cfg, r, pull("bbb", "2026-01-01T00:10:00Z"), false); err != nil { // the webhook
+	if _, err := b.applyPull(cfg, r, pull("bbb", "2026-01-01T00:10:00Z"), false, 0); err != nil { // the webhook
 		t.Fatal(err)
 	}
-	u, err := b.applyPull(cfg, r, pull("aaa", "2026-01-01T00:05:00Z"), false) // the older poll
+	u, err := b.applyPull(cfg, r, pull("aaa", "2026-01-01T00:05:00Z"), false, 0) // the older poll
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pr, _ := st.GetPR("acme/web", 7); !u.stale || pr.HeadSHA != "bbb" {
 		t.Errorf("stale snapshot applied: stale=%v head=%s", u.stale, pr.HeadSHA)
 	}
-	if u, _ := b.applyPull(cfg, r, pull("ccc", "2026-01-01T00:15:00Z"), false); u.stale || !u.pushed {
+	if u, _ := b.applyPull(cfg, r, pull("ccc", "2026-01-01T00:15:00Z"), false, 0); u.stale || !u.pushed {
 		t.Errorf("newer update not applied: %+v", u)
+	}
+
+	// Same updated_at, to the second: a poll that fetched before "ccc" was
+	// saved can't tell which is newer, so it keeps "ccc" and fetches again.
+	before := time.Now().Unix() - 60
+	u, err = b.applyPull(cfg, r, pull("bbb", "2026-01-01T00:15:00Z"), false, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr, _ := st.GetPR("acme/web", 7); !u.stale || !u.refetch || pr.HeadSHA != "ccc" {
+		t.Errorf("equal-timestamp poll applied: stale=%v refetch=%v head=%s", u.stale, u.refetch, pr.HeadSHA)
+	}
+	// A poll that fetched after the save, or a webhook, is current: applied.
+	if u, _ := b.applyPull(cfg, r, pull("ddd", "2026-01-01T00:15:00Z"), false, time.Now().Unix()+60); u.stale || !u.pushed {
+		t.Errorf("poll fetched after the save not applied: %+v", u)
+	}
+	if u, _ := b.applyPull(cfg, r, pull("eee", "2026-01-01T00:15:00Z"), false, 0); u.stale || !u.pushed {
+		t.Errorf("equal-timestamp webhook not applied: %+v", u)
 	}
 }
 
@@ -559,6 +577,11 @@ func TestReviewNotice(t *testing.T) {
 	}
 	if id := findNotice(cs, botLogin, n.head); id != 3 {
 		t.Errorf("findNotice = %d, want 3", id)
+	}
+	// A notice edited after a failure is found too, so a retry reuses it.
+	cs = append(cs, github.IssueComment{ID: 5, User: bot, Body: n.failedBody(true)})
+	if id := findNotice(cs, botLogin, n.head); id != 5 {
+		t.Errorf("findNotice after a failure = %d, want 5", id)
 	}
 	if id := findNotice(cs, botLogin, "nothing"); id != 0 {
 		t.Errorf("findNotice for an unknown commit = %d, want 0", id)

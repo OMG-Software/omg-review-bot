@@ -273,6 +273,29 @@ func TestLastOwnerGuard(t *testing.T) {
 		}
 	}
 
+	// Adding is insert-only: re-adding the last remaining owner as a member,
+	// while the other owner is removed, can't leave the organization ownerless.
+	for round := 0; round < 20; round++ {
+		_ = st.SetMembership(500, 41, RoleOwner, SourceManual)
+		_ = st.SetMembership(500, 42, RoleOwner, SourceManual)
+		var wg sync.WaitGroup
+		var added bool
+		var addErr, rmErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); added, addErr = st.AddMember(500, 42, RoleMember) }()
+		go func() { defer wg.Done(); rmErr = st.RemoveMember(500, 41) }()
+		wg.Wait()
+		if added || addErr != nil {
+			t.Fatalf("round %d: AddMember on an existing member = %v, %v; want false, nil", round, added, addErr)
+		}
+		if n := owners(); n != 1 {
+			t.Fatalf("round %d: %d owners left (remove error %v), want 1", round, n, rmErr)
+		}
+	}
+	if added, err := st.AddMember(500, 41, RoleMember); !added || err != nil {
+		t.Fatalf("AddMember for someone new = %v, %v; want true, nil", added, err)
+	}
+
 	ms, _ := st.ListMembers(500)
 	last := ms[0].ID
 	if err := st.SetMemberRole(500, last, RoleMember); !errors.Is(err, ErrLastOwner) {

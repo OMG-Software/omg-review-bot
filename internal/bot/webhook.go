@@ -94,7 +94,7 @@ func (b *Bot) webhookPull(st settings.Settings, ev *github.WebhookEvent) string 
 	}
 	st = b.settingsFor(st, r.AccountID)
 	b.prMu.Lock()
-	u, err := b.applyPull(st, *r, ev.PullRequest, false)
+	u, err := b.applyPull(st, *r, ev.PullRequest, false, 0)
 	b.prMu.Unlock()
 	if err != nil {
 		return "error: " + err.Error()

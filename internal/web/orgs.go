@@ -222,16 +222,16 @@ func (s *Server) orgMemberAdd(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, back, fmt.Errorf("%s is a GitHub %s, not a person", gu.Login, gu.Type))
 		return
 	}
-	if m, err := s.store.GetMembership(org.ID, gu.ID); err != nil || m != nil {
-		if err == nil {
-			// Role changes go through the list, which keeps at least one owner.
-			err = fmt.Errorf("@%s already has access as %s; change their role in the list", m.Login, m.Role)
-		}
-		redirectErr(w, r, back, err)
-		return
+	// Adding never changes an existing member's role, even one added by a
+	// request racing this one: role changes go through the list, which keeps
+	// at least one owner.
+	added := false
+	err = s.store.EnsureUser(gu.ID, gu.Login)
+	if err == nil {
+		added, err = s.store.AddMember(org.ID, gu.ID, role)
 	}
-	if err := s.store.EnsureUser(gu.ID, gu.Login); err == nil {
-		err = s.store.SetMembership(org.ID, gu.ID, role, store.SourceManual)
+	if err == nil && !added {
+		err = fmt.Errorf("@%s already has access; change their role in the list", gu.Login)
 	}
 	if err != nil {
 		redirectErr(w, r, back, err)

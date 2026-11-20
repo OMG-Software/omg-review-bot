@@ -243,6 +243,19 @@ ON CONFLICT(org_id, user_id) DO UPDATE SET role=excluded.role, source=excluded.s
 	return err
 }
 
+// AddMember gives someone access by hand, only if they don't have it yet: it
+// never changes an existing member's role (that goes through SetMemberRole,
+// which keeps an owner). It reports whether they were added.
+func (s *Store) AddMember(orgID, userID int64, role string) (bool, error) {
+	res, err := s.db.Exec(`INSERT INTO memberships(org_id, user_id, role, source, created_at) VALUES(?,?,?,?,?)
+ON CONFLICT(org_id, user_id) DO NOTHING`, orgID, userID, role, SourceManual, time.Now().Unix())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 func (s *Store) RemoveMembership(orgID, userID int64) error {
 	_, err := s.db.Exec(`DELETE FROM memberships WHERE org_id=? AND user_id=?`, orgID, userID)
 	return err

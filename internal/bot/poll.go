@@ -140,10 +140,15 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 	for i := range pulls {
 		p := &pulls[i]
 		open[p.Number] = true
-		u, err := b.applyPull(st, r, p, firstSync)
+		u, err := b.applyPull(st, r, p, firstSync, fetched)
 		if err != nil {
 			b.prMu.Unlock()
 			return err
+		}
+		if u.refetch {
+			// With the new ETag, GitHub would answer the next poll with "not
+			// modified" and the skipped snapshot would never be checked again.
+			etag = r.ETag
 		}
 		if u.isNew && !u.baseline {
 			newPRs = append(newPRs, fmt.Sprintf("#%d", p.Number))
@@ -186,6 +191,7 @@ type pullUpdate struct {
 	pushed   bool // the head commit changed
 	activity bool // updated since last seen (possible new comments)
 	stale    bool // older than what's stored; nothing was changed
+	refetch  bool // maybe older; the poll mustn't save the ETag, so it fetches again
 	pr       *store.PR
 }
 
@@ -198,8 +204,9 @@ func newerOnGitHub(a, b string) bool {
 }
 
 // applyPull records the current state of an open or closed PR, from a poll
-// or a webhook. The caller holds prMu.
-func (b *Bot) applyPull(st settings.Settings, r store.Repo, p *github.PullRequest, firstSync bool) (pullUpdate, error) {
+// or a webhook. fetched is when a poll fetched p (0 for a webhook). The caller
+// holds prMu.
+func (b *Bot) applyPull(st settings.Settings, r store.Repo, p *github.PullRequest, firstSync bool, fetched int64) (pullUpdate, error) {
 	now := time.Now().Unix()
 	pr, err := b.store.GetPR(r.FullName, p.Number)
 	if err != nil {
@@ -209,6 +216,12 @@ func (b *Bot) applyPull(st settings.Settings, r store.Repo, p *github.PullReques
 		// A webhook (or a later poll) already recorded a newer state of this
 		// PR than this snapshot, which arrived out of order.
 		return pullUpdate{pr: pr, stale: true}, nil
+	}
+	if pr != nil && fetched > 0 && pr.UpdatedAt >= fetched && pr.GHUpdatedAt == p.UpdatedAt {
+		// GitHub's timestamps are to the second, so a webhook saved while
+		// this poll was fetching can carry the same one and still be newer.
+		// Keep what was saved; the poll fetches again next time.
+		return pullUpdate{pr: pr, stale: true, refetch: true}, nil
 	}
 	var u pullUpdate
 	if pr == nil {
