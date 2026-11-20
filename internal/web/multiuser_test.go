@@ -1131,3 +1131,34 @@ func TestGitHubDecidesLastOwner(t *testing.T) {
 		t.Errorf("a GitHub admin signing in didn't give acme an owner again: %+v", m)
 	}
 }
+
+// TestReviewsWithoutBreakdownShown: a review from before severity and fixed
+// counts were recorded shows "—" for them, not zeros, and the statistics
+// say how many reviews they don't cover.
+func TestReviewsWithoutBreakdownShown(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	db, err := sql.Open("sqlite", s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	res, err := db.Exec(`INSERT INTO reviews(repo, number, status, comments, notes, started_at, finished_at, account_id)
+VALUES('acme/web', 7, 'posted', 4, 1, ?, ?, ?)`, time.Now().Unix()-30, time.Now().Unix(), acmeID) // as the old release stored it
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	s.signIn()
+	for path, want := range map[string]string{
+		"/orgs/acme":                   "not known for 1 earlier review",
+		"/orgs/acme/reviews":           "Not recorded for reviews from before the upgrade",
+		"/prs/acme/web/7":              "Not recorded for reviews from before the upgrade",
+		fmt.Sprintf("/reviews/%d", id): "not recorded for reviews from before the upgrade",
+	} {
+		code, body, _ := s.get(path)
+		if code != http.StatusOK || !strings.Contains(body, want) {
+			t.Errorf("%s = %d; want it to contain %q", path, code, want)
+		}
+	}
+}
