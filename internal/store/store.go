@@ -324,10 +324,55 @@ type Repo struct {
 	LastPolled     int64
 }
 
-func (s *Store) UpsertRepo(id, installationID, accountID int64, fullName string, defaultEnabled bool) error {
-	_, err := s.db.Exec(`INSERT INTO repos(id, installation_id, account_id, full_name, enabled) VALUES(?,?,?,?,?)
+// UpsertRepo records a repository. When one was renamed (same ID, new name),
+// its PRs and reviews move to the new name, as GitHub keeps a repository's PRs
+// and their numbers through a rename; otherwise the PRs left under the old name
+// would stay due, and the new name's would all be reviewed again. A repository
+// moved to another account starts afresh there: its old PRs are closed.
+func (s *Store) UpsertRepo(id, installationID, accountID int64, fullName string, defaultEnabled bool) (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var oldName string
+	var oldAccount int64
+	switch err = tx.QueryRow(`SELECT full_name, account_id FROM repos WHERE id=?`, id).Scan(&oldName, &oldAccount); {
+	case errors.Is(err, sql.ErrNoRows):
+		err = nil
+	case err != nil:
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO repos(id, installation_id, account_id, full_name, enabled) VALUES(?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id, account_id=excluded.account_id, full_name=excluded.full_name`,
-		id, installationID, accountID, fullName, b2i(defaultEnabled))
+		id, installationID, accountID, fullName, b2i(defaultEnabled)); err != nil {
+		return err
+	}
+	if oldName != "" && oldName != fullName {
+		if oldAccount == accountID {
+			if _, err = tx.Exec(`UPDATE OR IGNORE pulls SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`, fullName, oldName, oldAccount); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(`UPDATE reviews SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`, fullName, oldName, oldAccount); err != nil {
+				return err
+			}
+		}
+		// Whatever is left under the old name (all of it after a move to
+		// another account) is no longer this repository's.
+		if err = closePRs(tx, oldName, oldAccount); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// closePRs marks a repository's open PRs closed, so none stays due.
+func closePRs(tx *sql.Tx, repo string, accountID int64) error {
+	_, err := tx.Exec(`UPDATE pulls SET open=0 WHERE repo=? AND open=1 AND (account_id=? OR account_id=0)`, repo, accountID)
 	return err
 }
 
@@ -405,10 +450,25 @@ func (s *Store) PruneRepos(keep []int64) error {
 		return err
 	}
 	for _, r := range repos {
-		if !set[r.ID] {
-			if _, err := s.db.Exec(`DELETE FROM repos WHERE id=?`, r.ID); err != nil {
-				return err
-			}
+		if set[r.ID] {
+			continue
+		}
+		// Its PRs go too, or they'd stay due and be retried against a
+		// repository the App can no longer see.
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		if err := closePRs(tx, r.FullName, r.AccountID); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM repos WHERE id=?`, r.ID); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
 		}
 	}
 	return nil

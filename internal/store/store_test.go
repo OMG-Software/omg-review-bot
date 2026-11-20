@@ -337,3 +337,60 @@ func TestDayWindowStart(t *testing.T) {
 		t.Errorf("DayWindowStart(1) = %s, want today's midnight", time.Unix(got, 0).UTC())
 	}
 }
+
+// TestRepoRenameAndRemoval: a renamed repository keeps its PRs (and their
+// review state) and reviews under the new name; one moved to another account,
+// or removed from the App, has its PRs closed so none stays due.
+func TestRepoRenameAndRemoval(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	pr := func(repo string, number int) *PR {
+		p, err := st.GetPR(repo, number)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if err := st.UpsertRepo(1, 10, 500, "acme/web", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePR(&PR{Repo: "acme/web", Number: 7, Open: true, Status: "pending", ReviewedSHA: "aaa", AccountID: 500}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateReview(&Review{Repo: "acme/web", Number: 7, Status: "posted", AccountID: 500}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.UpsertRepo(1, 10, 500, "acme/site", true); err != nil { // renamed
+		t.Fatal(err)
+	}
+	if pr("acme/web", 7) != nil {
+		t.Error("PR left under the old name")
+	}
+	if p := pr("acme/site", 7); p == nil || !p.Open || p.ReviewedSHA != "aaa" {
+		t.Errorf("PR under the new name = %+v; want it open with its review state", p)
+	}
+	if rs, _ := st.ListReviews(500, "acme/site", 7, 10); len(rs) != 1 {
+		t.Errorf("reviews under the new name = %d, want 1", len(rs))
+	}
+
+	if err := st.UpsertRepo(1, 20, 600, "beta/site", true); err != nil { // moved to another account
+		t.Fatal(err)
+	}
+	if p := pr("acme/site", 7); p == nil || p.Open {
+		t.Errorf("PR of a repository moved to another account = %+v; want it kept, closed", p)
+	}
+
+	if err := st.SavePR(&PR{Repo: "beta/site", Number: 8, Open: true, Status: "pending", AccountID: 600}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PruneRepos(nil); err != nil { // removed from the App
+		t.Fatal(err)
+	}
+	if p := pr("beta/site", 8); p == nil || p.Open {
+		t.Errorf("PR of a removed repository = %+v; want it closed", p)
+	}
+}
