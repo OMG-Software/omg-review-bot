@@ -38,10 +38,12 @@ const (
 // fakeGitHubWeb answers the OAuth and user endpoints sign-in uses, plus the
 // user lookup behind "add member".
 type fakeGitHubWeb struct {
-	mu       sync.Mutex
-	userID   int64 // who the next token belongs to
-	login    string
-	acmeRole string // alice's role in the acme GitHub org: admin | member | "" | forbidden (403)
+	mu     sync.Mutex
+	userID int64 // who the next token belongs to
+	// noInstallations: the App isn't installed anywhere the person can see
+	noInstallations bool
+	login           string
+	acmeRole        string // alice's role in the acme GitHub org: admin | member | "" | forbidden (403)
 }
 
 func (f *fakeGitHubWeb) handler(t *testing.T) http.Handler {
@@ -61,6 +63,8 @@ func (f *fakeGitHubWeb) handler(t *testing.T) http.Handler {
 				t.Errorf("/user without the user token")
 			}
 			send(map[string]any{"id": f.userID, "login": f.login, "name": "Alice A", "avatar_url": "https://avatars.example/a.png"})
+		case p == "/user/installations" && f.noInstallations:
+			send(map[string]any{"installations": []any{}})
 		case p == "/user/installations":
 			send(map[string]any{"installations": []any{
 				map[string]any{"id": 10, "account": map[string]any{"id": acmeID, "login": "acme", "type": "Organization"}},
@@ -856,6 +860,56 @@ func TestStatusHidesInstanceErrors(t *testing.T) {
 	for _, v := range []*viewer{{ID: aliceID}, nil} {
 		if got := s.srv.statusFor(v); got.LastPollErr != "" || got.ConfigIssues != nil {
 			t.Errorf("status for %+v = %+v; want no poll error or configuration problems", v, got)
+		}
+	}
+}
+
+// TestUninstalledOrgKeepsAccess: an organization the App was uninstalled
+// from isn't among the person's installations any more, but their access to
+// it, and so to its history, is kept.
+func TestUninstalledOrgKeepsAccess(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if err := s.st.RemoveMembership(acmeID, aliceID); err != nil { // only what GitHub gives
+		t.Fatal(err)
+	}
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || m.Source != store.SourceGitHub {
+		t.Fatalf("alice's access from GitHub = %+v", m)
+	}
+	if err := s.st.DeactivateOrgsExcept(nil); err != nil { // the App was uninstalled everywhere
+		t.Fatal(err)
+	}
+	s.gh.mu.Lock()
+	s.gh.noInstallations = true
+	s.gh.mu.Unlock()
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || m.Role != store.RoleOwner {
+		t.Errorf("access to an uninstalled organization after sign-in = %+v; want it kept", m)
+	}
+	if code, _, _ := s.get("/orgs/acme"); code != http.StatusOK {
+		t.Errorf("an uninstalled organization's page = %d; want its history shown", code)
+	}
+}
+
+// TestPublicURLChecked: a bare host gets https://, and a Public URL that
+// isn't a full address is refused when settings are saved.
+func TestPublicURLChecked(t *testing.T) {
+	s := newTestSite(t)
+	v := s.cfg
+	v.GitHub.PublicURL = "prbot.example.com/"
+	v.Normalize()
+	if v.GitHub.PublicURL != "https://prbot.example.com" {
+		t.Errorf("bare host normalized to %q", v.GitHub.PublicURL)
+	}
+	for _, bad := range []string{"ftp://prbot.example.com", "https://", "https://prbot.example.com/?x=1"} {
+		if settings.CheckPublicURL(bad) == nil {
+			t.Errorf("CheckPublicURL(%q) accepted it", bad)
+		}
+	}
+	for _, ok := range []string{"", "https://prbot.example.com", "http://10.0.0.5:8080", "https://example.com/bot"} {
+		if err := settings.CheckPublicURL(ok); err != nil {
+			t.Errorf("CheckPublicURL(%q) = %v", ok, err)
 		}
 	}
 }

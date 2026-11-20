@@ -494,6 +494,10 @@ func parseSettings(r *http.Request, cur settings.Settings) settings.Settings {
 
 func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
 	v := parseSettings(r, s.bot.Settings())
+	if err := settings.CheckPublicURL(v.GitHub.PublicURL); err != nil {
+		redirectErr(w, r, "/settings", err)
+		return
+	}
 	if err := settings.Save(s.store, v); err != nil {
 		redirectErr(w, r, "/settings", err)
 		return

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
+	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
@@ -19,7 +20,7 @@ const oauthCookie = "prbot_oauth"
 
 // publicURL is the bot's address as people and GitHub see it.
 func (s *Server) publicURL(r *http.Request) string {
-	if u := s.bot.Settings().GitHub.PublicURL; u != "" {
+	if u := s.bot.Settings().GitHub.PublicURL; u != "" && settings.CheckPublicURL(u) == nil {
 		return u
 	}
 	scheme := "http"
@@ -253,13 +254,17 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 			return notes, fmt.Errorf("update access to %s: %w", org.Login, err)
 		}
 	}
-	// Access derived from GitHub for installations the person can no longer see.
+	// Access derived from GitHub for installations the person can no longer
+	// see. An organization the App was uninstalled from isn't listed either,
+	// but it's kept, history and all, so access to it stays as it was when
+	// the App was removed: there's nothing new to see, and an owner can
+	// still manage it.
 	ms, err := s.store.UserMemberships(u.ID)
 	if err != nil {
 		return notes, err
 	}
 	for _, m := range ms {
-		if m.Source == store.SourceGitHub && !seen[m.OrgID] {
+		if m.Source == store.SourceGitHub && !seen[m.OrgID] && m.OrgActive {
 			removed, err := s.store.RemoveGitHubMembership(m.OrgID, u.ID)
 			if err != nil {
 				return notes, fmt.Errorf("remove access to %s: %w", m.OrgLogin, err)

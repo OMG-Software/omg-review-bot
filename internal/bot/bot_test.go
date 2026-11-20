@@ -874,3 +874,30 @@ func TestSyncRequestDuringSync(t *testing.T) {
 		t.Errorf("synced again with no new request (%d syncs)", n)
 	}
 }
+
+// TestLastWebhookSurvivesRestart: a bot started after deliveries were
+// received knows when the last one came, from the stored deliveries.
+func TestLastWebhookSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	at := time.Now().Add(-5 * time.Minute).Unix()
+	if _, err := st.RecordDelivery(store.Delivery{ID: "d1", Event: "ping", ReceivedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if got := b.Status().LastWebhook; got.Unix() != at {
+		t.Errorf("last webhook after a restart = %v, want %v", got, time.Unix(at, 0))
+	}
+	cfg := settings.Defaults()
+	cfg.GitHub.WebhookSecret = "s"
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !b.Status().WebhooksActive {
+		t.Error("webhooks not active after a restart, with a delivery five minutes ago")
+	}
+}

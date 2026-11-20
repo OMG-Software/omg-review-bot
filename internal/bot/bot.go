@@ -104,6 +104,9 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		wake:    make(chan struct{}, 1),
 		kick:    make(chan struct{}, 1),
 		status:  Status{RateRemaining: -1},
+		// Deliveries are stored (only signed ones), so whether webhooks are
+		// arriving doesn't start over at every restart.
+		lastWebhook: st.LastDeliveryAt(),
 	}
 }
 

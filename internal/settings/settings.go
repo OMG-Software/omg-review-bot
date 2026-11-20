@@ -3,6 +3,8 @@ package settings
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/OMG-Software/omg-review-bot/internal/store"
@@ -240,6 +242,9 @@ func (s *Settings) Normalize() {
 	s.GitHub.ClientSecret = strings.TrimSpace(s.GitHub.ClientSecret)
 	s.GitHub.WebhookSecret = strings.TrimSpace(s.GitHub.WebhookSecret)
 	s.GitHub.PublicURL = strings.TrimRight(strings.TrimSpace(s.GitHub.PublicURL), "/")
+	if s.GitHub.PublicURL != "" && !strings.Contains(s.GitHub.PublicURL, "://") {
+		s.GitHub.PublicURL = "https://" + s.GitHub.PublicURL // a bare host, as typed
+	}
 	s.GitHub.APIBaseURL = strings.TrimRight(strings.TrimSpace(s.GitHub.APIBaseURL), "/")
 	if s.GitHub.APIBaseURL == "" {
 		s.GitHub.APIBaseURL = "https://api.github.com"
@@ -316,6 +321,28 @@ func Load(st *store.Store) (Settings, error) {
 	}
 	v.Normalize()
 	return v, nil
+}
+
+// CheckPublicURL reports what's wrong with a Public URL, if anything: it
+// must be empty (use the address each request came in on) or a full http://
+// or https:// address. Sign-in's callback and the webhook URL are built from
+// it, and secure cookies depend on its scheme.
+func CheckPublicURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		return fmt.Errorf("the Public URL %q isn't a valid address: %w", raw, err)
+	case u.Scheme != "http" && u.Scheme != "https":
+		return fmt.Errorf("the Public URL %q must start with https:// (or http://)", raw)
+	case u.Host == "":
+		return fmt.Errorf("the Public URL %q has no host name", raw)
+	case u.RawQuery != "" || u.Fragment != "" || u.User != nil:
+		return fmt.Errorf("the Public URL %q can't have a query, fragment or user name", raw)
+	}
+	return nil
 }
 
 func Save(st *store.Store, v Settings) error {

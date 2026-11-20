@@ -466,6 +466,16 @@ func (s *Store) RecentDeliveries(limit int) ([]Delivery, error) {
 	return out, rows.Err()
 }
 
+// LastDeliveryAt is when the newest webhook delivery was received, or the
+// zero time if there's none.
+func (s *Store) LastDeliveryAt() time.Time {
+	var at sql.NullInt64
+	if err := s.db.QueryRow(`SELECT MAX(received_at) FROM webhook_deliveries`).Scan(&at); err != nil || !at.Valid {
+		return time.Time{}
+	}
+	return time.Unix(at.Int64, 0)
+}
+
 // CountDeliveriesSince counts webhook deliveries received since a time.
 func (s *Store) CountDeliveriesSince(since int64) int {
 	var n int
