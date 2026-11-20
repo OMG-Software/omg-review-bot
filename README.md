@@ -268,7 +268,9 @@ the API rate limit. The repo list itself refreshes every 15 minutes by default.
    above is open: no unresolved earlier thread and no new finding. Otherwise it's a comment that
    says how many are open, and any earlier approval by the bot is dismissed (a later comment
    doesn't cancel an approval on GitHub). Approval is re-checked between pushes too, so resolving
-   the last open thread, by fix or by hand, gets the PR approved.
+   the last open thread, by fix or by hand, gets the PR approved. A reply in the PR triggers the
+   check within a poll; a thread resolved by hand with no new comment isn't visible in the PR list,
+   so it's picked up by the 15-minute re-check instead.
 7. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
    until the next push or **Review now**.
 
