@@ -1496,6 +1496,30 @@ func TestUnreadablePendingNoteKept(t *testing.T) {
 	}
 }
 
+// TestPendingNoteSyncRetried: when the directory sync after the rename
+// fails, the add reports it, and its retry syncs again before reporting
+// success, rather than taking the listed ID as already on disk.
+func TestPendingNoteSyncRetried(t *testing.T) {
+	p := &pendingEnds{path: filepath.Join(t.TempDir(), "pending-session-ends.json")}
+	orig := syncDir
+	t.Cleanup(func() { syncDir = orig })
+	syncDir = func(string) error { return errors.New("disk on fire") }
+	if err := p.add(42); err == nil {
+		t.Fatal("an add whose rename wasn't synced reported success")
+	}
+	synced := 0
+	syncDir = func(string) error { synced++; return nil }
+	if err := p.add(42); err != nil {
+		t.Fatal(err)
+	}
+	if synced == 0 {
+		t.Error("the retry reported success without syncing the directory")
+	}
+	if ids, err := p.load(); err != nil || len(ids) != 1 || ids[0] != 42 {
+		t.Errorf("note = %v, %v", ids, err)
+	}
+}
+
 // TestShortRangeChartDated: the 7-day chart dates every bar, not just the
 // last; the 30-day one, every week.
 func TestShortRangeChartDated(t *testing.T) {
