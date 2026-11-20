@@ -154,6 +154,9 @@ var addedColumns = []struct{ table, column, alter string }{
 	{"reviews", "sev_p5", `ALTER TABLE reviews ADD COLUMN sev_p5 INTEGER NOT NULL DEFAULT 0`},
 	{"activity", "account_id", `ALTER TABLE activity ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
 	{"webhook_deliveries", "claim", `ALTER TABLE webhook_deliveries ADD COLUMN claim INTEGER NOT NULL DEFAULT 0`},
+	// detailed: the review's severity and fixed counts were recorded (0 for
+	// reviews from before they were, whose counts read as zero).
+	{"reviews", "detailed", `ALTER TABLE reviews ADD COLUMN detailed INTEGER NOT NULL DEFAULT 0`},
 }
 
 // postMigrate indexes the added columns, so it runs after they exist.
@@ -175,7 +178,7 @@ CREATE VIEW pulls_v AS SELECT repo, number, installation_id, title, author, url,
 DROP VIEW IF EXISTS reviews_v;
 CREATE VIEW reviews_v AS SELECT id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
   status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at,
-  account_id, event, fixed, sev_p1, sev_p2, sev_p3, sev_p4, sev_p5 FROM reviews;
+  account_id, event, fixed, sev_p1, sev_p2, sev_p3, sev_p4, sev_p5, detailed FROM reviews;
 DROP VIEW IF EXISTS users_v;
 CREATE VIEW users_v AS SELECT id, login, name, avatar_url, is_admin, disabled, session_epoch, created_at, last_login FROM users;
 DROP VIEW IF EXISTS orgs_v;
@@ -368,7 +371,9 @@ ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id, account_
 		return err
 	}
 	if oldName != "" && oldName != fullName {
-		if oldAccount == accountID {
+		// Account 0: stored before organizations existed and not backfilled
+		// yet. It's the same repository, so it's the same owner.
+		if oldAccount == accountID || oldAccount == 0 {
 			// A name belongs to one repository at a time, so PRs still stored
 			// under the new one are left over from an earlier repository that
 			// had it. They give way, so each PR moves together with its reviews.
@@ -676,6 +681,7 @@ type Review struct {
 	Event            string // APPROVE or COMMENT once posted
 	Fixed            int    // earlier findings this review confirmed fixed and resolved
 	Sev              [5]int // findings posted (inline and notes) at P1..P5
+	Detailed         bool   // Sev and Fixed were recorded; false for reviews from before they were
 }
 
 func scanReview(sc scanner) (*Review, error) {
@@ -683,12 +689,12 @@ func scanReview(sc scanner) (*Review, error) {
 	err := sc.Scan(&r.ID, &r.Repo, &r.Number, &r.HeadSHA, &r.GHReviewID, &r.URL, &r.Summary, &r.Comments,
 		&r.Notes, &r.Model, &r.Skill, &r.Status, &r.Error, &r.Raw, &r.Batches, &r.PromptTokens,
 		&r.CompletionTokens, &r.StartedAt, &r.FinishedAt,
-		&r.AccountID, &r.Event, &r.Fixed, &r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4])
+		&r.AccountID, &r.Event, &r.Fixed, &r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.Detailed)
 	return &r, err
 }
 
 func (s *Store) CreateReview(r *Review) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO reviews(repo, number, head_sha, model, skill, status, started_at, account_id) VALUES(?,?,?,?,?,?,?,?)`,
+	res, err := s.db.Exec(`INSERT INTO reviews(repo, number, head_sha, model, skill, status, started_at, account_id, detailed) VALUES(?,?,?,?,?,?,?,?,1)`,
 		r.Repo, r.Number, r.HeadSHA, r.Model, r.Skill, r.Status, r.StartedAt, r.AccountID)
 	if err != nil {
 		return 0, err

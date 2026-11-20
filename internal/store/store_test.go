@@ -677,3 +677,68 @@ func TestOrgPolicyError(t *testing.T) {
 		t.Error("reading a policy from a closed database reported no error")
 	}
 }
+
+// TestRenameBeforeBackfill: a repository stored by the single-organization
+// release (no account yet) and renamed before the first sync after the
+// upgrade keeps its PRs, open and with their review state, under the new name.
+func TestRenameBeforeBackfill(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertRepo(1, 10, 0, "acme/web", true); err != nil { // the old release's row
+		t.Fatal(err)
+	}
+	if err := st.SavePR(&PR{Repo: "acme/web", Number: 7, InstallationID: 10, Open: true, Status: "reviewed", ReviewedSHA: "aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateReview(&Review{Repo: "acme/web", Number: 7, Status: "posted", StartedAt: time.Now().Unix() + 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertRepo(1, 10, 500, "acme/site", true); err != nil { // first sync after the upgrade, renamed
+		t.Fatal(err)
+	}
+	if p, _ := st.GetPR("acme/site", 7); p == nil || !p.Open || p.ReviewedSHA != "aaa" {
+		t.Errorf("PR under the new name = %+v; want it moved, open, with its review state", p)
+	}
+	if p, _ := st.GetPR("acme/web", 7); p != nil {
+		t.Errorf("PR left under the old name: %+v", p)
+	}
+	if err := st.BackfillAccounts(); err != nil {
+		t.Fatal(err)
+	}
+	if rs, _ := st.ListReviews(500, "acme/site", 7, 10); len(rs) != 1 {
+		t.Errorf("reviews of the renamed repository = %d, want 1", len(rs))
+	}
+}
+
+// TestReviewsWithoutBreakdown: reviews recorded before severity and fixed
+// counts were are marked as such, and counted, so the statistics can say
+// they're missing rather than show zeros; new reviews are detailed.
+func TestReviewsWithoutBreakdown(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().Unix()
+	if _, err := st.db.Exec(`INSERT INTO reviews(repo, number, status, comments, notes, started_at, account_id) VALUES('acme/web', 1, 'posted', 4, 1, ?, 500)`, now); err != nil {
+		t.Fatal(err) // as the old release stored it
+	}
+	id, err := st.CreateReview(&Review{Repo: "acme/web", Number: 2, Status: "posted", StartedAt: now, AccountID: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rv, _ := st.GetReview(id); rv == nil || !rv.Detailed {
+		t.Errorf("new review = %+v; want it detailed", rv)
+	}
+	rs, _ := st.ListReviews(500, "acme/web", 1, 10)
+	if len(rs) != 1 || rs[0].Detailed {
+		t.Errorf("review from before the upgrade = %+v; want it not detailed", rs)
+	}
+	stats, err := st.ReviewStatsSince(500, now-60)
+	if err != nil || stats.Undetailed != 1 {
+		t.Errorf("stats = %+v, %v; want 1 review without a breakdown", stats, err)
+	}
+}

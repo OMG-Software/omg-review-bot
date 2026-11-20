@@ -42,8 +42,8 @@
       <td><code>{{short .HeadSHA}}</code></td>
       <td><a href="/reviews/{{.ID}}"><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span></a>{{if eq .Event "APPROVE"}} <span class="pill s-reviewed">approved</span>{{end}}</td>
       <td>{{.Comments}}{{if .Notes}} + {{.Notes}} notes{{end}}</td>
-      <td>{{$s := index .Sev 0}}{{$m := index .Sev 1}}{{if or $s $m}}<b>{{add $s $m}}</b>{{else}}<span class="muted">0</span>{{end}}</td>
-      <td>{{if .Fixed}}{{.Fixed}}{{else}}<span class="muted">0</span>{{end}}</td>
+      {{if .Detailed}}<td>{{$s := index .Sev 0}}{{$m := index .Sev 1}}{{if or $s $m}}<b>{{add $s $m}}</b>{{else}}<span class="muted">0</span>{{end}}</td>
+      <td>{{if .Fixed}}{{.Fixed}}{{else}}<span class="muted">0</span>{{end}}</td>{{else}}<td class="muted" title="Not recorded for reviews from before the upgrade">—</td><td class="muted">—</td>{{end}}
       <td>{{dur .StartedAt .FinishedAt}}</td>
       <td title="{{when .StartedAt}}">{{ago .StartedAt}}</td>
     </tr>
@@ -60,9 +60,9 @@
   <div class="stat"><span class="label">Findings posted</span><span class="value">{{num .Findings}}</span>
     <span class="sub">{{.Comments}} inline · {{.Notes}} in summary</span></div>
   <div class="stat"><span class="label">Critical + major</span><span class="value">{{add (index .Sev 0) (index .Sev 1)}}</span>
-    <span class="sub">{{index .Sev 0}} P1 · {{index .Sev 1}} P2</span></div>
+    <span class="sub">{{index .Sev 0}} P1 · {{index .Sev 1}} P2</span>{{if .Undetailed}}<span class="sub muted">not known for {{.Undetailed}} earlier {{if eq .Undetailed 1}}review{{else}}reviews{{end}}</span>{{end}}</div>
   <div class="stat"><span class="label">Confirmed fixed</span><span class="value">{{num .Fixed}}</span>
-    <span class="sub">earlier findings, confirmed in this period</span></div>
+    <span class="sub">earlier findings, confirmed in this period</span>{{if .Undetailed}}<span class="sub muted">not known for {{.Undetailed}} earlier {{if eq .Undetailed 1}}review{{else}}reviews{{end}}</span>{{end}}</div>
   <div class="stat"><span class="label">Approvals</span><span class="value">{{.Approvals}}</span></div>
   <div class="stat"><span class="label">Average review</span><span class="value small">{{secs .AvgSeconds}}</span>
     <span class="sub">{{if .Errors}}<span class="bad">{{.Errors}} failed</span>{{else}}none failed{{end}}</span></div>

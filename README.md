@@ -566,7 +566,8 @@ server {
 Then, in the bot:
 
 1. Open **Settings → Sign-in and webhooks** and set **Public URL** to `https://prbot.example.com`.
-   Behind a proxy the bot only sees a plain HTTP connection from nginx, so this is how it knows the
+   The bot must be at the root of its host name: a path such as `https://example.com/prbot` isn't
+   supported, and the setting refuses one. Behind a proxy the bot only sees a plain HTTP connection from nginx, so this is how it knows the
    address to use for the sign-in callback and the webhook URL.
 2. Copy the callback and webhook URLs the section shows into the GitHub App, as in
    [Organizations and sign-in](#organizations-and-sign-in) and [Webhooks](#webhooks).

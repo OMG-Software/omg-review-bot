@@ -325,8 +325,9 @@ func Load(st *store.Store) (Settings, error) {
 
 // CheckPublicURL reports what's wrong with a Public URL, if anything: it
 // must be empty (use the address each request came in on) or a full http://
-// or https:// address. Sign-in's callback and the webhook URL are built from
-// it, and secure cookies depend on its scheme.
+// or https:// address with no path, since the bot's pages, links and cookies
+// all assume it's served at the root of its host. Sign-in's callback and the
+// webhook URL are built from it, and secure cookies depend on its scheme.
 func CheckPublicURL(raw string) error {
 	if raw == "" {
 		return nil
@@ -341,6 +342,8 @@ func CheckPublicURL(raw string) error {
 		return fmt.Errorf("the Public URL %q has no host name", raw)
 	case u.RawQuery != "" || u.Fragment != "" || u.User != nil:
 		return fmt.Errorf("the Public URL %q can't have a query, fragment or user name", raw)
+	case u.Path != "" && u.Path != "/":
+		return fmt.Errorf("the Public URL %q has a path; the bot must be served at the root of its host (give it a host name of its own, such as https://prbot.example.com)", raw)
 	}
 	return nil
 }

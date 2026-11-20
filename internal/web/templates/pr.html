@@ -36,8 +36,8 @@
       <td><code>{{short .HeadSHA}}</code></td>
       <td><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span>{{if .URL}} <a href="{{.URL}}" target="_blank" rel="noopener">view ↗</a>{{end}}</td>
       <td>{{.Comments}}{{if .Notes}} + {{.Notes}} notes{{end}}</td>
-      <td>{{add (index .Sev 0) (index .Sev 1)}}</td>
-      <td>{{.Fixed}}</td>
+      {{if .Detailed}}<td>{{add (index .Sev 0) (index .Sev 1)}}</td>
+      <td>{{.Fixed}}</td>{{else}}<td class="muted" title="Not recorded for reviews from before the upgrade">—</td><td class="muted">—</td>{{end}}
       <td><code>{{.Model}}</code></td>
       <td>{{.PromptTokens}} / {{.CompletionTokens}}</td>
       <td title="{{when .StartedAt}}">{{ago .StartedAt}}</td>

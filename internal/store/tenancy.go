@@ -524,6 +524,7 @@ type ReviewStats struct {
 	Notes            int    // findings posted in the review body
 	Fixed            int    // findings later confirmed fixed by the bot
 	Sev              [5]int // findings by level P1..P5
+	Undetailed       int    // posted reviews with findings but no Sev or Fixed counts (from before they were recorded)
 	PromptTokens     int64
 	CompletionTokens int64
 	AvgSeconds       int // average duration of a posted review
@@ -542,11 +543,12 @@ func (s *Store) ReviewStatsSince(accountID, since int64) (ReviewStats, error) {
   COUNT(DISTINCT CASE WHEN status='posted' THEN repo END),
   COALESCE(SUM(comments),0), COALESCE(SUM(notes),0), COALESCE(SUM(fixed),0),
   COALESCE(SUM(sev_p1),0), COALESCE(SUM(sev_p2),0), COALESCE(SUM(sev_p3),0), COALESCE(SUM(sev_p4),0), COALESCE(SUM(sev_p5),0),
+  COALESCE(SUM(status='posted' AND detailed=0 AND comments+notes>0),0),
   COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
   AVG(CASE WHEN status='posted' AND finished_at>=started_at THEN finished_at-started_at END)
 FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?)`, since, accountID, accountID).Scan(
 		&r.Reviews, &r.Posted, &r.Errors, &r.Approvals, &r.PRs, &r.Repos, &r.Comments, &r.Notes, &r.Fixed,
-		&r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.PromptTokens, &r.CompletionTokens, &avg)
+		&r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.Undetailed, &r.PromptTokens, &r.CompletionTokens, &avg)
 	r.AvgSeconds = int(avg.Float64)
 	return r, err
 }

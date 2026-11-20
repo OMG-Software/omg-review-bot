@@ -903,12 +903,12 @@ func TestPublicURLChecked(t *testing.T) {
 	if v.GitHub.PublicURL != "https://prbot.example.com" {
 		t.Errorf("bare host normalized to %q", v.GitHub.PublicURL)
 	}
-	for _, bad := range []string{"ftp://prbot.example.com", "https://", "https://prbot.example.com/?x=1"} {
+	for _, bad := range []string{"ftp://prbot.example.com", "https://", "https://prbot.example.com/?x=1", "https://example.com/bot"} {
 		if settings.CheckPublicURL(bad) == nil {
 			t.Errorf("CheckPublicURL(%q) accepted it", bad)
 		}
 	}
-	for _, ok := range []string{"", "https://prbot.example.com", "http://10.0.0.5:8080", "https://example.com/bot"} {
+	for _, ok := range []string{"", "https://prbot.example.com", "http://10.0.0.5:8080"} {
 		if err := settings.CheckPublicURL(ok); err != nil {
 			t.Errorf("CheckPublicURL(%q) = %v", ok, err)
 		}
