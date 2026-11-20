@@ -62,7 +62,7 @@
   <div class="stat"><span class="label">Critical + major</span><span class="value">{{add (index .Sev 0) (index .Sev 1)}}</span>
     <span class="sub">{{index .Sev 0}} P1 · {{index .Sev 1}} P2</span></div>
   <div class="stat"><span class="label">Confirmed fixed</span><span class="value">{{num .Fixed}}</span>
-    <span class="sub">{{if .Findings}}{{pct .Fixed .Findings}}% of findings posted{{else}}—{{end}}</span></div>
+    <span class="sub">earlier findings, confirmed in this period</span></div>
   <div class="stat"><span class="label">Approvals</span><span class="value">{{.Approvals}}</span></div>
   <div class="stat"><span class="label">Average review</span><span class="value small">{{secs .AvgSeconds}}</span>
     <span class="sub">{{if .Errors}}<span class="bad">{{.Errors}} failed</span>{{else}}none failed{{end}}</span></div>

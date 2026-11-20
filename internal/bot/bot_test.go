@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -45,8 +46,9 @@ type fakeGitHub struct {
 	resolves  []string // thread IDs resolved through GraphQL
 	jwtCalls  int
 	treeCalls int
-	docRefs   []string // refs project docs were read at
-	posted    []string // PR conversation comments the bot posted
+	docRefs   []string         // refs project docs were read at
+	posted    []string         // PR conversation comments the bot posted
+	edited    map[int64]string // the latest text of each comment the bot edited
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -60,7 +62,7 @@ var projectDocs = map[string]string{
 
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
-		updatedAt: "2026-01-01T00:00:00Z", head: "aaa111", nextID: 1000, resolved: map[int64]bool{},
+		updatedAt: "2026-01-01T00:00:00Z", head: "aaa111", nextID: 1000, resolved: map[int64]bool{}, edited: map[int64]string{},
 		patch:   "@@ -10,3 +10,5 @@ func main() {\n \ta := 1\n+\tb := a / 0\n+\tfmt.Println(b)\n \treturn",
 		content: strings.Repeat("// line\n", 20),
 	}
@@ -154,6 +156,12 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			send(map[string]any{"id": 9000 + len(f.posted), "user": bot, "body": body["body"]})
 		case p == "/repos/acme/web/issues/7/comments":
 			send([]any{})
+		case strings.HasPrefix(p, "/repos/acme/web/issues/comments/") && r.Method == http.MethodPatch:
+			id, _ := strconv.ParseInt(strings.TrimPrefix(p, "/repos/acme/web/issues/comments/"), 10, 64)
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.edited[id] = body["body"]
+			send(map[string]any{"id": id, "user": bot, "body": body["body"]})
 		case strings.HasPrefix(p, "/repos/acme/web/git/trees/"):
 			f.treeCalls++
 			tree := []any{map[string]any{"path": "main.go", "type": "blob"}, map[string]any{"path": "pkg", "type": "tree"}}
@@ -343,6 +351,10 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 		if !strings.Contains(gh.posted[0], want) {
 			t.Errorf("review-started comment missing %q:\n%s", want, gh.posted[0])
 		}
+	}
+	// Once the review is posted, the notice says so (keeping its marker).
+	if e := gh.edited[9001]; !strings.Contains(e, "**Review posted**") || !strings.Contains(e, "<!-- prbot:review-started sha=aaa111 -->") {
+		t.Errorf("notice after the review = %q, want it to say the review is posted", e)
 	}
 	rv := gh.reviews[0]
 	if rv.CommitID != "aaa111" || rv.Event != "COMMENT" {
@@ -694,6 +706,10 @@ func TestReviewNotice(t *testing.T) {
 	}
 	if f := n.failedBody(false); !strings.Contains(f, "won't be retried") {
 		t.Errorf("failed notice (final):\n%s", f)
+	}
+	if f := n.postedBody("https://github.example/r/1"); !strings.Contains(f, "**Review posted**") ||
+		!strings.Contains(f, "[here](https://github.example/r/1)") || !strings.Contains(f, noticeMarker(n.head)) {
+		t.Errorf("posted notice:\n%s", f)
 	}
 
 	bot := github.User{Login: botLogin}

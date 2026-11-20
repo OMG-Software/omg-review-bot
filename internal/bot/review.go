@@ -268,7 +268,12 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	var noticeID int64
 	var raw strings.Builder
 	defer func() {
-		if err != nil && !errors.Is(err, errSkip) && noticeID != 0 {
+		switch {
+		case noticeID == 0:
+		case err == nil:
+			// So the notice doesn't go on saying a review is under way.
+			b.updateNotice(cl, pr, noticeID, notice.postedBody(rec.URL))
+		case !errors.Is(err, errSkip):
 			// Same count handleReview uses to decide on a retry.
 			attempts := 1
 			if pr.AttemptSHA == pr.HeadSHA {

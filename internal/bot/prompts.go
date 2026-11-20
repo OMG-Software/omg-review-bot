@@ -112,6 +112,15 @@ func (n reviewNotice) startedBody() string {
 	return n.body("🔍 **Review started**", "The review will be posted here when it's done.")
 }
 
+// postedBody says the review is done, with a link to it.
+func (n reviewNotice) postedBody(url string) string {
+	note := "The review is posted below."
+	if url != "" {
+		note = "The review is posted [here](" + url + ")."
+	}
+	return n.body("✅ **Review posted**", note)
+}
+
 // failedBody says the review didn't finish. The error itself isn't shown: it
 // can name internal hosts. The bot's own pages have it.
 func (n reviewNotice) failedBody(retrying bool) string {

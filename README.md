@@ -357,8 +357,9 @@ event checks it for replies, so polling only catches anything missed.
    hunks. Large diffs are split into parts that fit the context, and the parts' summaries are
    combined at the end. If there's anything to review, the bot first posts a PR comment saying the
    review has started, with the commit, the start time (UTC), the model and the review skill.
-   A PR with nothing reviewable gets no such comment. If the review fails, the comment is edited
-   to say so (without the error, which is on the PR's page in the bot), and a retry of the same
+   A PR with nothing reviewable gets no such comment. When the review is posted, the comment is
+   edited to say so, with a link to it. If the review fails, the comment is edited to say that
+   instead (without the error, which is on the PR's page in the bot), and a retry of the same
    commit reuses it.
 3. The model returns JSON findings. The bot checks each finding's file and line against the
    diff, moving it to the nearest changed line up to 3 lines away if needed. It drops findings

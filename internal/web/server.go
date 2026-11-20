@@ -311,13 +311,7 @@ var funcs = template.FuncMap{
 		}
 		return (time.Duration(n) * time.Second).String()
 	},
-	"div": func(a, b int) int { return a / max(1, b) },
-	"pct": func(a, b int) int {
-		if b == 0 {
-			return 0
-		}
-		return a * 100 / b
-	},
+	"div":      func(a, b int) int { return a / max(1, b) },
 	"add":      func(a, b int) int { return a + b },
 	"sub":      func(a, b int) int { return a - b },
 	"num":      humanNum,
