@@ -523,4 +523,6 @@ func (s *Store) OrgSummaries(only []int64) ([]OrgSummary, error) {
 }
 
 // NormLogin lowercases a GitHub login for comparisons.
-func NormLogin(s string) string { return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "@"))) }
+func NormLogin(s string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "@")))
+}

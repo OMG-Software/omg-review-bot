@@ -38,6 +38,7 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
 - [How it works](#how-it-works)
 - [Settings](#settings)
 - [Running as a service](#running-as-a-service)
+- [Behind a reverse proxy (nginx)](#behind-a-reverse-proxy-nginx)
 - [Troubleshooting](#troubleshooting)
 - [Security](#security)
 - [Development](#development)
@@ -56,7 +57,10 @@ prbot
 Linux), so add that folder to your PATH or run the binary from there. To build from a clone
 instead: `go build -o prbot.exe ./cmd/prbot` (on Linux, `-o prbot`).
 
-Open **http://127.0.0.1:8080** and choose an admin password. Then do the following.
+Open **http://127.0.0.1:8080**. On the first visit every page leads to a setup page where you
+choose the administrator password. That signs you in and takes you to **Settings** to connect
+GitHub and a model, as below. To sign in with the password again later, go to
+**http://127.0.0.1:8080/admin-login** (see [Administrator sign-in](#administrator-sign-in)).
 
 ### 1. Create the GitHub App
 
@@ -176,6 +180,26 @@ GitHub too, or have an administrator block them. An org always keeps at least on
 
 The password administrator is always an administrator. On the **Users** page they can make a
 GitHub user an administrator, or block someone, which signs them out at once.
+
+### Administrator sign-in
+
+The administrator password has its own sign-in page, **`/admin-login`** (for example
+`https://prbot.example.com/admin-login`). The normal sign-in page, `/login`, only offers
+**Sign in with GitHub** and doesn't link to it, so bookmark it.
+
+- **First run.** You set the password on the setup page and are signed in at once, so you don't
+  need `/admin-login` until you next sign in.
+- **Before GitHub sign-in is set up**, the password is the only way in, so `/login` sends you to
+  `/admin-login` automatically.
+- **Signing out** as the administrator returns you to `/admin-login`; GitHub users return to
+  `/login`.
+- **Forgot the password?** Stop the bot and run `prbot -reset-password`, then set a new one on the
+  setup page.
+
+Keeping the page separate keeps the password form away from everyday users. It isn't a secret,
+though; the password is what protects it. To limit who can reach it, restrict the path in your
+reverse proxy (see [Behind a reverse proxy](#behind-a-reverse-proxy-nginx)). GitHub users who are
+administrators sign in with GitHub as usual.
 
 **Statistics.** Each org's **Overview** shows, for the last 7, 30 or 90 days: reviews posted,
 findings by level, confirmed fixes, approvals, average review time and model tokens, plus a chart
@@ -437,6 +461,74 @@ install commands. It writes logs to the journal: `journalctl -u prbot -f`.
 **Updating.** Run `go install github.com/OMG-Software/omg-review-bot/cmd/prbot@latest` (or
 rebuild), then restart the bot. Reviews that were interrupted are re-queued on startup.
 
+## Behind a reverse proxy (nginx)
+
+GitHub sign-in and webhooks need the bot to be reachable over HTTPS. The usual way is to keep the
+bot on its default `127.0.0.1:8080` and put nginx in front of it to handle TLS:
+
+```nginx
+server {
+    listen 80;
+    server_name prbot.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name prbot.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/prbot.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/prbot.example.com/privkey.pem;
+
+    # Keep browsers on HTTPS (see the note on cookies below).
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # Webhook payloads and skill zip uploads can be up to 25 MB (nginx allows 1 MB by default).
+    client_max_body_size 25m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+
+        # Required: the bot blocks a form post unless the browser's Origin matches this host.
+        proxy_set_header Host $host;
+
+        # "Test model" waits for the model's reply, up to the LLM timeout (600 s by default).
+        proxy_read_timeout 600s;
+    }
+}
+```
+
+Then, in the bot:
+
+1. Open **Settings → Sign-in and webhooks** and set **Public URL** to `https://prbot.example.com`.
+   Behind a proxy the bot only sees a plain HTTP connection from nginx, so this is how it knows the
+   address to use for the sign-in callback and the webhook URL.
+2. Copy the callback and webhook URLs the section shows into the GitHub App, as in
+   [Organizations and sign-in](#organizations-and-sign-in) and [Webhooks](#webhooks).
+
+Notes:
+
+- **Keep the `Host` header.** Without `proxy_set_header Host $host`, nginx sends `127.0.0.1:8080`,
+  and every save, sign-out and button press fails with *cross-origin request blocked*. If nginx
+  listens on a port other than 443, use `$http_host` instead, which includes the port.
+- **Cookies.** The bot marks its cookies `Secure` only when it terminates TLS itself, so behind
+  nginx they aren't. The `Strict-Transport-Security` header makes browsers use HTTPS for the site,
+  so the cookies are never sent unencrypted.
+- **Don't expose port 8080.** Keep `-listen 127.0.0.1:8080` so the only way in is through nginx.
+- **Restricting the administrator sign-in (optional).** To allow the password sign-in only from
+  your own network, add this inside the `server` block. Everyone else gets `403` there and can
+  still sign in with GitHub:
+
+  ```nginx
+  location = /admin-login {
+      allow 10.0.0.0/8;     # your office or VPN range
+      deny  all;
+      proxy_pass http://127.0.0.1:8080;
+      proxy_set_header Host $host;
+  }
+  ```
+- **Getting a certificate.** With certbot: `sudo certbot --nginx -d prbot.example.com`.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -452,9 +544,12 @@ rebuild), then restart the bot. Reviews that were interrupted are re-queued on s
 | "model context … is too small" | Raise **Context tokens** (and the model's loaded context), or shorten the skill. |
 | "did not return valid JSON" | Turn on **Enforce JSON schema output**. If your server rejects it, use a stronger model. |
 | Forgot the admin password | Stop the bot and run `prbot -reset-password`. |
+| The sign-in page has no password field | It's on its own page: go to `/admin-login`. See [Administrator sign-in](#administrator-sign-in). |
 | GitHub sign-in: "redirect_uri is not associated with this application" | The App's **Callback URL** doesn't match. Copy it from **Settings → Sign-in and webhooks**, and set **Public URL** if the bot is behind a proxy. |
 | Signed in but no organizations listed | The App isn't installed on your org, or you're a plain member and the org hasn't let members in: ask an owner to add you. |
 | "Couldn't read your role in …" | Give the App the **Members: Read-only** organization permission, then accept the new permission on the org's installation page. |
+| Behind a proxy, every save or button fails with "cross-origin request blocked" | The proxy isn't passing the original `Host` header. See [Behind a reverse proxy](#behind-a-reverse-proxy-nginx). |
+| Webhook deliveries fail with `413` | The proxy's request size limit is too small; set `client_max_body_size 25m` in nginx. |
 | Webhook deliveries fail with `401` | The secret in GitHub differs from the bot's. Set them to the same value. |
 
 ## Security
@@ -476,6 +571,9 @@ rebuild), then restart the bot. Reviews that were interrupted are re-queued on s
   for another org's page, PR or review returns `404`.
 - **Sign out everywhere** (Account page) ends all of a GitHub user's sessions, and blocking a user
   ends theirs at once. Changing the administrator password signs everyone out.
+- The administrator password is entered only at `/admin-login`, which the normal sign-in page
+  doesn't link to. Wrong passwords are slowed down; you can also restrict the path in your
+  reverse proxy.
 - The client secret and webhook secret are stored in `data/prbot.db` like the other keys.
   Webhook deliveries must carry a valid `X-Hub-Signature-256`.
 

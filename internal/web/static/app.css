@@ -140,8 +140,6 @@ a.button { display: inline-block; font: inherit; padding: 9px 14px; border-radiu
 a.button:hover { text-decoration: none; border-color: var(--accent); }
 a.button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 a.button.block { display: block; }
-details.admin-login { margin-top: 16px; }
-details.admin-login summary { cursor: pointer; color: var(--muted); margin-bottom: 10px; }
 
 /* ---------- charts (inline SVG built in charts.go) ---------- */
 :root { --series-1: #2a78d6; --grid: #e7e8ec; --axis: #c9ccd4; }

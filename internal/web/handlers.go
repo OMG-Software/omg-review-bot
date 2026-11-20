@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -50,28 +51,58 @@ func (s *Server) loginData(r *http.Request) map[string]any {
 	return map[string]any{"SignIn": s.bot.Settings().GitHub.SignInOn(), "Next": safeNext(r.FormValue("next"))}
 }
 
+// loginPage is the sign-in page for everyone: GitHub only. The administrator
+// password has its own page, /admin-login, which nothing here links to. Until
+// GitHub sign-in is set up the administrator is the only one who can sign in,
+// so /login sends them there.
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
+	next := safeNext(r.URL.Query().Get("next"))
 	if s.sessionViewer(r) != nil {
-		http.Redirect(w, r, safeNext(r.URL.Query().Get("next")), http.StatusSeeOther)
+		http.Redirect(w, r, next, http.StatusSeeOther)
+		return
+	}
+	if !s.bot.Settings().GitHub.SignInOn() {
+		http.Redirect(w, r, adminLoginPath(next), http.StatusSeeOther)
 		return
 	}
 	s.render(w, r, "login.html", page{Title: "Sign in", D: s.loginData(r)})
 }
 
-func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
+func adminLoginPath(next string) string {
+	if next == "/" {
+		return "/admin-login"
+	}
+	return "/admin-login?next=" + url.QueryEscape(next)
+}
+
+func (s *Server) adminLoginPage(w http.ResponseWriter, r *http.Request) {
+	if s.sessionViewer(r) != nil {
+		http.Redirect(w, r, safeNext(r.URL.Query().Get("next")), http.StatusSeeOther)
+		return
+	}
+	s.render(w, r, "admin_login.html", page{Title: "Administrator sign-in", D: s.loginData(r)})
+}
+
+func (s *Server) adminLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	stored, _, _ := s.store.Get(pwKey)
 	if !checkPassword(stored, r.FormValue("password")) {
 		time.Sleep(700 * time.Millisecond) // slow down guessing
-		s.render(w, r, "login.html", page{Title: "Sign in", Err: "Wrong password.", D: s.loginData(r)})
+		s.render(w, r, "admin_login.html", page{Title: "Administrator sign-in", Err: "Wrong password.", D: s.loginData(r)})
 		return
 	}
 	s.issueSession(w, r, localAdminID, 0)
 	http.Redirect(w, r, safeNext(r.FormValue("next")), http.StatusSeeOther)
 }
 
+// logout sends the password administrator back to their own sign-in page and
+// everyone else to the GitHub one.
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	to := "/login"
+	if v := s.sessionViewer(r); v != nil && v.Local {
+		to = "/admin-login"
+	}
 	clearSession(w)
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	http.Redirect(w, r, to, http.StatusSeeOther)
 }
 
 func (s *Server) accountPage(w http.ResponseWriter, r *http.Request) {

@@ -357,7 +357,7 @@ func TestWebhookDelivery(t *testing.T) {
 		return resp.StatusCode, string(b)
 	}
 	pr := map[string]any{
-		"action": "opened",
+		"action":     "opened",
 		"repository": map[string]any{"id": 100, "full_name": "acme/web", "owner": map[string]any{"id": acmeID, "login": "acme"}},
 		"pull_request": map[string]any{"number": 9, "title": "New", "state": "open", "updated_at": "2026-11-20T10:00:00Z",
 			"user": map[string]any{"login": "carol"}, "head": map[string]any{"ref": "f", "sha": "abc123"}, "base": map[string]any{"ref": "main", "sha": "def"}},
@@ -397,5 +397,58 @@ func TestWebhookDelivery(t *testing.T) {
 	_ = settings.Save(s.st, cfg)
 	if code, _ := send("ping", "d4", map[string]any{}, "hook-secret"); code != http.StatusNotFound {
 		t.Errorf("webhook with no secret configured = %d", code)
+	}
+}
+
+// TestAdminLoginIsSeparate checks the GitHub sign-in page carries no trace of
+// the administrator password, which has its own page at /admin-login.
+func TestAdminLoginIsSeparate(t *testing.T) {
+	s := newTestSite(t)
+	h, err := hashPassword("admin-password-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.Set(pwKey, h); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body, _ := s.get("/login")
+	if code != http.StatusOK || !strings.Contains(body, "Sign in with GitHub") {
+		t.Fatalf("/login = %d", code)
+	}
+	for _, leak := range []string{"admin-login", `type="password"`, "Administrator password"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("/login mentions %q", leak)
+		}
+	}
+	if code, _ := s.post("/login", url.Values{"password": {"admin-password-1"}}); code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /login = %d, want 405", code)
+	}
+
+	if code, body, _ := s.get("/admin-login?next=/settings"); code != http.StatusOK || !strings.Contains(body, `action="/admin-login"`) {
+		t.Fatalf("/admin-login = %d", code)
+	}
+	if code, _ := s.post("/admin-login", url.Values{"password": {"wrong"}}); code != http.StatusOK {
+		t.Errorf("wrong password = %d, want the form again", code)
+	}
+	if code, _, _ := s.get("/settings"); code != http.StatusSeeOther {
+		t.Error("wrong password signed in")
+	}
+	code, hdr := s.post("/admin-login", url.Values{"password": {"admin-password-1"}, "next": {"/settings"}})
+	if code != http.StatusSeeOther || hdr.Get("Location") != "/settings" {
+		t.Fatalf("admin sign-in = %d %s", code, hdr.Get("Location"))
+	}
+	if code, _, _ := s.get("/settings"); code != http.StatusOK {
+		t.Errorf("admin /settings = %d", code)
+	}
+	// Signing out returns the administrator to their own page.
+	if _, hdr := s.post("/logout", nil); hdr.Get("Location") != "/admin-login" {
+		t.Errorf("admin sign-out went to %q", hdr.Get("Location"))
+	}
+
+	// A GitHub user signing out goes back to the GitHub page.
+	s.signIn()
+	if _, hdr := s.post("/logout", nil); hdr.Get("Location") != "/login" {
+		t.Errorf("GitHub sign-out went to %q", hdr.Get("Location"))
 	}
 }

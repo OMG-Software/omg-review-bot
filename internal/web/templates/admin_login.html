@@ -1,0 +1,12 @@
+{{define "content"}}
+<div class="narrow card">
+  <h1>🤖 OMG Review Bot</h1>
+  <p class="hint">Administrator sign-in</p>
+  <form method="post" action="/admin-login" class="stack">
+    <input type="hidden" name="next" value="{{.D.Next}}">
+    <label>Administrator password <input type="password" name="password" required autofocus autocomplete="current-password"></label>
+    <button class="primary">Sign in</button>
+  </form>
+  <p class="hint">Forgot it? Stop the bot and run <code>prbot -reset-password</code>.</p>
+</div>
+{{end}}

@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}} · PR Review Bot</title>
+<title>{{.Title}} · OMG Review Bot</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body{{if or (eq .Nav "dash") (eq .Tab "overview")}} data-refresh="30"{{end}}>
 {{if .Auth}}
 <header class="top">
-  <a class="brand" href="/">🤖 PR Review Bot</a>
+  <a class="brand" href="/">🤖 OMG Review Bot</a>
   <nav>
     {{if .V.Admin}}
     <a href="/" class="{{if eq .Nav "dash"}}active{{end}}">Dashboard</a>

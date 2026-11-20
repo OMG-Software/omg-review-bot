@@ -63,7 +63,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /setup", s.setupPage)
 	m.HandleFunc("POST /setup", s.setupSubmit)
 	m.HandleFunc("GET /login", s.loginPage)
-	m.HandleFunc("POST /login", s.loginSubmit)
+	m.HandleFunc("GET /admin-login", s.adminLoginPage)
+	m.HandleFunc("POST /admin-login", s.adminLoginSubmit)
 	m.HandleFunc("GET /auth/github", s.githubStart)
 	m.HandleFunc("GET /auth/github/callback", s.githubCallback)
 	m.HandleFunc("POST /logout", s.logout)
@@ -120,7 +121,7 @@ func (s *Server) routes() {
 }
 
 // publicPaths are reachable without signing in (once an admin password exists).
-var publicPaths = map[string]bool{"/login": true, "/auth/github": true, "/auth/github/callback": true}
+var publicPaths = map[string]bool{"/login": true, "/admin-login": true, "/auth/github": true, "/auth/github/callback": true}
 
 // ServeHTTP applies security headers, CSRF protection and authentication.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +149,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case path == "/setup":
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		http.Redirect(w, r, "/admin-login", http.StatusSeeOther)
 		return
 	case publicPaths[path]:
 	default:
