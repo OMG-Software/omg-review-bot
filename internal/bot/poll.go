@@ -157,7 +157,7 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 		pr.GHUpdatedAt = p.UpdatedAt
 		if !isNew && pr.CommentsSeen != p.UpdatedAt {
 			pr.CommentsSeen = p.UpdatedAt
-			if st.Replies.Enabled || st.Replies.Mentions {
+			if conversationsOn(st) {
 				replyJobs = append(replyJobs, job{kind: jobReplies, repo: pr.Repo, number: pr.Number})
 			}
 		}
@@ -233,7 +233,7 @@ func (b *Bot) enqueueDue(st settings.Settings) {
 // maybeSweep periodically re-checks reviewed PRs for replies, as a safety net
 // in case a reply didn't change the PR list's ETag.
 func (b *Bot) maybeSweep(st settings.Settings) {
-	if !st.Replies.Enabled && !st.Replies.Mentions {
+	if !conversationsOn(st) {
 		return
 	}
 	b.mu.Lock()

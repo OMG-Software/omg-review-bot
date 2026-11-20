@@ -46,6 +46,60 @@
     if (msg && !confirm(msg)) e.preventDefault();
   });
 
+  // Drag-and-drop upload: dropping a file anywhere on a page with a
+  // [data-drop] form puts it in the form's file input and submits it.
+  const dropForm = document.querySelector("form[data-drop]");
+  if (dropForm) {
+    const input = dropForm.querySelector('input[type="file"]');
+    const status = dropForm.querySelector(".drop-status");
+    const accept = (input.accept || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const say = (msg, cls) => { if (status) { status.textContent = msg; status.className = "drop-status result " + (cls || ""); } };
+    const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+    let depth = 0; // dragenter/dragleave fire for every child element
+    document.addEventListener("dragenter", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      if (depth++ === 0) document.body.classList.add("dragging");
+    });
+    document.addEventListener("dragleave", (e) => {
+      if (!hasFiles(e)) return;
+      if (--depth <= 0) { depth = 0; document.body.classList.remove("dragging"); }
+    });
+    // Without this the browser opens or downloads the dropped file instead.
+    document.addEventListener("dragover", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    });
+    document.addEventListener("drop", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      document.body.classList.remove("dragging");
+      const files = e.dataTransfer.files;
+      if (files.length !== 1) {
+        say(files.length ? "Drop one file at a time." : "That isn't a file. Zip the skill folder and drop the .zip.", "bad");
+        return;
+      }
+      const name = files[0].name.toLowerCase();
+      if (accept.length && !accept.some((ext) => name.endsWith(ext))) {
+        say(`${files[0].name} isn't a ${accept.join(" or ")} file. Zip the skill folder and drop the .zip.`, "bad");
+        return;
+      }
+      input.files = files;
+      say(`Uploading ${files[0].name}…`);
+      dropForm.requestSubmit(); // runs the data-confirm prompt like a normal submit
+      if (!dropForm.dataset.submitting) say(""); // cancelled at the prompt
+    });
+    // On document, after the data-confirm listener, so a cancelled prompt is seen.
+    document.addEventListener("submit", (e) => {
+      if (e.target !== dropForm || e.defaultPrevented) return;
+      dropForm.dataset.submitting = "1";
+      dropForm.querySelector("button").disabled = true;
+      if (input.files.length) say(`Uploading ${input.files[0].name}…`);
+    });
+  }
+
   // Dashboard auto-refresh (paused while the tab is hidden).
   const secs = Number(document.body.dataset.refresh || 0);
   if (secs > 0) {

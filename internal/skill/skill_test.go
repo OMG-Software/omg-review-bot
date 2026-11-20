@@ -109,3 +109,64 @@ func TestLanguageReferenceSelection(t *testing.T) {
 		t.Errorf("nil paths should include every reference, got %v", all)
 	}
 }
+
+// TestInstallGitHubZip installs a skill the way the README describes: the
+// repository's "Download ZIP" from GitHub, uploaded as is.
+func TestInstallGitHubZip(t *testing.T) {
+	root := "code-change-review-skill-main/"
+	skill := root + "skills/code-change-review/"
+	data := makeZip(t, map[string]string{
+		root + "README.md":                    "repo readme, not part of the skill",
+		root + "LICENSE":                      "MIT",
+		skill + "SKILL.md":                    "---\nname: code-change-review\ndescription: Review a change\n---\n# Code Change Review",
+		skill + "references/reporting.md":     "Tags first.",
+		skill + "references/languages/sql.md": "Migrations need a down step.",
+		skill + "scripts/detect_languages.py": "print('not a reference')",
+	})
+	dest := filepath.Join(t.TempDir(), "skill")
+	if err := InstallZip(data, dest); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refs []string
+	for _, r := range s.References {
+		refs = append(refs, r.Path)
+	}
+	if s.Name != "code-change-review" || strings.Join(refs, ",") != "references/languages/sql.md,references/reporting.md" {
+		t.Errorf("installed %q with references %v", s.Name, refs)
+	}
+	// A migration in any language gets the SQL guidance.
+	if _, sent, _ := s.Prompt([]string{"db/migrations/20260101_add_users.rb"}, 0); strings.Join(sent, ",") != "references/reporting.md,references/languages/sql.md" {
+		t.Errorf("references sent for a migration = %v", sent)
+	}
+}
+
+func TestZipSkillRoot(t *testing.T) {
+	root := func(files map[string]string) (string, error) {
+		zr, err := zip.NewReader(bytes.NewReader(makeZip(t, files)), int64(len(makeZip(t, files))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return zipSkillRoot(zr.File)
+	}
+	// Shallowest by folder depth, not by the length of the path string.
+	if r, err := root(map[string]string{
+		"a-very-long-repository-name/SKILL.md": "x",
+		"x/y/SKILL.md":                         "nested example",
+	}); err != nil || r != "a-very-long-repository-name" {
+		t.Errorf("root = %q, %v", r, err)
+	}
+	if r, err := root(map[string]string{"SKILL.md": "x", "__MACOSX/._SKILL.md": "junk"}); err != nil || r != "." {
+		t.Errorf("top-level root = %q, %v", r, err)
+	}
+	if _, err := root(map[string]string{"repo/skills/a/SKILL.md": "a", "repo/skills/b/SKILL.md": "b"}); err == nil ||
+		!strings.Contains(err.Error(), "2 skills (repo/skills/a, repo/skills/b)") {
+		t.Errorf("two skills at the same depth: %v", err)
+	}
+	if _, err := root(map[string]string{"README.md": "no skill"}); err == nil {
+		t.Error("zip without SKILL.md accepted")
+	}
+}

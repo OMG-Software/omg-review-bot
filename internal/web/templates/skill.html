@@ -2,7 +2,10 @@
 {{$k := .D.Skill}}
 <h1>Review skill</h1>
 <div class="card">
-  {{if .D.LoadErr}}<p class="flash warn">No skill installed yet ({{.D.LoadErr}}). The bot uses the built-in guidelines below until you upload or save one.</p>{{end}}
+  {{if .D.LoadErr}}<p class="flash warn">No skill installed yet ({{.D.LoadErr}}). The bot uses the short built-in guidelines below until you add one.
+    We recommend <a href="https://github.com/OMG-Software/code-change-review-skill" target="_blank" rel="noopener">code-change-review</a>:
+    clone it and set <a href="/settings">Settings → Skill folder</a> to its <code>skills/code-change-review</code> folder (update with <code>git pull</code>),
+    or download its ZIP from GitHub and upload it below as is.</p>{{end}}
   <dl class="kv">
     <dt>Name</dt><dd>{{$k.Name}}{{if $k.Builtin}} <span class="pill">built-in</span>{{end}}</dd>
     <dt>Description</dt><dd>{{if $k.Description}}{{$k.Description}}{{else}}—{{end}}</dd>
@@ -22,12 +25,18 @@
 
 <div class="card">
   <h2>Upload</h2>
-  <form method="post" action="/skill/upload" enctype="multipart/form-data" class="row" data-confirm="Replace the current skill?">
-    <input type="file" name="file" accept=".zip,.md" required>
-    <button class="primary">Upload</button>
+  <form method="post" action="/skill/upload" enctype="multipart/form-data" class="dropzone" id="skill-drop" data-drop data-confirm="Replace the current skill?">
+    <p class="drop-title"><b>Drop a skill <code>.zip</code> here</b> (anywhere on this page) or choose a file:</p>
+    <div class="row">
+      <input type="file" name="file" accept=".zip,.md" required>
+      <button class="primary">Upload</button>
+    </div>
+    <p class="drop-status result" aria-live="polite"></p>
   </form>
-  <p class="hint">Upload a <b>.zip</b> of your skill folder (with <code>SKILL.md</code> and any reference <code>.md</code>/<code>.txt</code> files) or a single <b>SKILL.md</b>.
-    You can also point <a href="/settings">Settings → Skill folder</a> at a folder on disk and edit it in your own editor. Changes take effect on the next review.</p>
+  <p class="hint">A <b>.zip</b> with the whole skill (its <code>SKILL.md</code> and reference <code>.md</code>/<code>.txt</code> files) is installed into the bot's skill folder, replacing the current skill.
+    The folder holding <code>SKILL.md</code> becomes the skill, so a repository's <i>Download ZIP</i> from GitHub works as is. A single <b>SKILL.md</b> replaces just that file.
+    You can also point <a href="/settings">Settings → Skill folder</a> at a folder on disk, such as a git clone, and manage it yourself; an upload never overwrites a git clone.
+    Changes take effect on the next review.</p>
 </div>
 
 <div class="card">
