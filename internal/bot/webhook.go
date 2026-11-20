@@ -49,13 +49,29 @@ func (b *Bot) HandleWebhook(event string, body []byte) (accountID int64, result 
 
 // requestSync refreshes the organization and repository list at the next
 // poll, and polls now. Repeated requests within a minute are merged.
+// requestSync asks for the repository list to be refreshed. Syncs are at
+// most a minute apart (events for a repository the bot doesn't watch would
+// otherwise each trigger one); a request inside that minute is kept and runs
+// when it ends.
 func (b *Bot) requestSync() {
 	b.mu.Lock()
-	if time.Since(b.lastRepoSync) > time.Minute {
+	wait := time.Minute - time.Since(b.lastRepoSync)
+	switch {
+	case wait <= 0:
 		b.lastRepoSync = time.Time{}
+	case !b.syncPending:
+		b.syncPending = true
+		time.AfterFunc(wait, func() {
+			b.mu.Lock()
+			b.syncPending = false
+			b.mu.Unlock()
+			b.requestSync()
+		})
 	}
 	b.mu.Unlock()
-	b.Wake()
+	if wait <= 0 {
+		b.Wake()
+	}
 }
 
 func (b *Bot) webhookPull(st settings.Settings, ev *github.WebhookEvent) string {
@@ -86,8 +102,11 @@ func (b *Bot) webhookPull(st settings.Settings, ev *github.WebhookEvent) string 
 	if u.isNew {
 		b.logf("info", r.FullName, ev.PullRequest.Number, "new pull request (webhook)")
 	}
-	if u.pushed || u.isNew {
-		b.kickDue()
+	// Any change can make a review due now (a push, a new PR, a draft marked
+	// ready, a skip label removed); the run loop decides, and it's cheap.
+	b.kickDue()
+	if u.stale {
+		return fmt.Sprintf("%s#%d %s: ignored, older than the state already recorded", r.FullName, ev.PullRequest.Number, ev.Action)
 	}
 	return fmt.Sprintf("%s#%d %s: %s", r.FullName, ev.PullRequest.Number, ev.Action, u.pr.Status)
 }

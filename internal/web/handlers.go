@@ -235,8 +235,10 @@ func (s *Server) prPage(w http.ResponseWriter, r *http.Request) {
 	if pr == nil {
 		return
 	}
-	reviews, _ := s.store.ListReviews(pr.Repo, pr.Number, 50)
-	acts, _ := s.store.RecentActivity(store.AllAccounts, 50, pr.Repo, pr.Number)
+	// Only this organization's history: a repository name can be reused by
+	// another organization later.
+	reviews, _ := s.store.ListReviews(pr.AccountID, pr.Repo, pr.Number, 50)
+	acts, _ := s.store.RecentActivity(pr.AccountID, 50, pr.Repo, pr.Number)
 	org, _ := s.store.GetOrg(pr.AccountID)
 	s.render(w, r, "pr.html", page{Title: fmt.Sprintf("%s#%d", pr.Repo, pr.Number), Nav: "prs", Org: org, Tab: "prs", D: map[string]any{
 		"PR": pr, "Reviews": reviews, "Activity": acts, "CanManage": me(r).CanManage(pr.AccountID),

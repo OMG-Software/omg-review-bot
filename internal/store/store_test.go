@@ -40,12 +40,17 @@ func TestMigrateOldDatabase(t *testing.T) {
 		  repo TEXT NOT NULL DEFAULT '', number INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL)`,
 		`INSERT INTO repos(id, installation_id, full_name) VALUES(100, 10, 'acme/web')`,
 		`INSERT INTO pulls(repo, number) VALUES('acme/web', 7)`,
-		`INSERT INTO reviews(repo, number, status, comments, started_at) VALUES('acme/web', 7, 'posted', 2, strftime('%s','now'))`,
 		`INSERT INTO activity(ts, level, repo, message) VALUES(1, 'info', 'acme/web', 'old entry')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A fixed time, so the review can't land in a different day's bucket
+	// than the one the test expects when it runs near midnight UTC.
+	at := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`INSERT INTO reviews(repo, number, status, comments, started_at) VALUES('acme/web', 7, 'posted', 2, ?)`, at.Unix()); err != nil {
+		t.Fatal(err)
 	}
 	db.Close()
 
@@ -64,17 +69,17 @@ func TestMigrateOldDatabase(t *testing.T) {
 	if p, _ := st.GetPR("acme/web", 7); p == nil || p.AccountID != 500 {
 		t.Errorf("PR not linked: %+v", p)
 	}
-	stats, err := st.ReviewStatsSince(500, time.Now().Add(-time.Hour).Unix())
+	stats, err := st.ReviewStatsSince(500, at.Add(-time.Hour).Unix())
 	if err != nil || stats.Posted != 1 || stats.Comments != 2 {
 		t.Errorf("stats = %+v, %v", stats, err)
 	}
 	if acts, _ := st.RecentActivity(500, 10, "", 0); len(acts) != 1 {
 		t.Errorf("activity not linked: %+v", acts)
 	}
-	if other, _ := st.ReviewStatsSince(600, 0); other.Reviews != 0 {
-		t.Error("another organization sees the review")
+	if other, err := st.ReviewStatsSince(600, 0); err != nil || other.Reviews != 0 {
+		t.Errorf("another organization sees the review: %+v, %v", other, err)
 	}
-	days, _ := st.ReviewsPerDay(500, 7, time.Now())
+	days, _ := st.ReviewsPerDay(500, 7, at)
 	if len(days) != 7 || days[6].Posted != 1 {
 		t.Errorf("per-day = %+v", days)
 	}

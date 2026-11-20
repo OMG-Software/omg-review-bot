@@ -357,7 +357,7 @@ func (s *Store) RecordDelivery(d Delivery) (bool, error) {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	if n > 0 && s.logs.Add(1)%100 == 0 {
+	if n > 0 && s.deliveries.Add(1)%100 == 0 {
 		_, _ = s.db.Exec(`DELETE FROM webhook_deliveries WHERE received_at < ?`, time.Now().Add(-30*24*time.Hour).Unix())
 	}
 	return n > 0, nil

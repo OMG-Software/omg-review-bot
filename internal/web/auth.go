@@ -247,9 +247,12 @@ func sameOrigin(r *http.Request) bool {
 	return err == nil && u.Host == r.Host
 }
 
-// safeNext keeps a post-sign-in redirect on this site.
+// safeNext keeps a post-sign-in redirect on this site. Browsers treat a
+// backslash like a slash and drop tabs and newlines before parsing, so
+// `/\evil.example` or `/./\evil.example` would leave the site: any of those
+// characters is refused outright.
 func safeNext(next string) string {
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.ContainsAny(next, "\\\t\r\n") {
 		return "/"
 	}
 	return next

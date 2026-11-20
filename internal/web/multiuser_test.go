@@ -38,7 +38,7 @@ type fakeGitHubWeb struct {
 	mu       sync.Mutex
 	userID   int64 // who the next token belongs to
 	login    string
-	acmeRole string // alice's role in the acme GitHub org: admin | member | ""
+	acmeRole string // alice's role in the acme GitHub org: admin | member | "" | forbidden (403)
 }
 
 func (f *fakeGitHubWeb) handler(t *testing.T) http.Handler {
@@ -63,6 +63,11 @@ func (f *fakeGitHubWeb) handler(t *testing.T) http.Handler {
 				map[string]any{"id": 10, "account": map[string]any{"id": acmeID, "login": "acme", "type": "Organization"}},
 			}})
 		case p == "/user/memberships/orgs/acme":
+			if f.acmeRole == "forbidden" { // the App lacks the Members permission
+				w.WriteHeader(http.StatusForbidden)
+				send(map[string]any{"message": "Resource not accessible by integration"})
+				return
+			}
 			if f.acmeRole == "" {
 				w.WriteHeader(http.StatusNotFound)
 				send(map[string]any{"message": "Not Found"})
@@ -517,5 +522,61 @@ func TestResetPasswordEndsSessions(t *testing.T) {
 	}
 	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
 		t.Errorf("session from before the reset still works: %d %s", code, hdr.Get("Location"))
+	}
+}
+
+// TestSafeNext: post-sign-in redirects stay on this site.
+func TestSafeNext(t *testing.T) {
+	for in, want := range map[string]string{
+		"/orgs/acme":             "/orgs/acme",
+		"/reviews?status=posted": "/reviews?status=posted",
+		"":                       "/",
+		"https://evil.example":   "/",
+		"//evil.example":         "/",
+		`/\evil.example`:         "/",
+		`/./\evil.example`:       "/",
+		"/\t/evil.example":       "/",
+		"/\n/evil.example":       "/",
+		"/\r/evil.example":       "/",
+	} {
+		if got := safeNext(in); got != want {
+			t.Errorf("safeNext(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestUnverifiedGitHubAccessIsPaused: when GitHub won't say what someone's
+// role is, access that came from GitHub is removed rather than kept.
+func TestUnverifiedGitHubAccessIsPaused(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice, a GitHub admin of acme: owner
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || m.Role != store.RoleOwner {
+		t.Fatalf("alice should own acme, got %+v", m)
+	}
+	s.gh.mu.Lock()
+	s.gh.acmeRole = "forbidden"
+	s.gh.mu.Unlock()
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m != nil {
+		t.Errorf("unverified GitHub-derived access kept: %+v", m)
+	}
+}
+
+// TestAddFormDoesntChangeRoles: adding someone who already has access is
+// refused, so the form can't demote the last owner.
+func TestAddFormDoesntChangeRoles(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice owns acme
+	if _, hdr := s.post("/orgs/acme/members", url.Values{"login": {"bob"}, "role": {"member"}}); strings.Contains(hdr.Get("Location"), "err=") {
+		t.Fatalf("adding bob failed: %s", hdr.Get("Location"))
+	}
+	_, hdr := s.post("/orgs/acme/members", url.Values{"login": {"bob"}, "role": {"owner"}})
+	if !strings.Contains(hdr.Get("Location"), "err=") {
+		t.Errorf("re-adding bob as owner should be refused, went to %s", hdr.Get("Location"))
+	}
+	if m, _ := s.st.GetMembership(acmeID, bobID); m == nil || m.Role != store.RoleMember {
+		t.Errorf("bob's role changed through the add form: %+v", m)
 	}
 }

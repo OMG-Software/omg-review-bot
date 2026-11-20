@@ -123,6 +123,7 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 
 func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.App, r store.Repo) error {
 	cl := app.Installation(r.InstallationID)
+	fetched := time.Now().Unix()
 	pulls, etag, notModified, err := cl.OpenPulls(ctx, r.FullName, r.ETag)
 	if err != nil {
 		return err
@@ -155,7 +156,9 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 	if err == nil {
 		for i := range tracked {
 			pr := &tracked[i]
-			if !open[pr.Number] {
+			// A PR saved since the list was fetched (a webhook for a newly
+			// opened PR, say) may simply be newer than the list: leave it.
+			if !open[pr.Number] && pr.UpdatedAt < fetched {
 				pr.Open = false
 				b.recompute(pr, st)
 				_ = b.store.SavePR(pr)
@@ -182,7 +185,16 @@ type pullUpdate struct {
 	baseline bool // recorded as already reviewed (open before the repo was watched)
 	pushed   bool // the head commit changed
 	activity bool // updated since last seen (possible new comments)
+	stale    bool // older than what's stored; nothing was changed
 	pr       *store.PR
+}
+
+// newerOnGitHub reports whether GitHub timestamp a is later than b. An empty
+// or unreadable one is never newer, so the update goes ahead.
+func newerOnGitHub(a, b string) bool {
+	ta, err1 := time.Parse(time.RFC3339, a)
+	tb, err2 := time.Parse(time.RFC3339, b)
+	return err1 == nil && err2 == nil && ta.After(tb)
 }
 
 // applyPull records the current state of an open or closed PR, from a poll
@@ -192,6 +204,11 @@ func (b *Bot) applyPull(st settings.Settings, r store.Repo, p *github.PullReques
 	pr, err := b.store.GetPR(r.FullName, p.Number)
 	if err != nil {
 		return pullUpdate{}, err
+	}
+	if pr != nil && newerOnGitHub(pr.GHUpdatedAt, p.UpdatedAt) {
+		// A webhook (or a later poll) already recorded a newer state of this
+		// PR than this snapshot, which arrived out of order.
+		return pullUpdate{pr: pr, stale: true}, nil
 	}
 	var u pullUpdate
 	if pr == nil {

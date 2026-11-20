@@ -75,6 +75,7 @@ type Bot struct {
 	appInfo      *github.AppInfo
 	status       Status
 	lastRepoSync time.Time
+	syncPending  bool // a repository sync is scheduled for when the minute since the last one ends
 	lastSweep    time.Time
 	lastPoll     time.Time
 	lastWebhook  time.Time

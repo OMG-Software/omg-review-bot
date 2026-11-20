@@ -103,7 +103,13 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	notes := s.syncMemberships(ctx, uc, u)
+	notes, err := s.syncMemberships(ctx, uc, u)
+	if err != nil {
+		// Don't sign them in with access that should have changed.
+		s.log.Error("update access at sign-in", "user", u.Login, "err", err)
+		fail("Couldn't update your access, so you weren't signed in. Try again; if it keeps happening, tell an administrator.")
+		return
+	}
 	s.store.Log("info", "", 0, fmt.Sprintf("@%s signed in with GitHub", u.Login))
 	s.issueSession(w, r, u.ID, u.Epoch)
 	if len(notes) > 0 {
@@ -118,15 +124,19 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 // here, the account owner of a personal installation becomes its owner, and
 // members join as members when the organization allows it. Access added by
 // hand is left alone (except that a GitHub admin is raised to owner).
-// Access that came from GitHub and no longer applies is removed.
-func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *store.User) []string {
+// Access that came from GitHub and no longer applies is removed, and so is
+// access GitHub couldn't confirm this time: it's restored at the next sign-in
+// that can. An error means the access couldn't be updated; the caller must
+// not sign the person in.
+func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error) {
 	st := s.bot.Settings()
+	var notes []string
 	insts, err := uc.Installations(ctx)
 	if err != nil {
 		s.log.Warn("list user installations", "user", u.Login, "err", err)
-		return []string{"Couldn't read your organizations from GitHub, so your access wasn't updated: " + err.Error()}
+		notes = append(notes, "Couldn't read your organizations from GitHub ("+err.Error()+"), so access that comes from GitHub is paused until you sign in again.")
+		insts = nil // the clean-up below removes GitHub-derived access
 	}
-	var notes []string
 	seen := map[int64]bool{}
 	for _, in := range insts {
 		acct := in.Account
@@ -155,8 +165,9 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 			m, err := uc.OrgMembership(ctx, acct.Login)
 			switch {
 			case err != nil && !github.IsStatus(err, http.StatusNotFound):
-				notes = append(notes, fmt.Sprintf("Couldn't read your role in %s (%v). The GitHub App needs the \"Members: Read-only\" organization permission.", acct.Login, err))
-				continue // leave their access as it is
+				// Unconfirmed: treat as no role, so access from GitHub is
+				// paused (access added by hand stays).
+				notes = append(notes, fmt.Sprintf("Couldn't read your role in %s (%v), so access that comes from GitHub is paused until you sign in again. The GitHub App needs the \"Members: Read-only\" organization permission.", acct.Login, err))
 			case err != nil:
 			case m.State == "active" && m.Role == "admin":
 				role = store.RoleOwner
@@ -164,30 +175,45 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 				role = store.RoleMember
 			}
 		}
-		cur, _ := s.store.GetMembership(org.ID, u.ID)
+		cur, err := s.store.GetMembership(org.ID, u.ID)
+		if err != nil {
+			return notes, err
+		}
 		switch {
 		case cur == nil && role != "":
-			_ = s.store.SetMembership(org.ID, u.ID, role, store.SourceGitHub)
-			s.store.Log("info", "", 0, fmt.Sprintf("@%s joined %s as %s (from their GitHub role)", u.Login, org.Login, role))
+			err = s.store.SetMembership(org.ID, u.ID, role, store.SourceGitHub)
+			if err == nil {
+				s.store.Log("info", "", 0, fmt.Sprintf("@%s joined %s as %s (from their GitHub role)", u.Login, org.Login, role))
+			}
 		case cur == nil:
 		case cur.Source == store.SourceGitHub && role == "":
-			_ = s.store.RemoveMembership(org.ID, u.ID)
-			s.store.Log("info", "", 0, fmt.Sprintf("@%s lost access to %s (no longer an admin or member on GitHub)", u.Login, org.Login))
+			err = s.store.RemoveMembership(org.ID, u.ID)
+			if err == nil {
+				s.store.Log("info", "", 0, fmt.Sprintf("@%s lost access to %s (not confirmed as an admin or member on GitHub)", u.Login, org.Login))
+			}
 		case cur.Source == store.SourceGitHub && role != cur.Role:
-			_ = s.store.SetMembership(org.ID, u.ID, role, store.SourceGitHub)
+			err = s.store.SetMembership(org.ID, u.ID, role, store.SourceGitHub)
 		case cur.Source == store.SourceManual && role == store.RoleOwner && cur.Role != store.RoleOwner:
-			_ = s.store.SetMembership(org.ID, u.ID, store.RoleOwner, store.SourceManual)
+			err = s.store.SetMembership(org.ID, u.ID, store.RoleOwner, store.SourceManual)
+		}
+		if err != nil {
+			return notes, fmt.Errorf("update access to %s: %w", org.Login, err)
 		}
 	}
 	// Access derived from GitHub for installations the person can no longer see.
-	if ms, err := s.store.UserMemberships(u.ID); err == nil {
-		for _, m := range ms {
-			if m.Source == store.SourceGitHub && !seen[m.OrgID] {
-				_ = s.store.RemoveMembership(m.OrgID, u.ID)
+	ms, err := s.store.UserMemberships(u.ID)
+	if err != nil {
+		return notes, err
+	}
+	for _, m := range ms {
+		if m.Source == store.SourceGitHub && !seen[m.OrgID] {
+			if err := s.store.RemoveMembership(m.OrgID, u.ID); err != nil {
+				return notes, fmt.Errorf("remove access to %s: %w", m.OrgLogin, err)
 			}
+			s.store.Log("info", "", 0, fmt.Sprintf("@%s lost access to %s (the App's installation isn't visible to them on GitHub)", u.Login, m.OrgLogin))
 		}
 	}
-	return notes
+	return notes, nil
 }
 
 func containsFold(list []string, s string) bool {

@@ -466,7 +466,17 @@ rebuild), then restart the bot. Reviews that were interrupted are re-queued on s
 ## Behind a reverse proxy (nginx)
 
 GitHub sign-in and webhooks need the bot to be reachable over HTTPS. The usual way is to keep the
-bot on its default `127.0.0.1:8080` and put nginx in front of it to handle TLS:
+bot on its default `127.0.0.1:8080` and put nginx in front of it to handle TLS.
+
+**1. Get a certificate first.** nginx refuses a configuration whose certificate files don't
+exist yet, so start with only the port-80 block below (the first `server { … }`), reload nginx,
+and get the certificate:
+
+```bash
+sudo certbot certonly --nginx -d prbot.example.com
+```
+
+**2. Add the HTTPS block** and reload nginx (`sudo nginx -t && sudo systemctl reload nginx`):
 
 ```nginx
 server {
@@ -530,7 +540,8 @@ Notes:
       proxy_set_header Host $host;
   }
   ```
-- **Getting a certificate.** With certbot: `sudo certbot --nginx -d prbot.example.com`.
+- **Renewing the certificate.** certbot's timer renews it; `sudo certbot renew --dry-run` checks
+  that renewal works.
 
 ## Troubleshooting
 
@@ -550,7 +561,7 @@ Notes:
 | The sign-in page has no password field | It's on its own page: go to `/admin-login`. See [Administrator sign-in](#administrator-sign-in). |
 | GitHub sign-in: "redirect_uri is not associated with this application" | The App's **Callback URL** doesn't match. Copy it from **Settings → Sign-in and webhooks**, and set **Public URL** if the bot is behind a proxy. |
 | Signed in but no organizations listed | The App isn't installed on your org, or you're a plain member and the org hasn't let members in: ask an owner to add you. |
-| "Couldn't read your role in …" | Give the App the **Members: Read-only** organization permission, then accept the new permission on the org's installation page. |
+| "Couldn't read your role in …" | Give the App the **Members: Read-only** organization permission, then accept the new permission on the org's installation page. Until GitHub can confirm someone's role, access that came from GitHub is paused; access added by hand isn't affected. |
 | Behind a proxy, every save or button fails with "cross-origin request blocked" | The proxy isn't passing the original `Host` header. See [Behind a reverse proxy](#behind-a-reverse-proxy-nginx). |
 | Webhook deliveries fail with `413` | The proxy's request size limit is too small; set `client_max_body_size 25m` in nginx. |
 | Webhook deliveries fail with `401` | The secret in GitHub differs from the bot's. Set them to the same value. |

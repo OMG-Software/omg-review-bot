@@ -194,8 +194,9 @@ func acct(accountID int64) []any { return []any{accountID, accountID} }
 
 // Store wraps the SQLite database.
 type Store struct {
-	db   *sql.DB
-	logs atomic.Int64
+	db         *sql.DB
+	logs       atomic.Int64 // activity writes, for pruning
+	deliveries atomic.Int64 // webhook deliveries recorded, for pruning
 }
 
 // Open opens (and migrates) the database at path.
@@ -636,8 +637,9 @@ func (s *Store) queryReviews(q string, args ...any) ([]Review, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ListReviews(repo string, number, limit int) ([]Review, error) {
-	return s.queryReviews(`SELECT * FROM reviews_v WHERE repo=? AND number=? ORDER BY id DESC LIMIT ?`, repo, number, limit)
+func (s *Store) ListReviews(accountID int64, repo string, number, limit int) ([]Review, error) {
+	return s.queryReviews(`SELECT * FROM reviews_v WHERE account_id=? AND repo=? AND number=? ORDER BY id DESC LIMIT ?`,
+		accountID, repo, number, limit)
 }
 
 // ReviewFilter selects reviews for the review history pages.

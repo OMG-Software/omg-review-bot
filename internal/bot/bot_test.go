@@ -497,3 +497,35 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 		t.Errorf("repository tree listed %d times, want 2 (cached)", gh.treeCalls)
 	}
 }
+
+// TestStaleSnapshotIgnored: a PR state older than the one recorded (a poll
+// that started before a webhook arrived) doesn't overwrite it.
+func TestStaleSnapshotIgnored(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := settings.Defaults()
+	r := store.Repo{ID: 1, InstallationID: 10, AccountID: 500, FullName: "acme/web", Enabled: true, Synced: true}
+	pull := func(sha, updated string) *github.PullRequest {
+		p := &github.PullRequest{Number: 7, State: "open", UpdatedAt: updated}
+		p.Head.SHA = sha
+		return p
+	}
+
+	if _, err := b.applyPull(cfg, r, pull("bbb", "2026-01-01T00:10:00Z"), false); err != nil { // the webhook
+		t.Fatal(err)
+	}
+	u, err := b.applyPull(cfg, r, pull("aaa", "2026-01-01T00:05:00Z"), false) // the older poll
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr, _ := st.GetPR("acme/web", 7); !u.stale || pr.HeadSHA != "bbb" {
+		t.Errorf("stale snapshot applied: stale=%v head=%s", u.stale, pr.HeadSHA)
+	}
+	if u, _ := b.applyPull(cfg, r, pull("ccc", "2026-01-01T00:15:00Z"), false); u.stale || !u.pushed {
+		t.Errorf("newer update not applied: %+v", u)
+	}
+}
