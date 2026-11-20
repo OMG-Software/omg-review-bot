@@ -16,6 +16,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -959,5 +960,111 @@ func TestPendingSessionEndsSurviveRestart(t *testing.T) {
 	s.signIn() // and a sign-in that works lets her back in
 	if code, _, _ := s.get("/orgs"); code != http.StatusOK {
 		t.Errorf("signed in again after the restart: /orgs = %d", code)
+	}
+}
+
+// TestPendingNoteRetried: when ending the sessions in the database and
+// noting them on disk both fail, the note is retried with the database
+// write, so once it's stored a restart still keeps the old session out.
+func TestPendingNoteRetried(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	before, _ := s.st.GetMembership(acmeID, aliceID)
+	s.srv.retryWait = 5 * time.Millisecond
+	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
+		return nil, errors.New("database is locked")
+	}
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	// The note can't be written: a directory is in the way.
+	if err := os.MkdirAll(s.srv.pending.path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	if ids, _ := s.srv.pending.load(); len(ids) != 0 {
+		t.Fatalf("noted %v with a directory in the way", ids)
+	}
+	if err := os.Remove(s.srv.pending.path); err != nil { // the disk recovers
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if ids, _ := s.srv.pending.load(); len(ids) == 1 && ids[0] == aliceID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the note was never retried")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.srv.unreconciled.Delete(int64(aliceID)) // restart; the old retry stops
+	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ts.Config.Handler = srv2
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("earlier session works again after a restart: %d %s", code, hdr.Get("Location"))
+	}
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || before == nil || m.Role != before.Role || m.Source != before.Source {
+		t.Errorf("access changed: %+v, was %+v", m, before)
+	}
+}
+
+// TestUnreadablePendingNoteEndsEverySession: if the note of sessions to end
+// can't be read at startup, nobody knows whose they are, so every session
+// ends; the file is set aside, and access is left as it was.
+func TestUnreadablePendingNoteEndsEverySession(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	before, _ := s.st.GetMembership(acmeID, aliceID)
+	if err := os.WriteFile(s.srv.pending.path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil))) // restart
+	if err != nil {
+		t.Fatalf("restart with an unreadable note: %v", err)
+	}
+	s.ts.Config.Handler = srv2
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("a session survived a restart with an unreadable note: %d %s", code, hdr.Get("Location"))
+	}
+	if _, err := os.Stat(s.srv.pending.path + ".unreadable"); err != nil {
+		t.Errorf("the unreadable note wasn't set aside: %v", err)
+	}
+	if ids, err := srv2.pending.load(); err != nil || len(ids) != 0 {
+		t.Errorf("note after setting it aside = %v, %v", ids, err)
+	}
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || before == nil || m.Role != before.Role || m.Source != before.Source {
+		t.Errorf("access changed: %+v, was %+v", m, before)
+	}
+	s.signIn()
+	if code, _, _ := s.get("/orgs"); code != http.StatusOK {
+		t.Errorf("signed in again: /orgs = %d", code)
+	}
+}
+
+// TestEarlierRepoHistoryNotLinked: reviews kept under an earlier
+// repository's name show without a link to a PR page that doesn't exist.
+func TestEarlierRepoHistoryNotLinked(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if _, err := s.st.CreateReview(&store.Review{Repo: "acme/web" + store.EarlierRepoSuffix, Number: 7, AccountID: acmeID,
+		Status: "posted", StartedAt: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn()
+	code, body, _ := s.get("/orgs/acme/reviews")
+	if code != http.StatusOK {
+		t.Fatalf("acme's reviews = %d", code)
+	}
+	if !strings.Contains(body, "acme/web (earlier repository)#7") {
+		t.Error("the earlier repository's review isn't listed")
+	}
+	if strings.Contains(body, `href="/prs/acme/web%20%28earlier`) || strings.Contains(body, `href="/prs/acme/web (earlier`) {
+		t.Error("the earlier repository's review links to a PR page")
 	}
 }

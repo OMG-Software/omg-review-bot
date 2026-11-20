@@ -160,7 +160,16 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			// Its own ID range, so review comment IDs stay as the test expects.
 			send(map[string]any{"id": 9000 + len(f.posted), "user": bot, "body": body["body"]})
 		case p == "/repos/acme/web/issues/7/comments":
-			send([]any{})
+			// The comments posted so far, as last edited.
+			out := []any{}
+			for i, body := range f.posted {
+				id := int64(9001 + i)
+				if e, ok := f.edited[id]; ok {
+					body = e
+				}
+				out = append(out, map[string]any{"id": id, "user": bot, "body": body})
+			}
+			send(out)
 		case strings.HasPrefix(p, "/repos/acme/web/issues/comments/") && r.Method == http.MethodPatch:
 			id, _ := strconv.ParseInt(strings.TrimPrefix(p, "/repos/acme/web/issues/comments/"), 10, 64)
 			var body map[string]string
@@ -917,6 +926,11 @@ func TestDelayedSyncRequestDuringSync(t *testing.T) {
 		inner.ServeHTTP(w, r)
 	}))
 	defer ghSrv.Close()
+	// Runs before ghSrv.Close, so a failing check can't leave the handler
+	// blocked and Close waiting for it.
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	defer letGo()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "t.db"))
 	if err != nil {
@@ -941,7 +955,13 @@ func TestDelayedSyncRequestDuringSync(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- b.poll(ctx, b.Settings()) }()
-	<-started
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("the poll ended before syncing: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sync never started")
+	}
 	b.requestSync() // inside the gap: waits for the timer
 	b.mu.Lock()
 	pending := b.syncPending
@@ -956,7 +976,7 @@ func TestDelayedSyncRequestDuringSync(t *testing.T) {
 	if pending {
 		t.Fatal("the timer didn't fire")
 	}
-	close(release)
+	letGo()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -970,5 +990,82 @@ func TestDelayedSyncRequestDuringSync(t *testing.T) {
 		if n := syncs(); n != want {
 			t.Errorf("syncs after poll %d = %d, want %d", i+2, n, want)
 		}
+	}
+}
+
+// TestPausedOrgNotReviewedOrRepliedIn: with the "only these accounts"
+// setting excluding an organization, a manual review is refused and queued
+// review and reply jobs do nothing.
+func TestPausedOrgNotReviewedOrRepliedIn(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.Accounts = []string{"someone-else"} // pauses acme
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePR(&store.PR{Repo: "acme/web", Number: 7, Open: true, Status: "pending", AccountID: 500}); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := b.ReviewNow("acme/web", 7); err == nil || !strings.Contains(err.Error(), "paused") {
+		t.Errorf("manual review of a paused organization's PR = %v; want it refused", err)
+	}
+	b.handleReview(context.Background(), job{kind: jobReview, repo: "acme/web", number: 7, force: true})
+	if p, _ := st.GetPR("acme/web", 7); p == nil || p.Status != "pending" || p.Attempts != 0 || p.LastError != "" {
+		t.Errorf("a queued review of a paused organization's PR ran: %+v", p)
+	}
+}
+
+// TestInterruptedReviewReusesNotice: a review cut short by a restart starts
+// again with no failed attempts on record; it reuses the commit's notice
+// rather than posting a second one and leaving the first "under way".
+func TestInterruptedReviewReusesNotice(t *testing.T) {
+	gh := newFakeGitHub()
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	app, err := b.getApp(ctx, b.Settings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := app.Installation(10)
+	pr := &store.PR{Repo: "acme/web", Number: 7, AccountID: 500, InstallationID: 10} // no attempts on record
+	n := reviewNotice{head: "aaa111", model: "m", skill: "s", started: time.Now()}
+	first := b.announceReview(ctx, cl, pr, n)
+	if first == 0 {
+		t.Fatal("no notice posted")
+	}
+	// The bot restarts mid-review; the review runs again from the start.
+	again := b.announceReview(ctx, cl, pr, n)
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	if again != first || len(gh.posted) != 1 {
+		t.Errorf("notice after an interrupted review = %d (first %d), %d posted; want the first reused", again, first, len(gh.posted))
+	}
+	// A new commit gets a notice of its own.
+	gh.mu.Unlock()
+	other := b.announceReview(ctx, cl, pr, reviewNotice{head: "bbb222", model: "m", skill: "s", started: time.Now()})
+	gh.mu.Lock()
+	if other == first || len(gh.posted) != 2 {
+		t.Errorf("notice for a new commit = %d, %d posted; want a new one", other, len(gh.posted))
 	}
 }

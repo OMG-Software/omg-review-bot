@@ -67,7 +67,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	if err == nil && pr != nil {
 		st = b.SettingsFor(pr.AccountID)
 	}
-	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" ||
+	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" || !allowedRepo(st, pr.Repo) ||
 		(!j.force && (pr.Status != "pending" || !st.Review.Enabled)) {
 		b.prMu.Unlock()
 		return
@@ -119,16 +119,15 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	b.kickDue()
 }
 
-// announceReview posts the review-started notice, or, when retrying the same
-// commit, turns the earlier notice back into one, so retries don't pile up
-// comments. It returns the comment's ID (0 if it couldn't be posted).
+// announceReview posts the review-started notice, or, when this commit
+// already has one, turns that back into one, so retries and reviews cut
+// short by a restart don't pile up comments (or leave one saying a review
+// is under way). It returns the comment's ID (0 if it couldn't be posted).
 func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.PR, n reviewNotice) int64 {
-	if pr.Attempts > 0 && pr.AttemptSHA == n.head {
-		if cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number); err == nil {
-			if id := findNotice(cs, b.BotLogin(), n.head); id != 0 {
-				if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err == nil {
-					return id
-				}
+	if cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number); err == nil {
+		if id := findNotice(cs, b.BotLogin(), n.head); id != 0 {
+			if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err == nil {
+				return id
 			}
 		}
 	}

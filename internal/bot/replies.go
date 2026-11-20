@@ -21,8 +21,8 @@ func (b *Bot) handleReplies(ctx context.Context, j job) {
 		return
 	}
 	st := b.SettingsFor(pr.AccountID)
-	if !conversationsOn(st) {
-		return
+	if !conversationsOn(st) || !allowedRepo(st, pr.Repo) {
+		return // off for this organization, or it's paused
 	}
 	app, err := b.getApp(ctx, st)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -123,11 +124,14 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		if err := s.endSessions(u.ID); err != nil {
 			s.log.Error("end sessions after a failed access update; will retry", "user", u.Login, "err", err)
 			// Noted on disk too, so a restart before a retry gets through
-			// still keeps them out.
+			// still keeps them out. If that fails as well, the retry tries
+			// both until one is stored.
+			noted := true
 			if err := s.pending.add(u.ID); err != nil {
-				s.log.Error("note sessions to end after a restart", "user", u.Login, "err", err)
+				s.log.Error("note sessions to end after a restart; will retry", "user", u.Login, "err", err)
+				noted = false
 			}
-			s.startRetry(u.ID, u.Login)
+			s.startRetry(u.ID, u.Login, noted)
 		}
 		fail("Couldn't update your access, so you weren't signed in. Try again; if it keeps happening, tell an administrator.")
 		return
@@ -146,9 +150,10 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 // startRetry starts retryEndSessions for id unless it's already running.
-func (s *Server) startRetry(id int64, login string) {
+// noted says whether the pending file already lists them.
+func (s *Server) startRetry(id int64, login string, noted bool) {
 	if _, already := s.retrying.LoadOrStore(id, true); !already {
-		go s.retryEndSessions(id, login)
+		go s.retryEndSessions(id, login, noted)
 	}
 }
 
@@ -156,17 +161,25 @@ func (s *Server) startRetry(id int64, login string) {
 // earlier run couldn't end in the database, and ends them now (or keeps
 // retrying). The database works for reads by now, but the stored epoch was
 // never bumped, so without this their old sessions would work again.
-func (s *Server) resumePendingEnds() {
+func (s *Server) resumePendingEnds() error {
 	ids, err := s.pending.load()
 	if err != nil {
-		s.log.Error("read sessions to end", "file", s.pending.path, "err", err)
-		return
+		// Whose sessions it lists is unknown, so end everyone's: a new
+		// signing key. The unreadable file is set aside for inspection.
+		s.log.Error("read sessions to end; ending every session", "file", s.pending.path, "err", err)
+		if rerr := s.rotateSecret(); rerr != nil {
+			return fmt.Errorf("can't read %s (%v), nor end every session instead: %w", s.pending.path, err, rerr)
+		}
+		if err := os.Rename(s.pending.path, s.pending.path+".unreadable"); err != nil {
+			s.log.Error("set aside the unreadable file", "file", s.pending.path, "err", err)
+		}
+		return nil
 	}
 	for _, id := range ids {
 		s.unreconciled.Store(id, true)
 		if err := s.endSessions(id); err != nil {
 			s.log.Error("end sessions noted by an earlier run; will retry", "user", id, "err", err)
-			s.startRetry(id, fmt.Sprint(id))
+			s.startRetry(id, fmt.Sprint(id), true)
 			continue
 		}
 		s.log.Info("ended sessions noted by an earlier run", "user", id)
@@ -174,19 +187,27 @@ func (s *Server) resumePendingEnds() {
 			s.log.Warn("clear sessions to end", "user", id, "err", err)
 		}
 	}
+	return nil
 }
 
 // retryEndSessions keeps trying to end someone's sessions in the database,
 // backing off to every five minutes, until it works or a sign-in has updated
 // their access. Until then only the in-memory block stops their sessions, and
 // that wouldn't last a restart.
-func (s *Server) retryEndSessions(id int64, login string) {
+func (s *Server) retryEndSessions(id int64, login string, noted bool) {
 	defer s.retrying.Delete(id)
 	wait := s.retryWait
 	for {
 		time.Sleep(wait)
 		if _, still := s.unreconciled.Load(id); !still {
 			return
+		}
+		if !noted {
+			if err := s.pending.add(id); err == nil {
+				noted = true
+			} else {
+				s.log.Error("note sessions to end after a restart; will retry", "user", login, "err", err)
+			}
 		}
 		err := s.endSessions(id)
 		if err == nil {

@@ -59,7 +59,9 @@ func New(st *store.Store, b *bot.Bot, log *slog.Logger) (*Server, error) {
 	if err := s.loadSecret(); err != nil {
 		return nil, err
 	}
-	s.resumePendingEnds()
+	if err := s.resumePendingEnds(); err != nil {
+		return nil, err
+	}
 	names, err := fs.Glob(assets, "templates/*.html")
 	if err != nil {
 		return nil, err
@@ -293,6 +295,9 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 var funcs = template.FuncMap{
+	// earlier: kept under the name of a repository whose name another one
+	// has since taken, so there's no PR page to link to.
+	"earlier": func(repo string) bool { return strings.HasSuffix(repo, store.EarlierRepoSuffix) },
 	"ago": func(unix int64) string {
 		if unix == 0 {
 			return "—"

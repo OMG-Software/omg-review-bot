@@ -415,6 +415,10 @@ func (b *Bot) ReviewNow(repo string, number int) error {
 		b.prMu.Unlock()
 		return fmt.Errorf("a review of %s#%d is already in progress", repo, number)
 	}
+	if !allowedRepo(b.Settings(), repo) {
+		b.prMu.Unlock()
+		return fmt.Errorf("%s is paused: the \"Only these orgs\" setting excludes its owner", repo)
+	}
 	pr.Status = "pending"
 	pr.NotBefore = 0
 	pr.Attempts = 0
