@@ -163,6 +163,16 @@ func newTestSite(t *testing.T) *testSite {
 // them; the address and the browser's cookies stay.
 func (s *testSite) restart(srv *Server) { s.serving.Store(srv) }
 
+// cleanStop records that the server stopped cleanly, as Close does when no
+// sessions are left to end, without waiting for retries to notice they're
+// done.
+func (s *testSite) cleanStop() {
+	s.t.Helper()
+	if err := os.Remove(s.srv.runMarker); err != nil {
+		s.t.Fatal(err)
+	}
+}
+
 // newClient is another browser: cookies of its own, redirects not followed.
 func (s *testSite) newClient() *http.Client {
 	jar, _ := cookiejar.New(nil)
@@ -995,6 +1005,7 @@ func TestPendingSessionEndsSurviveRestart(t *testing.T) {
 	// Restart: a new server on the same database and data directory, which
 	// works again. The old one's in-memory block goes with it.
 	s.srv.unreconciled.Delete(int64(aliceID)) // and its retry stops
+	s.cleanStop() // only the note keeps them out, not an unclean stop
 	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -1055,6 +1066,7 @@ func TestPendingNoteRetried(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	s.srv.unreconciled.Delete(int64(aliceID)) // restart; the old retry stops
+	s.cleanStop() // only the note keeps them out, not an unclean stop
 	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -1079,6 +1091,7 @@ func TestUnreadablePendingNoteEndsEverySession(t *testing.T) {
 	if err := os.WriteFile(s.srv.pending.path, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	s.cleanStop() // only the note keeps them out, not an unclean stop
 	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil))) // restart
 	if err != nil {
 		t.Fatalf("restart with an unreadable note: %v", err)
@@ -1499,4 +1512,93 @@ func TestShortRangeChartDated(t *testing.T) {
 	if n := labels(30); n != 5 {
 		t.Errorf("30-day chart has %d date labels, want 5 (one a week)", n)
 	}
+}
+
+// TestUncleanStopEndsSessions: after a run that didn't stop cleanly (it may
+// have had sessions to end that it couldn't record), every session ends;
+// access, including access added by hand, stays as it was.
+func TestUncleanStopEndsSessions(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if _, err := s.st.AddMember(otherID, aliceID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn()
+	before, _ := s.st.UserMemberships(aliceID)
+	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil))) // the first never stopped
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.restart(srv2)
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("a session survived a run that didn't stop cleanly: %d %s", code, hdr.Get("Location"))
+	}
+	if after, _ := s.st.UserMemberships(aliceID); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Errorf("access changed: %v, was %v", after, before)
+	}
+	s.signIn()
+	if code, _, _ := s.get("/orgs"); code != http.StatusOK {
+		t.Errorf("signing in again after an unclean stop: /orgs = %d", code)
+	}
+}
+
+// TestCleanStopKeepsSessions: a clean stop and start keeps everyone signed in.
+func TestCleanStopKeepsSessions(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	if err := s.srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.restart(srv2)
+	if code, _, _ := s.get("/orgs"); code != http.StatusOK {
+		t.Errorf("session after a clean restart: /orgs = %d", code)
+	}
+}
+
+// TestStopWithUnrecordedEndsSignsOut: when neither the database nor the
+// disk took the record of sessions to end, and the bot stops before a retry
+// gets through, the next start still ends them (every session), and access
+// added by hand stays.
+func TestStopWithUnrecordedEndsSignsOut(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if _, err := s.st.AddMember(otherID, aliceID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn()
+	before, _ := s.st.UserMemberships(aliceID)
+	s.srv.retryWait = time.Hour
+	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
+		return nil, errors.New("database is locked")
+	}
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	if err := os.MkdirAll(s.srv.pending.path, 0o700); err != nil { // and the note can't be written
+		t.Fatal(err)
+	}
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	if err := s.srv.Close(); err != nil { // stops with the retry still waiting
+		t.Fatal(err)
+	}
+	if err := os.Remove(s.srv.pending.path); err != nil { // the disk works again; there's no note
+		t.Fatal(err)
+	}
+	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.restart(srv2)
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("a session that had to end survived the restart: %d %s", code, hdr.Get("Location"))
+	}
+	if after, _ := s.st.UserMemberships(aliceID); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Errorf("access changed: %v, was %v", after, before)
+	}
+	s.srv.unreconciled.Delete(int64(aliceID)) // let the old retry stop
 }

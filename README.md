@@ -640,6 +640,10 @@ Notes:
   for another org's page, PR or review returns `404`.
 - **Sign out everywhere** (Account page) ends all of a GitHub user's sessions, and blocking a user
   ends theirs at once. Changing the administrator password signs everyone out.
+- If sign-in can't update someone's access, their sessions end. Should neither the database
+  nor the data directory accept that, the bot keeps them out in memory and retries. So that a
+  crash can't let them back in, a bot that didn't stop cleanly signs everyone out when it
+  starts (it keeps a `running` file in the data directory while it runs).
 - The administrator password is entered only at `/admin-login`, which the normal sign-in page
   doesn't link to. Wrong passwords are slowed down; you can also restrict the path in your
   reverse proxy.

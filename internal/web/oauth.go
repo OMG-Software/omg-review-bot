@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -175,6 +177,43 @@ func (s *Server) startRetry(id int64, login string, noted bool) {
 	if _, already := s.retrying.LoadOrStore(id, true); !already {
 		go s.retryEndSessions(id, login, noted)
 	}
+}
+
+// checkCleanStop, at startup, ends every session if the last run didn't stop
+// cleanly, then marks this run as running. A run can have sessions to end
+// that it couldn't record anywhere (the database and the disk both refused);
+// only it knew of them, in memory. Close removes the mark only when no such
+// sessions remain, so a crash, or a stop that leaves some, means a new
+// signing key here. It's the one case that signs everyone out unasked.
+func (s *Server) checkCleanStop() error {
+	if _, err := os.Stat(s.runMarker); err == nil {
+		s.log.Warn("the last run didn't stop cleanly, so it may have had sessions to end that it couldn't record; ending every session")
+		if err := s.rotateSecret(); err != nil {
+			return fmt.Errorf("end every session after a run that didn't stop cleanly: %w", err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("check %s: %w", s.runMarker, err)
+	}
+	if err := writeDurably(s.runMarker, []byte("prbot is running; removed when it stops cleanly")); err != nil {
+		return fmt.Errorf("mark the run in %s: %w", s.runMarker, err)
+	}
+	return nil
+}
+
+// Close is called once the server has stopped taking requests. It records a
+// clean stop, unless sessions are still waiting to be ended in the database:
+// then the next start ends every session instead (see checkCleanStop).
+func (s *Server) Close() error {
+	busy := false
+	s.retrying.Range(func(any, any) bool { busy = true; return false })
+	if busy {
+		s.log.Warn("stopping with sessions still to end in the database; the next start ends every session")
+		return nil
+	}
+	if err := os.Remove(s.runMarker); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // resumePendingEnds, at startup, keeps out the people whose sessions an

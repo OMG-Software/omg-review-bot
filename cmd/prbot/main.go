@@ -94,7 +94,10 @@ func run(listen, dataDir string, resetPw bool) error {
 			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			logger.Info("shutting down")
-			return hs.Shutdown(sctx)
+			if err := hs.Shutdown(sctx); err != nil {
+				return err
+			}
+			return srv.Close()
 		case err := <-errc:
 			if errors.Is(err, http.ErrServerClosed) {
 				return nil

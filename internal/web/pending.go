@@ -58,7 +58,13 @@ func (p *pendingEnds) write(ids []int64) error {
 	if err != nil {
 		return err
 	}
-	tmp := p.path + ".tmp"
+	return writeDurably(p.path, b)
+}
+
+// writeDurably replaces path with b (write then rename) and returns once it's
+// on disk: the file and the rename are synced.
+func writeDurably(path string, b []byte) error {
+	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -74,13 +80,13 @@ func (p *pendingEnds) write(ids []int64) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, p.path); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
 	if runtime.GOOS == "windows" {
 		return nil // a directory can't be opened to sync it there
 	}
-	d, err := os.Open(filepath.Dir(p.path))
+	d, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}

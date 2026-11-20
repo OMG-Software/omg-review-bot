@@ -59,6 +59,8 @@ type Server struct {
 	// pending lists, on disk, the people whose sessions still have to be
 	// ended in the database, so a restart doesn't let them back in.
 	pending pendingEnds
+	// runMarker is a file that exists while the server runs; see checkCleanStop.
+	runMarker string
 }
 
 func New(st *store.Store, b *bot.Bot, log *slog.Logger) (*Server, error) {
@@ -67,7 +69,11 @@ func New(st *store.Store, b *bot.Bot, log *slog.Logger) (*Server, error) {
 	s.saveSecret = func(v string) error { return st.Set(secretKey, v) }
 	s.retryWait = 15 * time.Second
 	s.pending.path = filepath.Join(b.DataDir(), "pending-session-ends.json")
+	s.runMarker = filepath.Join(b.DataDir(), "running")
 	if err := s.loadSecret(); err != nil {
+		return nil, err
+	}
+	if err := s.checkCleanStop(); err != nil {
 		return nil, err
 	}
 	if err := s.resumePendingEnds(); err != nil {
