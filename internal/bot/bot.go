@@ -269,15 +269,22 @@ func (b *Bot) setCurrent(pr *store.PR, format string, args ...any) {
 }
 
 // logf writes to both the process log and the activity log shown in the UI.
+// The entry's organization is worked out from the PR, then the repository.
 func (b *Bot) logf(level, repo string, number int, format string, args ...any) {
-	b.logFor(0, level, repo, number, format, args...)
+	msg := fmt.Sprintf(format, args...)
+	b.store.Log(level, repo, number, msg)
+	b.processLog(level, repo, number, msg)
 }
 
-// logFor is logf for an entry whose organization the caller knows (0 works it
-// out from the PR, then the repository's name).
-func (b *Bot) logFor(accountID int64, level, repo string, number int, format string, args ...any) {
+// logAs is logf for an entry whose organization the caller knows: it's
+// filed under exactly accountID, and 0 (not known) leaves it unassigned.
+func (b *Bot) logAs(accountID int64, level, repo string, number int, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	b.store.LogFor(accountID, level, repo, number, msg)
+	b.store.LogAs(accountID, level, repo, number, msg)
+	b.processLog(level, repo, number, msg)
+}
+
+func (b *Bot) processLog(level, repo string, number int, msg string) {
 	attrs := []any{"repo", repo, "pr", number}
 	switch level {
 	case "error":

@@ -930,6 +930,20 @@ VALUES(?,?,?,?,?,COALESCE(NULLIF(?,0),
   (SELECT account_id FROM repos WHERE full_name=? AND account_id<>0 ORDER BY id DESC LIMIT 1),
   0))`,
 		time.Now().Unix(), level, repo, number, msg, accountID, repo, number, repo)
+	s.trimActivity()
+}
+
+// LogAs records an activity entry under exactly accountID, worked out by the
+// caller: 0 leaves it unassigned (administrators only), with no lookup by
+// name, which could find another repository that has had the name.
+func (s *Store) LogAs(accountID int64, level, repo string, number int, msg string) {
+	_, _ = s.db.Exec(`INSERT INTO activity(ts, level, repo, number, message, account_id) VALUES(?,?,?,?,?,?)`,
+		time.Now().Unix(), level, repo, number, msg, accountID)
+	s.trimActivity()
+}
+
+// trimActivity keeps the newest 20,000 entries, checking every 200 writes.
+func (s *Store) trimActivity() {
 	if s.logs.Add(1)%200 == 0 {
 		_, _ = s.db.Exec(`DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 20000`)
 	}

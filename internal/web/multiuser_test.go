@@ -1005,7 +1005,7 @@ func TestPendingSessionEndsSurviveRestart(t *testing.T) {
 	// Restart: a new server on the same database and data directory, which
 	// works again. The old one's in-memory block goes with it.
 	s.srv.unreconciled.Delete(int64(aliceID)) // and its retry stops
-	s.cleanStop() // only the note keeps them out, not an unclean stop
+	s.cleanStop()                             // only the note keeps them out, not an unclean stop
 	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -1066,7 +1066,7 @@ func TestPendingNoteRetried(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	s.srv.unreconciled.Delete(int64(aliceID)) // restart; the old retry stops
-	s.cleanStop() // only the note keeps them out, not an unclean stop
+	s.cleanStop()                             // only the note keeps them out, not an unclean stop
 	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -1091,7 +1091,7 @@ func TestUnreadablePendingNoteEndsEverySession(t *testing.T) {
 	if err := os.WriteFile(s.srv.pending.path, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s.cleanStop() // only the note keeps them out, not an unclean stop
+	s.cleanStop()                                                               // only the note keeps them out, not an unclean stop
 	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil))) // restart
 	if err != nil {
 		t.Fatalf("restart with an unreadable note: %v", err)

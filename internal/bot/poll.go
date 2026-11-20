@@ -208,12 +208,13 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 	b.prMu.Unlock()
 
 	if len(newPRs) > 0 {
-		// The repository's own account: another stored under the name (one
-		// that's gone, until the next sync prunes it) mustn't get its entries.
-		b.logFor(r.AccountID, "info", r.FullName, 0, "new pull requests: %s", strings.Join(newPRs, ", "))
+		// The repository's own account, even 0 (stored before organizations
+		// and not linked yet): another stored under the name (one that's gone,
+		// until the next sync prunes it) mustn't get its entries.
+		b.logAs(r.AccountID, "info", r.FullName, 0, "new pull requests: %s", strings.Join(newPRs, ", "))
 	}
 	if firstSync {
-		b.logFor(r.AccountID, "info", r.FullName, 0, "started tracking repository (%d open PRs)", len(pulls))
+		b.logAs(r.AccountID, "info", r.FullName, 0, "started tracking repository (%d open PRs)", len(pulls))
 	}
 	for _, j := range replyJobs {
 		b.enqueue(j)
