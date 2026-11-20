@@ -1,0 +1,25 @@
+{{define "content"}}
+{{with .D}}
+<h1>Review {{.ID}} <span class="pill s-{{.Status}}">{{.Status}}</span></h1>
+<p><a href="/prs/{{.Repo}}/{{.Number}}">← {{.Repo}}#{{.Number}}</a>{{if .URL}} · <a href="{{.URL}}" target="_blank" rel="noopener">open on GitHub ↗</a>{{end}}</p>
+<div class="card">
+  <dl class="kv">
+    <dt>Commit</dt><dd><code>{{.HeadSHA}}</code></dd>
+    <dt>Model</dt><dd><code>{{.Model}}</code></dd>
+    <dt>Skill</dt><dd>{{.Skill}}</dd>
+    <dt>Parts</dt><dd>{{.Batches}}</dd>
+    <dt>Tokens</dt><dd>{{.PromptTokens}} prompt / {{.CompletionTokens}} completion</dd>
+    <dt>Started</dt><dd>{{when .StartedAt}}</dd>
+    <dt>Duration</dt><dd>{{dur .StartedAt .FinishedAt}}</dd>
+    <dt>Posted</dt><dd>{{.Comments}} inline comments, {{.Notes}} notes</dd>
+    {{if .Error}}<dt>Error</dt><dd class="bad">{{.Error}}</dd>{{end}}
+  </dl>
+</div>
+{{if .Summary}}<div class="card"><h2>Summary</h2><pre class="wrap">{{.Summary}}</pre></div>{{end}}
+<div class="card">
+  <h2>Raw model output</h2>
+  <p class="hint">What the model returned before the bot validated line numbers and removed duplicates. Use this to tune your skill or model.</p>
+  {{if .Raw}}<pre class="raw">{{.Raw}}</pre>{{else}}<p class="muted">None recorded.</p>{{end}}
+</div>
+{{end}}
+{{end}}

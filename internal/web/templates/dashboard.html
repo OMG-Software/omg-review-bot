@@ -1,0 +1,65 @@
+{{define "content"}}
+<h1>Dashboard</h1>
+{{with .Status}}
+{{if not .Configured}}
+<div class="card warn">
+  <h3>Setup needed</h3>
+  <ul>{{range .ConfigIssues}}<li>{{.}}</li>{{end}}</ul>
+  <p><a href="/settings">Open settings →</a></p>
+</div>
+{{end}}
+<div class="stats">
+  <div class="stat"><span class="label">Bot account</span><span class="value small">{{if .BotLogin}}{{.BotLogin}}{{else}}—{{end}}</span></div>
+  <div class="stat"><span class="label">Last poll</span><span class="value small">{{agoT .LastPoll}}</span>
+    {{if .LastPollErr}}<span class="sub bad" title="{{.LastPollErr}}">{{.LastPollErr}}</span>{{end}}</div>
+  <div class="stat wide"><span class="label">Working on</span><span class="value small">{{if .Current}}{{.Current}} <span class="muted">({{agoT .CurrentSince}})</span>{{else}}idle{{end}}</span></div>
+  <div class="stat"><span class="label">Queue</span><span class="value">{{.QueueLen}}</span></div>
+  <div class="stat"><span class="label">GitHub API calls left</span><span class="value">{{if ge .RateRemaining 0}}{{.RateRemaining}}{{else}}—{{end}}</span></div>
+</div>
+{{end}}
+
+<div class="card">
+  <h2>Open pull requests</h2>
+  {{if .D.Counts}}
+  <div class="chips">{{range $k, $v := .D.Counts}}<span class="pill s-{{$k}}">{{$k}}: {{$v}}</span>{{end}}</div>
+  {{else}}<p class="muted">None tracked yet.</p>{{end}}
+</div>
+
+<div class="card">
+  <h2>Recent reviews</h2>
+  {{if .D.Reviews}}
+  <table>
+    <thead><tr><th>PR</th><th>Commit</th><th>Result</th><th>Comments</th><th>Duration</th><th>When</th></tr></thead>
+    <tbody>
+    {{range .D.Reviews}}
+      <tr>
+        <td><a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a></td>
+        <td><code>{{short .HeadSHA}}</code></td>
+        <td><a href="/reviews/{{.ID}}"><span class="pill s-{{.Status}}">{{.Status}}</span></a></td>
+        <td>{{.Comments}}{{if .Notes}} + {{.Notes}} notes{{end}}</td>
+        <td>{{dur .StartedAt .FinishedAt}}</td>
+        <td title="{{when .StartedAt}}">{{ago .StartedAt}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="muted">No reviews yet.</p>{{end}}
+</div>
+
+<div class="card">
+  <h2>Activity <a class="small" href="/activity">all →</a></h2>
+  {{template "activity-list" .D.Activity}}
+</div>
+{{end}}
+
+{{define "activity-list"}}
+{{if .}}
+<ul class="log">
+{{range .}}
+  <li class="lvl-{{.Level}}"><span class="ts" title="{{when .TS}}">{{ago .TS}}</span>
+  {{if .Repo}}{{if .Number}}<a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a>{{else}}<span class="muted">{{.Repo}}</span>{{end}}{{end}}
+  <span class="msg">{{.Message}}</span></li>
+{{end}}
+</ul>
+{{else}}<p class="muted">Nothing yet.</p>{{end}}
+{{end}}

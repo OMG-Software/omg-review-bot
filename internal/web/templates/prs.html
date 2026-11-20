@@ -1,0 +1,29 @@
+{{define "content"}}
+<h1>Pull requests</h1>
+<p>{{if .D.All}}<a href="/prs">Show open only</a>{{else}}<a href="/prs?all=1">Include closed</a>{{end}}</p>
+<div class="card">
+{{if .D.PRs}}
+<table>
+  <thead><tr><th>PR</th><th>Title</th><th>Author</th><th>Status</th><th>Head</th><th>Reviewed</th><th>Updated</th><th></th></tr></thead>
+  <tbody>
+  {{range .D.PRs}}
+  <tr>
+    <td><a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a></td>
+    <td class="title">{{.Title}}{{if .Draft}} <span class="pill">draft</span>{{end}}</td>
+    <td>@{{.Author}}</td>
+    <td><span class="pill s-{{.Status}}" {{if .LastError}}title="{{.LastError}}"{{end}}>{{.Status}}</span></td>
+    <td><code>{{short .HeadSHA}}</code></td>
+    <td><code>{{short .ReviewedSHA}}</code></td>
+    <td>{{ago .UpdatedAt}}</td>
+    <td>
+      <form method="post" action="/prs/{{.Repo}}/{{.Number}}/review" class="inline"><button class="small">Review now</button></form>
+    </td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No pull requests tracked yet. Once your GitHub App is set up and repositories are enabled, open PRs appear here after the next poll.</p>
+{{end}}
+</div>
+{{end}}

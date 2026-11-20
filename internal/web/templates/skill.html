@@ -1,0 +1,40 @@
+{{define "content"}}
+{{$k := .D.Skill}}
+<h1>Review skill</h1>
+<div class="card">
+  {{if .D.LoadErr}}<p class="flash warn">No skill installed yet ({{.D.LoadErr}}). The bot uses the built-in guidelines below until you upload or save one.</p>{{end}}
+  <dl class="kv">
+    <dt>Name</dt><dd>{{$k.Name}}{{if $k.Builtin}} <span class="pill">built-in</span>{{end}}</dd>
+    <dt>Description</dt><dd>{{if $k.Description}}{{$k.Description}}{{else}}—{{end}}</dd>
+    <dt>Folder</dt><dd><code>{{.D.Dir}}</code></dd>
+    <dt>Size</dt><dd>about {{.D.BaseTokens}} tokens always sent ({{.D.Percent}}% of the {{.D.Context}}-token context){{if .D.HasLang}}, plus the language references a PR needs ({{.D.Tokens}} tokens if every one were sent){{end}}.
+      {{if gt .D.Percent 35}}<span class="bad">The skill gets at most 35% of the context, so the largest reference files will be left out.</span>{{end}}</dd>
+  </dl>
+  {{if $k.References}}
+  <h3>Reference files</h3>
+  <p class="hint">Files under a <code>languages/</code> folder are only sent when a PR changes files in that language, matched by file name (<code>c-cpp.md</code> → <code>.c/.cpp/.h</code>; <code>shell.md</code> → <code>.sh</code>; <code>infrastructure.md</code> → YAML, CI workflows, Dockerfiles, Terraform). The rest are always sent. Each review's raw output lists the references it used.</p>
+  <table>
+    <thead><tr><th>File</th><th>Sent</th><th>≈ tokens</th></tr></thead>
+    <tbody>{{range $k.References}}<tr><td><code>{{.Path}}</code></td><td>{{if .IsLanguage}}<span class="pill s-pending">per language</span>{{else}}<span class="pill s-reviewed">always</span>{{end}}</td><td>{{div .Size 3}}</td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
+</div>
+
+<div class="card">
+  <h2>Upload</h2>
+  <form method="post" action="/skill/upload" enctype="multipart/form-data" class="row" data-confirm="Replace the current skill?">
+    <input type="file" name="file" accept=".zip,.md" required>
+    <button class="primary">Upload</button>
+  </form>
+  <p class="hint">Upload a <b>.zip</b> of your skill folder (with <code>SKILL.md</code> and any reference <code>.md</code>/<code>.txt</code> files) or a single <b>SKILL.md</b>.
+    You can also point <a href="/settings">Settings → Skill folder</a> at a folder on disk and edit it in your own editor. Changes take effect on the next review.</p>
+</div>
+
+<div class="card">
+  <h2>Edit SKILL.md</h2>
+  <form method="post" action="/skill/save" class="stack">
+    <textarea name="content" rows="26" class="mono">{{.D.Raw}}</textarea>
+    <div><button class="primary">Save SKILL.md</button></div>
+  </form>
+</div>
+{{end}}

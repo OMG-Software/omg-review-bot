@@ -1,0 +1,33 @@
+{{define "content"}}
+<h1>Repositories</h1>
+<div class="actions">
+  <form method="post" action="/repos/sync" class="inline"><button class="primary">Sync from GitHub</button></form>
+  <form method="post" action="/repos/all" class="inline"><input type="hidden" name="enabled" value="1"><button>Enable all</button></form>
+  <form method="post" action="/repos/all" class="inline" data-confirm="Disable automatic reviews for every repository?"><input type="hidden" name="enabled" value="0"><button>Disable all</button></form>
+  <span class="muted">{{.D.Enabled}} of {{len .D.Repos}} enabled</span>
+</div>
+<div class="card">
+{{if .D.Repos}}
+<table>
+  <thead><tr><th>Repository</th><th>Watching</th><th>Last poll</th><th></th></tr></thead>
+  <tbody>
+  {{range .D.Repos}}
+  <tr>
+    <td>{{.FullName}}</td>
+    <td>{{if .Enabled}}<span class="pill s-reviewed">on</span>{{else}}<span class="pill">off</span>{{end}}</td>
+    <td>{{ago .LastPolled}}</td>
+    <td>
+      <form method="post" action="/repos/{{.ID}}/toggle" class="inline">
+        {{if .Enabled}}<input type="hidden" name="enabled" value="0"><button class="small">Disable</button>
+        {{else}}<input type="hidden" name="enabled" value="1"><button class="small">Enable</button>{{end}}
+      </form>
+    </td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No repositories yet. Check your GitHub App settings, install the App on your org, then click <b>Sync from GitHub</b>.</p>
+{{end}}
+</div>
+{{end}}

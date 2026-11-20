@@ -1,0 +1,10 @@
+{{define "content"}}
+<div class="narrow card">
+  <h1>🤖 PR Review Bot</h1>
+  <form method="post" action="/login" class="stack">
+    <label>Password <input type="password" name="password" required autofocus autocomplete="current-password"></label>
+    <button class="primary">Sign in</button>
+  </form>
+  <p class="hint">Forgot it? Stop the bot and run <code>prbot -reset-password</code>.</p>
+</div>
+{{end}}
