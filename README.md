@@ -167,11 +167,15 @@ administrator password works until GitHub sign-in is set up:
 | Owner of a personal account that installed the App | **Owner** of it |
 
 Owners can also add people by GitHub username on the org's **Members** page, change roles and
-remove people. People added this way keep their access, and the role an owner gave them, whatever their GitHub
-role. Access that
-came from GitHub is removed at the next sign-in once it no longer applies. Removing someone in
-the bot doesn't stop GitHub giving their access back at their next sign-in, so remove them on
-GitHub too, or have an administrator block them. An org always keeps at least one owner.
+remove people. People added this way keep their access, and the role an owner gave them,
+whatever their GitHub role. Access that came from GitHub is removed at the next sign-in once it
+no longer applies. Removing someone in the bot doesn't stop GitHub giving their access back at
+their next sign-in, so remove them on GitHub too, or have an administrator block them.
+
+Owners can't remove or demote the last owner of an org. For access that came from GitHub,
+though, GitHub decides: if an org's only owner stops being a GitHub admin of it, they lose the
+owner role at their next sign-in, even if that leaves the org with no owner. It gets one back as
+soon as one of its current GitHub admins signs in, or an administrator makes someone an owner.
 
 | Role | Can |
 |---|---|

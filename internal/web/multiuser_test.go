@@ -1091,3 +1091,43 @@ func TestEarlierOrgPageReachable(t *testing.T) {
 		t.Errorf("/orgs doesn't link to the earlier organization by its new name")
 	}
 }
+
+// TestGitHubDecidesLastOwner: for access that came from GitHub, GitHub is the
+// source of truth. An org's only owner who stops being a GitHub admin of it
+// loses the owner role at their next sign-in, even though that leaves the
+// org with no owner (the last-owner guard only stops changes made by hand),
+// and gets it back once GitHub makes them an admin again.
+func TestGitHubDecidesLastOwner(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if err := s.st.RemoveMembership(acmeID, aliceID); err != nil { // only what GitHub gives
+		t.Fatal(err)
+	}
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || m.Role != store.RoleOwner || m.Source != store.SourceGitHub {
+		t.Fatalf("alice from GitHub = %+v; want acme's owner", m)
+	}
+	s.gh.mu.Lock()
+	s.gh.acmeRole = "member" // no longer a GitHub admin, and acme doesn't let members in
+	s.gh.mu.Unlock()
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m != nil {
+		t.Errorf("the last owner kept access GitHub no longer gives: %+v", m)
+	}
+	ms, err := s.st.ListMembers(acmeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Role == store.RoleOwner {
+			t.Errorf("acme still has an owner: %+v", m)
+		}
+	}
+	s.gh.mu.Lock()
+	s.gh.acmeRole = "admin"
+	s.gh.mu.Unlock()
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || m.Role != store.RoleOwner {
+		t.Errorf("a GitHub admin signing in didn't give acme an owner again: %+v", m)
+	}
+}
