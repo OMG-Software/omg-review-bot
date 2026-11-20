@@ -1080,6 +1080,63 @@ func TestPendingNoteRetried(t *testing.T) {
 	}
 }
 
+// TestRetryNotesLaterFailure: a retry started by an earlier failure, whose
+// note a sign-in that got through has since cleared, writes the note of a
+// later failure that couldn't write its own, once the disk recovers. That
+// later failure doesn't start a retry of its own: this one is still running.
+func TestRetryNotesLaterFailure(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	s.srv.retryWait = 300 * time.Millisecond // the sign-ins below come first
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	real := s.srv.syncAccess
+	var failSync atomic.Bool
+	s.srv.syncAccess = func(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error) {
+		if failSync.Load() {
+			return nil, errors.New("database is locked")
+		}
+		return real(ctx, uc, u)
+	}
+	failSync.Store(true)
+	if code, _, _ := s.trySignIn(); code != http.StatusOK { // noted; a retry starts
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	if ids, _ := s.srv.pending.load(); len(ids) != 1 {
+		t.Fatalf("first failure noted %v", ids)
+	}
+	failSync.Store(false)
+	s.signIn() // gets through: the note is cleared
+	if ids, _ := s.srv.pending.load(); len(ids) != 0 {
+		t.Fatalf("note after a sign-in got through = %v", ids)
+	}
+	// The next failure can't write its note: a directory is in the way.
+	if err := os.MkdirAll(s.srv.pending.path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failSync.Store(true)
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("second sign-in with a failed access update = %d", code)
+	}
+	if err := os.Remove(s.srv.pending.path); err != nil { // the disk recovers
+		t.Fatal(err)
+	}
+	if _, busy := s.srv.retrying.Load(int64(aliceID)); !busy {
+		t.Fatal("the first failure's retry stopped before the second failure; the test needs it running")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if ids, _ := s.srv.pending.load(); len(ids) == 1 && ids[0] == aliceID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the later failure was never noted on disk")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.srv.unreconciled.Delete(int64(aliceID)) // let the retry stop
+}
+
 // TestUnreadablePendingNoteEndsEverySession: if the note of sessions to end
 // can't be read at startup, nobody knows whose they are, so every session
 // ends; the file is set aside, and access is left as it was.
