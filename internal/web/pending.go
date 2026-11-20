@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 )
@@ -43,7 +44,9 @@ func (p *pendingEnds) read() ([]int64, error) {
 }
 
 // write replaces the file whole (write then rename), so a crash mid-way
-// leaves the old list rather than half of a new one.
+// leaves the old list rather than half of a new one. It returns once the new
+// list is on disk: the file and the rename are synced, so a power cut after
+// a successful add doesn't lose the note.
 func (p *pendingEnds) write(ids []int64) error {
 	if len(ids) == 0 {
 		if err := os.Remove(p.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -56,10 +59,33 @@ func (p *pendingEnds) write(ids []int64) error {
 		return err
 	}
 	tmp := p.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p.path)
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, p.path); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return nil // a directory can't be opened to sync it there
+	}
+	d, err := os.Open(filepath.Dir(p.path))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func (p *pendingEnds) add(id int64) error {
@@ -67,7 +93,10 @@ func (p *pendingEnds) add(id int64) error {
 	defer p.mu.Unlock()
 	ids, err := p.read()
 	if err != nil {
-		ids = nil // unreadable: start a fresh list rather than lose this one
+		// Not replaced: it may list others whose sessions have to end. The
+		// caller retries, and at startup an unreadable file ends every
+		// session.
+		return err
 	}
 	if slices.Contains(ids, id) {
 		return nil

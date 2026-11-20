@@ -1458,3 +1458,45 @@ func TestRetryKeepsNewerFailure(t *testing.T) {
 	}
 	s.srv.unreconciled.Delete(int64(aliceID)) // let the retry stop
 }
+
+// TestUnreadablePendingNoteKept: a note that can't be read isn't replaced
+// by one listing only the newcomer, which would drop the people it lists.
+func TestUnreadablePendingNoteKept(t *testing.T) {
+	p := &pendingEnds{path: filepath.Join(t.TempDir(), "pending-session-ends.json")}
+	if err := os.WriteFile(p.path, []byte("[41,"), 0o600); err != nil { // cut short
+		t.Fatal(err)
+	}
+	if err := p.add(42); err == nil {
+		t.Error("adding to an unreadable note reported success")
+	}
+	if b, _ := os.ReadFile(p.path); string(b) != "[41," {
+		t.Errorf("unreadable note replaced with %q", b)
+	}
+	if err := os.Remove(p.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.add(42); err != nil { // readable again: the retry gets through
+		t.Fatal(err)
+	}
+	if ids, err := p.load(); err != nil || len(ids) != 1 || ids[0] != 42 {
+		t.Errorf("note = %v, %v", ids, err)
+	}
+}
+
+// TestShortRangeChartDated: the 7-day chart dates every bar, not just the
+// last; the 30-day one, every week.
+func TestShortRangeChartDated(t *testing.T) {
+	labels := func(n int) int {
+		days := make([]store.DayStats, n)
+		for i := range days {
+			days[i].Day = time.Date(2026, 11, 1+i, 0, 0, 0, 0, time.UTC)
+		}
+		return strings.Count(string(dayChart(days)), `text-anchor="middle"`)
+	}
+	if n := labels(7); n != 7 {
+		t.Errorf("7-day chart has %d date labels, want 7", n)
+	}
+	if n := labels(30); n != 5 {
+		t.Errorf("30-day chart has %d date labels, want 5 (one a week)", n)
+	}
+}

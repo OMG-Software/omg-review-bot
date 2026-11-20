@@ -50,7 +50,6 @@ func dayChart(days []store.DayStats) template.HTML {
 		bottom              = 24.0
 		plotW, plotH        = width - left - right, height - top - bottom
 		gridLines           = 2
-		labelEvery          = 7
 		barShare            = 0.62
 		minVisibleBarHeight = 2.0
 	)
@@ -60,6 +59,10 @@ func dayChart(days []store.DayStats) template.HTML {
 	}
 	ymax := niceMax(peak)
 	slot := plotW / float64(len(days))
+	labelEvery := 7 // a date a week, counted back from today
+	if len(days) <= 14 {
+		labelEvery = 1 // few enough to date every bar
+	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, `<svg class="viz" viewBox="0 0 %.0f %.0f" role="img" aria-label="Reviews posted per day, last %d days">`, width, height, len(days))
 	for i := 0; i <= gridLines; i++ {

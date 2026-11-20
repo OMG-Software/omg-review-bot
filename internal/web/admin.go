@@ -152,7 +152,11 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		result = "error: " + err.Error()
 	}
-	_ = s.store.SetDeliveryResult(id, claim, account, result)
+	if serr := s.store.SetDeliveryResult(id, claim, account, result); serr != nil {
+		// The delivery stays unfinished, so a redelivery after the claim
+		// lapses runs it again.
+		s.log.Error("save webhook delivery result", "delivery", id, "err", serr)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "result": result})
 		return

@@ -1323,3 +1323,31 @@ func TestForcedReviewRetriedAfterPolicyError(t *testing.T) {
 		t.Errorf("manual review after the policy read failed = %+v, %v; want it queued again", again, ok)
 	}
 }
+
+// TestReviewThreadWebhookHasPR: GitHub's review-thread event carries the PR
+// at the top level, as the other pull request events do, so a resolved or
+// reopened thread is matched to its PR rather than ignored.
+func TestReviewThreadWebhookHasPR(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Abridged from GitHub's documented pull_request_review_thread payload.
+	body := `{"action":"unresolved",
+	  "pull_request":{"number":7,"state":"open","head":{"sha":"aaa"},"base":{"ref":"main"}},
+	  "thread":{"node_id":"PRRT_1","comments":[{"id":1001,"pull_request_url":"https://api.github.com/repos/acme/web/pulls/7"}]},
+	  "repository":{"id":100,"full_name":"acme/web","owner":{"id":500,"login":"acme"}},
+	  "installation":{"id":10},"sender":{"login":"alice"}}`
+	var ev github.WebhookEvent
+	if err := json.Unmarshal([]byte(body), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.PullRequest == nil || ev.PullRequest.Number != 7 {
+		t.Fatalf("review-thread payload decoded without its PR: %+v", ev.PullRequest)
+	}
+	if got := b.webhookConversation(settings.Defaults(), "pull_request_review_thread", &ev); got == "ignored: not a pull request" {
+		t.Errorf("review-thread event = %q", got)
+	}
+}
