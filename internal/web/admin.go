@@ -139,12 +139,12 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 			d.Repo = probe.Repository.FullName
 		}
 	}
-	fresh, err := s.store.RecordDelivery(d)
+	claim, err := s.store.RecordDelivery(d)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if !fresh {
+	if claim == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": "duplicate delivery ignored"})
 		return
 	}
@@ -152,7 +152,7 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		result = "error: " + err.Error()
 	}
-	_ = s.store.SetDeliveryResult(id, account, result)
+	_ = s.store.SetDeliveryResult(id, claim, account, result)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "result": result})
 		return

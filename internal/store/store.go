@@ -339,6 +339,10 @@ type Repo struct {
 // and their numbers through a rename; otherwise the PRs left under the old name
 // would stay due, and the new name's would all be reviewed again. A repository
 // moved to another account starts afresh there: its old PRs are closed.
+// EarlierRepoSuffix marks the reviews and activity of a repository whose
+// name another repository of the same account has since taken.
+const EarlierRepoSuffix = " (earlier repository)"
+
 func (s *Store) UpsertRepo(id, installationID, accountID int64, fullName string, defaultEnabled bool) (err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -367,8 +371,19 @@ ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id, account_
 			// A name belongs to one repository at a time, so PRs still stored
 			// under the new one are left over from an earlier repository that
 			// had it. They give way, so each PR moves together with its reviews.
+			// That repository's reviews and activity stay as history, under a
+			// name of their own, so they aren't taken for the renamed
+			// repository's PRs, which reuse the numbers.
 			if _, err = tx.Exec(`DELETE FROM pulls WHERE repo=?`, fullName); err != nil {
 				return err
+			}
+			for _, q := range []string{
+				`UPDATE reviews SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+				`UPDATE activity SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+			} {
+				if _, err = tx.Exec(q, fullName+EarlierRepoSuffix, fullName, accountID); err != nil {
+					return err
+				}
 			}
 			for _, q := range []string{
 				`UPDATE pulls SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
@@ -755,8 +770,9 @@ func (s *Store) RecentReviews(accountID int64, limit int) ([]Review, error) {
 }
 
 // LatestPostedReview returns the most recent review that was posted to GitHub, or nil.
-func (s *Store) LatestPostedReview(repo string, number int) (*Review, error) {
-	r, err := scanReview(s.db.QueryRow(`SELECT * FROM reviews_v WHERE repo=? AND number=? AND status='posted' ORDER BY id DESC LIMIT 1`, repo, number))
+func (s *Store) LatestPostedReview(accountID int64, repo string, number int) (*Review, error) {
+	r, err := scanReview(s.db.QueryRow(`SELECT * FROM reviews_v WHERE account_id=? AND repo=? AND number=? AND status='posted' ORDER BY id DESC LIMIT 1`,
+		accountID, repo, number))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

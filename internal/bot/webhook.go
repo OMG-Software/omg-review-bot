@@ -56,7 +56,7 @@ func (b *Bot) requestSync() {
 	wait := time.Minute - time.Since(b.syncTried)
 	switch {
 	case wait <= 0:
-		b.lastRepoSync = time.Time{}
+		b.syncAsked++
 	case !b.syncPending:
 		b.syncPending = true
 		time.AfterFunc(wait, func() {

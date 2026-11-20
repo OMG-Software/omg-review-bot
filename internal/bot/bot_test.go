@@ -46,10 +46,13 @@ type fakeGitHub struct {
 	resolves  []string // thread IDs resolved through GraphQL
 	jwtCalls  int
 	treeCalls int
-	instCalls int              // repository syncs (installation listings)
-	docRefs   []string         // refs project docs were read at
-	posted    []string         // PR conversation comments the bot posted
-	edited    map[int64]string // the latest text of each comment the bot edited
+	instCalls int // repository syncs (installation listings)
+	// requestDuring: the next installation listing asks for another sync
+	// as it starts (read and cleared outside mu, by the test's wrapper)
+	requestDuring bool
+	docRefs       []string         // refs project docs were read at
+	posted        []string         // PR conversation comments the bot posted
+	edited        map[int64]string // the latest text of each comment the bot edited
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -806,5 +809,68 @@ func TestReviewNotice(t *testing.T) {
 	}
 	if id := findNotice(cs, botLogin, "nothing"); id != 0 {
 		t.Errorf("findNotice for an unknown commit = %d, want 0", id)
+	}
+}
+
+// TestSyncRequestDuringSync: a sync request that arrives while a sync is
+// running gets a sync of its own; the running one, which may have read the
+// installations before the change, doesn't count for it.
+func TestSyncRequestDuringSync(t *testing.T) {
+	gh := newFakeGitHub()
+	b, st, cleanup := (func() (*Bot, *store.Store, func()) {
+		var b *Bot
+		inner := gh.handler(t)
+		ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/app/installations" && b != nil && gh.requestDuring {
+				gh.requestDuring = false
+				// An installation event arrives while the sync is under way.
+				b.mu.Lock()
+				b.syncTried = time.Now().Add(-2 * time.Minute)
+				b.mu.Unlock()
+				b.requestSync()
+			}
+			inner.ServeHTTP(w, r)
+		}))
+		dir := t.TempDir()
+		st, err := store.Open(filepath.Join(dir, "t.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := settings.Defaults()
+		cfg.GitHub.AppID = 1
+		cfg.GitHub.PrivateKey = testKey(t)
+		cfg.GitHub.APIBaseURL = ghSrv.URL
+		if err := settings.Save(st, cfg); err != nil {
+			t.Fatal(err)
+		}
+		b = New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		return b, st, func() { st.Close(); ghSrv.Close() }
+	})()
+	defer cleanup()
+	_ = st
+	ctx := context.Background()
+	syncs := func() int {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		return gh.instCalls
+	}
+	gh.requestDuring = true
+	if err := b.poll(ctx, b.Settings()); err != nil {
+		t.Fatal(err)
+	}
+	if n := syncs(); n != 1 {
+		t.Fatalf("first poll synced %d times, want 1", n)
+	}
+	if err := b.poll(ctx, b.Settings()); err != nil {
+		t.Fatal(err)
+	}
+	if n := syncs(); n != 2 {
+		t.Errorf("a sync requested during a sync didn't run (%d syncs)", n)
+	}
+	if err := b.poll(ctx, b.Settings()); err != nil {
+		t.Fatal(err)
+	}
+	if n := syncs(); n != 2 {
+		t.Errorf("synced again with no new request (%d syncs)", n)
 	}
 }

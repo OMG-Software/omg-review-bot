@@ -114,13 +114,16 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Don't sign them in with access that should have changed, and end
 		// the sessions they already have, which could still use it: at once
-		// here, and in the database so it lasts a restart (best effort, as the
-		// database may be what failed). The next sign-in that gets through
-		// updates the access and lets them back in.
+		// here, and in the database so it lasts a restart. If the database
+		// write fails too, it's retried until it's stored. The next sign-in
+		// that gets through updates the access and lets them back in.
 		s.log.Error("update access at sign-in", "user", u.Login, "err", err)
 		s.unreconciled.Store(u.ID, true)
 		if err := s.endSessions(u.ID); err != nil {
-			s.log.Error("end sessions after a failed access update", "user", u.Login, "err", err)
+			s.log.Error("end sessions after a failed access update; will retry", "user", u.Login, "err", err)
+			if _, already := s.retrying.LoadOrStore(u.ID, true); !already {
+				go s.retryEndSessions(u.ID, u.Login)
+			}
 		}
 		fail("Couldn't update your access, so you weren't signed in. Try again; if it keeps happening, tell an administrator.")
 		return
@@ -133,6 +136,28 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// retryEndSessions keeps trying to end someone's sessions in the database,
+// backing off to every five minutes, until it works or a sign-in has updated
+// their access. Until then only the in-memory block stops their sessions, and
+// that wouldn't last a restart.
+func (s *Server) retryEndSessions(id int64, login string) {
+	defer s.retrying.Delete(id)
+	wait := s.retryWait
+	for {
+		time.Sleep(wait)
+		if _, still := s.unreconciled.Load(id); !still {
+			return
+		}
+		err := s.endSessions(id)
+		if err == nil {
+			s.log.Info("ended sessions after a failed access update", "user", login)
+			return
+		}
+		s.log.Error("end sessions after a failed access update; will retry", "user", login, "err", err)
+		wait = min(wait*2, 5*time.Minute)
+	}
 }
 
 // syncMemberships derives the person's organization access from GitHub:

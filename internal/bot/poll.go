@@ -46,7 +46,8 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 	b.mu.Lock()
 	// At most one attempt a minute, failed ones included: a sync that keeps
 	// failing would otherwise be retried at every wake.
-	needSync := time.Since(b.lastRepoSync) > time.Duration(st.Poll.RepoRefreshMinutes)*time.Minute &&
+	needSync := (time.Since(b.lastRepoSync) > time.Duration(st.Poll.RepoRefreshMinutes)*time.Minute ||
+		b.syncAsked != b.syncDone) &&
 		time.Since(b.syncTried) >= time.Minute
 	b.mu.Unlock()
 	if needSync {
@@ -81,6 +82,7 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.App) (int, error) {
 	b.mu.Lock()
 	b.syncTried = time.Now() // requestSync's minute counts failed attempts too
+	asked := b.syncAsked     // requests from here on want another sync
 	b.mu.Unlock()
 	insts, err := app.Installations(ctx)
 	if err != nil {
@@ -138,7 +140,7 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 		return 0, err
 	}
 	b.mu.Lock()
-	b.lastRepoSync = time.Now()
+	b.lastRepoSync, b.syncDone = time.Now(), asked
 	b.mu.Unlock()
 	return len(keep), nil
 }

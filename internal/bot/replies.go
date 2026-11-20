@@ -299,7 +299,7 @@ func (b *Bot) mentionReply(ctx context.Context, st settings.Settings, cl *github
 			fmt.Fprintf(&sb, "- %s (%s, +%d -%d)\n", f.Filename, f.Status, f.Additions, f.Deletions)
 		}
 	}
-	if rv, err := b.store.LatestPostedReview(pr.Repo, pr.Number); err == nil && rv != nil {
+	if rv, err := b.store.LatestPostedReview(pr.AccountID, pr.Repo, pr.Number); err == nil && rv != nil {
 		fmt.Fprintf(&sb, "\nYour latest review summary (commit %s):\n%s\n", short(rv.HeadSHA), rv.Summary)
 	}
 	sb.WriteString("\nConversation (oldest first):\n")

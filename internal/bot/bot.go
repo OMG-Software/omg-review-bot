@@ -75,12 +75,16 @@ type Bot struct {
 	appInfo      *github.AppInfo
 	status       Status
 	lastRepoSync time.Time // the last successful repository sync
-	syncTried    time.Time // the last repository sync started, successful or not
-	syncPending  bool      // a repository sync is scheduled for when the minute since the last one ends
-	lastSweep    time.Time
-	lastPoll     time.Time
-	lastWebhook  time.Time
-	queued       map[string]bool
+	// syncAsked counts requests for a repository sync; syncDone is the count
+	// the last successful sync started after. A sync only answers requests
+	// made before it started, so one made during it isn't lost.
+	syncAsked, syncDone uint64
+	syncTried           time.Time // the last repository sync started, successful or not
+	syncPending         bool      // a repository sync is scheduled for when the minute since the last one ends
+	lastSweep           time.Time
+	lastPoll            time.Time
+	lastWebhook         time.Time
+	queued              map[string]bool
 
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
@@ -315,7 +319,7 @@ func (b *Bot) getApp(ctx context.Context, st settings.Settings) (*github.App, er
 	}
 	b.mu.Lock()
 	b.app, b.appKey, b.appInfo = app, key, info
-	b.lastRepoSync = time.Time{}
+	b.syncAsked++ // with the new App
 	b.status.BotLogin = info.Slug + "[bot]"
 	b.status.AppName = info.Name
 	b.mu.Unlock()

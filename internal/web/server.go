@@ -41,11 +41,16 @@ type Server struct {
 	// BumpUserEpoch; tests replace them to make them fail.
 	syncAccess  func(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error)
 	endSessions func(userID int64) error
+	// retrying holds the IDs whose sessions retryEndSessions is still trying
+	// to end in the database; retryWait is its first wait (tests shorten it).
+	retrying  sync.Map
+	retryWait time.Duration
 }
 
 func New(st *store.Store, b *bot.Bot, log *slog.Logger) (*Server, error) {
 	s := &Server{store: st, bot: b, log: log, pages: map[string]*template.Template{}}
 	s.syncAccess, s.endSessions = s.syncMemberships, st.BumpUserEpoch
+	s.retryWait = 15 * time.Second
 	if err := s.loadSecret(); err != nil {
 		return nil, err
 	}

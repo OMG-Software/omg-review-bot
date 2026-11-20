@@ -753,3 +753,59 @@ func TestOrgEventsInOrgActivity(t *testing.T) {
 		t.Errorf("acme's activity page (%d) doesn't show bob being added", code)
 	}
 }
+
+// TestEndingSessionsRetried: when sign-in can't update someone's access and
+// ending their sessions in the database fails too, it's retried until it's
+// stored, so their earlier sessions stay ended after a restart (which loses
+// the in-memory block). Their access is left as it was.
+func TestEndingSessionsRetried(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	before, _ := s.st.GetMembership(acmeID, aliceID)
+	syncAccess, endSessions := s.srv.syncAccess, s.srv.endSessions
+	var mu sync.Mutex
+	calls := 0
+	s.srv.retryWait = 5 * time.Millisecond
+	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
+		return nil, errors.New("database is locked")
+	}
+	s.srv.endSessions = func(id int64) error {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n < 3 {
+			return errors.New("database is locked")
+		}
+		return endSessions(id)
+	}
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, busy := s.srv.retrying.Load(int64(aliceID)); !busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ending sessions was never stored")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 3 {
+		t.Errorf("tried to end sessions %d times, want 3 (two failures, then stored)", n)
+	}
+	// A restart: the in-memory block is gone, the stored one isn't.
+	s.srv.unreconciled.Delete(int64(aliceID))
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("earlier session works again after a restart: %d %s", code, hdr.Get("Location"))
+	}
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || before == nil || m.Role != before.Role || m.Source != before.Source {
+		t.Errorf("access changed by a failed sign-in: %+v, was %+v", m, before)
+	}
+	s.srv.syncAccess, s.srv.endSessions = syncAccess, endSessions
+}

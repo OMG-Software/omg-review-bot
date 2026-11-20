@@ -380,6 +380,10 @@ func TestRepoRenameAndRemoval(t *testing.T) {
 	if err := st.SavePR(&PR{Repo: "acme/site", Number: 7, Open: true, Status: "pending", ReviewedSHA: "old", AccountID: 500}); err != nil {
 		t.Fatal(err)
 	}
+	earlier, err := st.CreateReview(&Review{Repo: "acme/site", Number: 7, Status: "posted", Summary: "earlier", AccountID: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if err := st.UpsertRepo(1, 10, 500, "acme/site", true); err != nil { // renamed
 		t.Fatal(err)
@@ -390,8 +394,14 @@ func TestRepoRenameAndRemoval(t *testing.T) {
 	if p := pr("acme/site", 7); p == nil || !p.Open || p.ReviewedSHA != "aaa" {
 		t.Errorf("PR under the new name = %+v; want it open with its review state", p)
 	}
-	if rs, _ := st.ListReviews(500, "acme/site", 7, 10); len(rs) != 1 {
-		t.Errorf("reviews under the new name = %d, want 1", len(rs))
+	if rs, _ := st.ListReviews(500, "acme/site", 7, 10); len(rs) != 1 || rs[0].ID == earlier {
+		t.Errorf("reviews under the new name = %+v, want only the renamed repository's", rs)
+	}
+	if rv, _ := st.LatestPostedReview(500, "acme/site", 7); rv == nil || rv.ID == earlier {
+		t.Errorf("latest review of the renamed PR = %+v, want the renamed repository's", rv)
+	}
+	if rv, _ := st.GetReview(earlier); rv == nil || rv.Repo != "acme/site"+EarlierRepoSuffix {
+		t.Errorf("the earlier repository's review = %+v, want it kept as history", rv)
 	}
 	if acts, _ := st.RecentActivity(500, 10, "acme/site", 7); len(acts) != 1 {
 		t.Errorf("activity under the new name = %d entries, want 1", len(acts))
@@ -480,7 +490,8 @@ func TestOrgSummaries(t *testing.T) {
 
 // TestAbandonedDeliveryIsRetried: a delivery claimed but never finished (the
 // bot stopped mid-way) can be handled again by a redelivery once it's been
-// abandoned for a while; a finished one stays a duplicate.
+// abandoned for a while; a finished one stays a duplicate. Only the handler
+// holding the current claim can record the result.
 func TestAbandonedDeliveryIsRetried(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -488,27 +499,33 @@ func TestAbandonedDeliveryIsRetried(t *testing.T) {
 	}
 	defer st.Close()
 	now := time.Now().Unix()
-	if fresh, err := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: now}); !fresh || err != nil {
-		t.Fatalf("first delivery = %v, %v", fresh, err)
+	first, err := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: now})
+	if first == 0 || err != nil {
+		t.Fatalf("first delivery = %v, %v", first, err)
 	}
 	// Still being handled, for all anyone knows: a duplicate.
-	if fresh, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: now + 60}); fresh {
+	if c, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: now + 60}); c != 0 {
 		t.Error("a delivery claimed a minute ago was handled again")
 	}
 	// Never finished, long ago: handled again, once.
 	later := now + int64(abandonedDelivery.Seconds()) + 60
-	if fresh, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later}); !fresh {
-		t.Error("an abandoned delivery wasn't handled again")
+	second, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later})
+	if second == 0 {
+		t.Fatal("an abandoned delivery wasn't handled again")
 	}
-	if fresh, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later + 1}); fresh {
+	if c, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later + 1}); c != 0 {
 		t.Error("the reclaimed delivery was claimed twice")
 	}
-	// Finished: a duplicate however long after.
-	if err := st.SetDeliveryResult("d1", 0, "pong"); err != nil {
+	// The second handler finishes; the first, still running, fails late.
+	if err := st.SetDeliveryResult("d1", second, 0, "pong"); err != nil {
 		t.Fatal(err)
 	}
-	if fresh, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later + 3600}); fresh {
-		t.Error("a finished delivery was handled again")
+	if err := st.SetDeliveryResult("d1", first, 0, "error: timed out"); err != nil {
+		t.Fatal(err)
+	}
+	// Finished: a duplicate however long after.
+	if c, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later + 3600}); c != 0 {
+		t.Error("a finished delivery was handled again (a late result from a handler that lost its claim overwrote it)")
 	}
 }
 

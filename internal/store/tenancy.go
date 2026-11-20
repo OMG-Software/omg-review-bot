@@ -403,14 +403,17 @@ const abandonedDelivery = 5 * time.Minute
 // RecordDelivery stores a delivery and reports whether to handle it: false if
 // this delivery ID was already received (GitHub redelivers on timeouts, and
 // people can redeliver by hand), unless handling it failed or never finished.
-func (s *Store) RecordDelivery(d Delivery) (bool, error) {
+//
+// The claim it returns (0 when not to handle it) is the claim time; a
+// takeover is minutes later, so it tells one handler's claim from another's.
+func (s *Store) RecordDelivery(d Delivery) (claim int64, err error) {
 	if d.ReceivedAt == 0 {
 		d.ReceivedAt = time.Now().Unix()
 	}
 	res, err := s.db.Exec(`INSERT OR IGNORE INTO webhook_deliveries(id, event, action, repo, account_id, result, received_at) VALUES(?,?,?,?,?,?,?)`,
 		d.ID, d.Event, d.Action, d.Repo, d.AccountID, d.Result, d.ReceivedAt)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -423,20 +426,26 @@ func (s *Store) RecordDelivery(d Delivery) (bool, error) {
 		if res, err = s.db.Exec(`UPDATE webhook_deliveries SET result='', received_at=? WHERE id=?
 AND (result LIKE 'error%' OR (result='' AND received_at<?))`,
 			d.ReceivedAt, d.ID, d.ReceivedAt-int64(abandonedDelivery.Seconds())); err != nil {
-			return false, err
+			return 0, err
 		}
-		n, _ = res.RowsAffected()
-		return n > 0, nil
+		if n, _ = res.RowsAffected(); n == 0 {
+			return 0, nil
+		}
+		return d.ReceivedAt, nil
 	}
 	if s.deliveries.Add(1)%100 == 0 {
 		_, _ = s.db.Exec(`DELETE FROM webhook_deliveries WHERE received_at < ?`, time.Now().Add(-30*24*time.Hour).Unix())
 	}
-	return n > 0, nil
+	return d.ReceivedAt, nil
 }
 
 // SetDeliveryResult records what the bot did with a delivery.
-func (s *Store) SetDeliveryResult(id string, accountID int64, result string) error {
-	_, err := s.db.Exec(`UPDATE webhook_deliveries SET result=?, account_id=? WHERE id=?`, result, accountID, id)
+// Only the handler holding the delivery's current claim can: one that ran
+// so long that a redelivery took the delivery over can't overwrite the
+// result of the one that took it.
+func (s *Store) SetDeliveryResult(id string, claim, accountID int64, result string) error {
+	_, err := s.db.Exec(`UPDATE webhook_deliveries SET result=?, account_id=? WHERE id=? AND received_at=?`,
+		result, accountID, id, claim)
 	return err
 }
 
