@@ -1,11 +1,13 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -95,6 +97,7 @@ type testSite struct {
 	ts  *httptest.Server
 	st  *store.Store
 	b   *bot.Bot
+	srv *Server
 	gh  *fakeGitHubWeb
 	cl  *http.Client
 	cfg settings.Settings
@@ -136,7 +139,7 @@ func newTestSite(t *testing.T) *testSite {
 	t.Cleanup(ts.Close)
 	jar, _ := cookiejar.New(nil)
 	cl := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &testSite{t: t, ts: ts, st: st, b: b, gh: gh, cl: cl, cfg: cfg}
+	return &testSite{t: t, ts: ts, st: st, b: b, srv: srv, gh: gh, cl: cl, cfg: cfg}
 }
 
 func testPEM(t *testing.T) string {
@@ -175,6 +178,15 @@ func (s *testSite) post(path string, form url.Values) (int, http.Header) {
 // signIn runs the GitHub sign-in flow as the fake's current user.
 func (s *testSite) signIn() {
 	s.t.Helper()
+	code, body, hdr := s.trySignIn()
+	if code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/orgs") {
+		s.t.Fatalf("callback = %d %s %s", code, hdr.Get("Location"), body)
+	}
+}
+
+// trySignIn goes through GitHub sign-in and returns the callback's response.
+func (s *testSite) trySignIn() (int, string, http.Header) {
+	s.t.Helper()
 	code, _, hdr := s.get("/auth/github?next=/orgs")
 	if code != http.StatusSeeOther {
 		s.t.Fatalf("/auth/github = %d", code)
@@ -185,10 +197,7 @@ func (s *testSite) signIn() {
 		s.t.Fatalf("authorize redirect = %s", loc)
 	}
 	state := loc.Query().Get("state")
-	code, body, hdr := s.get("/auth/github/callback?code=good-code&state=" + url.QueryEscape(state))
-	if code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/orgs") {
-		s.t.Fatalf("callback = %d %s %s", code, hdr.Get("Location"), body)
-	}
+	return s.get("/auth/github/callback?code=good-code&state=" + url.QueryEscape(state))
 }
 
 // seedOrgs creates acme and another organization, each with a repository,
@@ -611,6 +620,35 @@ func TestUnverifiedGitHubAccessIsPaused(t *testing.T) {
 	s.signIn()
 	if m, _ := s.st.GetMembership(acmeID, aliceID); m != nil {
 		t.Errorf("unverified GitHub-derived access kept: %+v", m)
+	}
+}
+
+// TestFailedAccessUpdateEndsSessions: when sign-in can't update someone's
+// access, their existing sessions stop working, even if ending them in the
+// database fails too; the next sign-in that updates it lets them back in.
+func TestFailedAccessUpdateEndsSessions(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	if code, _, _ := s.get("/orgs"); code != http.StatusOK {
+		t.Fatalf("signed in: /orgs = %d", code)
+	}
+	syncAccess, endSessions := s.srv.syncAccess, s.srv.endSessions
+	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
+		return nil, errors.New("database is locked")
+	}
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	// The failed sign-in leaves the browser's earlier session cookie in place.
+	if code, body, _ := s.trySignIn(); code != http.StatusOK || !strings.Contains(body, "Couldn&#39;t update your access") {
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("earlier session still works after a failed access update: %d %s", code, hdr.Get("Location"))
+	}
+	s.srv.syncAccess, s.srv.endSessions = syncAccess, endSessions
+	s.signIn()
+	if code, _, _ := s.get("/orgs"); code != http.StatusOK {
+		t.Errorf("signed in again after a successful update: /orgs = %d", code)
 	}
 }
 

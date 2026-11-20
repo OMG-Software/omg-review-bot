@@ -44,7 +44,10 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 		return err
 	}
 	b.mu.Lock()
-	needSync := time.Since(b.lastRepoSync) > time.Duration(st.Poll.RepoRefreshMinutes)*time.Minute
+	// At most one attempt a minute, failed ones included: a sync that keeps
+	// failing would otherwise be retried at every wake.
+	needSync := time.Since(b.lastRepoSync) > time.Duration(st.Poll.RepoRefreshMinutes)*time.Minute &&
+		time.Since(b.syncTried) >= time.Minute
 	b.mu.Unlock()
 	if needSync {
 		if _, err := b.syncRepos(ctx, st, app); err != nil {

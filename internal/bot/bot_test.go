@@ -46,6 +46,7 @@ type fakeGitHub struct {
 	resolves  []string // thread IDs resolved through GraphQL
 	jwtCalls  int
 	treeCalls int
+	instCalls int              // repository syncs (installation listings)
 	docRefs   []string         // refs project docs were read at
 	posted    []string         // PR conversation comments the bot posted
 	edited    map[int64]string // the latest text of each comment the bot edited
@@ -94,6 +95,7 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			f.jwtCalls++
 			send(map[string]any{"id": 1, "slug": "testbot", "name": "Test Bot"})
 		case p == "/app/installations":
+			f.instCalls++
 			send([]any{map[string]any{"id": 10, "account": map[string]any{"id": 500, "login": "acme", "type": "Organization"}}})
 		case p == "/app/installations/10/access_tokens":
 			send(map[string]any{"token": "inst-token", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)})
@@ -650,6 +652,55 @@ func TestAllowListDoesntUninstall(t *testing.T) {
 		PullRequest: &github.PullRequest{Number: 7, State: "open", UpdatedAt: "2026-01-01T00:00:00Z"}}
 	if got := b.webhookPull(b.Settings(), ev); got != "ignored: repository isn't watched" {
 		t.Errorf("webhook for a paused organization = %q", got)
+	}
+}
+
+// TestRepoSyncThrottled: the poll's own repository sync is held to one
+// attempt a minute, like requestSync's, so a failing sync isn't retried at
+// every wake.
+func TestRepoSyncThrottled(t *testing.T) {
+	gh := newFakeGitHub()
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	syncs := func() int {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		return gh.instCalls
+	}
+
+	_ = b.poll(ctx, b.Settings())
+	if n := syncs(); n != 1 {
+		t.Fatalf("first poll synced %d times, want 1", n)
+	}
+	// As after a failed sync: no successful one on record.
+	b.mu.Lock()
+	b.lastRepoSync = time.Time{}
+	b.mu.Unlock()
+	_ = b.poll(ctx, b.Settings())
+	if n := syncs(); n != 1 {
+		t.Errorf("a poll within a minute of the last attempt synced again (%d syncs)", n)
+	}
+	b.mu.Lock()
+	b.syncTried = time.Now().Add(-2 * time.Minute)
+	b.mu.Unlock()
+	_ = b.poll(ctx, b.Settings())
+	if n := syncs(); n != 2 {
+		t.Errorf("a poll a minute after the last attempt didn't sync (%d syncs)", n)
 	}
 }
 

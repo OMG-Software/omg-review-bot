@@ -3,6 +3,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -12,10 +13,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/bot"
+	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
@@ -29,10 +32,20 @@ type Server struct {
 	pages  map[string]*template.Template
 	secret atomic.Pointer[[]byte] // the session signing key; replaced whole, never changed in place
 	mux    *http.ServeMux
+
+	// unreconciled holds the IDs of people whose access sign-in couldn't
+	// update: none of their sessions count until a sign-in does. It's kept
+	// in memory so it works even when the database can't record it.
+	unreconciled sync.Map
+	// syncAccess and endSessions are syncMemberships and the store's
+	// BumpUserEpoch; tests replace them to make them fail.
+	syncAccess  func(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error)
+	endSessions func(userID int64) error
 }
 
 func New(st *store.Store, b *bot.Bot, log *slog.Logger) (*Server, error) {
 	s := &Server{store: st, bot: b, log: log, pages: map[string]*template.Template{}}
+	s.syncAccess, s.endSessions = s.syncMemberships, st.BumpUserEpoch
 	if err := s.loadSecret(); err != nil {
 		return nil, err
 	}

@@ -217,6 +217,9 @@ func (s *Server) sessionViewer(r *http.Request) *viewer {
 		return &viewer{ID: localAdminID, Admin: true, Local: true}
 	}
 	u, err := s.store.GetUser(uid)
+	if _, bad := s.unreconciled.Load(uid); bad {
+		return nil // their access couldn't be updated at sign-in
+	}
 	if err != nil || u == nil || u.Disabled || u.Epoch != epoch {
 		return nil
 	}

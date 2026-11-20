@@ -110,18 +110,22 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	notes, err := s.syncMemberships(ctx, uc, u)
+	notes, err := s.syncAccess(ctx, uc, u)
 	if err != nil {
 		// Don't sign them in with access that should have changed, and end
-		// the sessions they already have, which could still use it. The next
-		// sign-in that gets through updates it.
+		// the sessions they already have, which could still use it: at once
+		// here, and in the database so it lasts a restart (best effort, as the
+		// database may be what failed). The next sign-in that gets through
+		// updates the access and lets them back in.
 		s.log.Error("update access at sign-in", "user", u.Login, "err", err)
-		if err := s.store.BumpUserEpoch(u.ID); err != nil {
+		s.unreconciled.Store(u.ID, true)
+		if err := s.endSessions(u.ID); err != nil {
 			s.log.Error("end sessions after a failed access update", "user", u.Login, "err", err)
 		}
 		fail("Couldn't update your access, so you weren't signed in. Try again; if it keeps happening, tell an administrator.")
 		return
 	}
+	s.unreconciled.Delete(u.ID)
 	s.store.Log("info", "", 0, fmt.Sprintf("@%s signed in with GitHub", u.Login))
 	s.issueSession(w, r, u.ID, u.Epoch)
 	if len(notes) > 0 {
@@ -135,7 +139,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 // admins of a GitHub organization the App is installed on become its owners
 // here, the account owner of a personal installation becomes its owner, and
 // members join as members when the organization allows it. Access added by
-// hand is left alone (except that a GitHub admin is raised to owner).
+// hand is left alone, whatever the GitHub role.
 // Access that came from GitHub and no longer applies is removed, and so is
 // access GitHub couldn't confirm this time: it's restored at the next sign-in
 // that can. An error means the access couldn't be updated; the caller must
