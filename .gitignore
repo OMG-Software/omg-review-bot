@@ -32,3 +32,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+.claude/
+
+# prbot: built binary, runtime data (database holds the GitHub App key) and keys
+/prbot
+/data/
+/data-dev/
+*.pem

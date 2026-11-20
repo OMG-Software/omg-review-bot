@@ -1,0 +1,61 @@
+{{define "content"}}
+{{with .D.PR}}
+<h1>{{.Repo}}#{{.Number}} <span class="pill s-{{.Status}}">{{.Status}}</span></h1>
+<p class="lead">{{.Title}}</p>
+<div class="card">
+  <dl class="kv">
+    <dt>Author</dt><dd>@{{.Author}}</dd>
+    <dt>Branches</dt><dd><code>{{.BaseRef}}</code> ← <code>{{.HeadRef}}</code></dd>
+    <dt>Head commit</dt><dd><code>{{short .HeadSHA}}</code></dd>
+    <dt>Last reviewed</dt><dd>{{if .ReviewedSHA}}<code>{{short .ReviewedSHA}}</code>{{else}}never{{end}}</dd>
+    <dt>Labels</dt><dd>{{if .Labels}}{{join .Labels ", "}}{{else}}—{{end}}</dd>
+    {{if .LastError}}<dt>Last error</dt><dd class="bad">{{.LastError}}</dd>{{end}}
+    <dt>On GitHub</dt><dd><a href="{{.URL}}" target="_blank" rel="noopener">{{.URL}}</a></dd>
+  </dl>
+  <div class="actions">
+    <form method="post" action="/prs/{{.Repo}}/{{.Number}}/review" class="inline"><button class="primary">Review now</button></form>
+    <form method="post" action="/prs/{{.Repo}}/{{.Number}}/replies" class="inline"><button>Check replies</button></form>
+    {{if .Skip}}
+    <form method="post" action="/prs/{{.Repo}}/{{.Number}}/skip" class="inline"><input type="hidden" name="skip" value="0"><button>Resume automatic reviews</button></form>
+    {{else}}
+    <form method="post" action="/prs/{{.Repo}}/{{.Number}}/skip" class="inline"><input type="hidden" name="skip" value="1"><button>Stop automatic reviews</button></form>
+    {{end}}
+  </div>
+</div>
+{{end}}
+
+<div class="card">
+  <h2>Reviews</h2>
+  {{if .D.Reviews}}
+  <table>
+    <thead><tr><th>#</th><th>Commit</th><th>Result</th><th>Comments</th><th>Model</th><th>Tokens</th><th>When</th></tr></thead>
+    <tbody>
+    {{range .D.Reviews}}
+    <tr>
+      <td><a href="/reviews/{{.ID}}">{{.ID}}</a></td>
+      <td><code>{{short .HeadSHA}}</code></td>
+      <td><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span>{{if .URL}} <a href="{{.URL}}" target="_blank" rel="noopener">view ↗</a>{{end}}</td>
+      <td>{{.Comments}}{{if .Notes}} + {{.Notes}} notes{{end}}</td>
+      <td><code>{{.Model}}</code></td>
+      <td>{{.PromptTokens}} / {{.CompletionTokens}}</td>
+      <td title="{{when .StartedAt}}">{{ago .StartedAt}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="muted">No reviews yet.</p>{{end}}
+</div>
+
+<div class="card">
+  <h2>Activity</h2>
+  {{template "activity-list" .D.Activity}}
+</div>
+{{end}}
+
+{{define "activity-list"}}
+{{if .}}
+<ul class="log">
+{{range .}}<li class="lvl-{{.Level}}"><span class="ts" title="{{when .TS}}">{{ago .TS}}</span> <span class="msg">{{.Message}}</span></li>{{end}}
+</ul>
+{{else}}<p class="muted">Nothing yet.</p>{{end}}
+{{end}}

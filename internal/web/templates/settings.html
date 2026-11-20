@@ -1,0 +1,91 @@
+{{define "content"}}
+{{$s := .D.S}}
+<h1>Settings</h1>
+<form method="post" action="/settings" class="settings" id="settings-form">
+
+<section class="card">
+  <h2>GitHub App</h2>
+  <p class="hint">Create a GitHub App for your org (<i>Org settings → Developer settings → GitHub Apps → New</i>).
+    Repository permissions: <b>Pull requests: Read &amp; write</b>, <b>Contents: Read-only</b>, <b>Metadata: Read-only</b>.
+    Untick <i>Webhook → Active</i>, because this bot polls. Generate a private key, then install the App on your org.</p>
+  <div class="row">
+    <label>App ID <input name="gh_app_id" inputmode="numeric" value="{{if $s.GitHub.AppID}}{{$s.GitHub.AppID}}{{end}}" placeholder="123456"></label>
+    <label class="grow">API base URL <input name="gh_api_base" value="{{$s.GitHub.APIBaseURL}}">
+      <small>For GitHub Enterprise Server use https://HOST/api/v3</small></label>
+  </div>
+  <label>Private key (.pem contents) {{if .D.HasKey}}<span class="pill s-reviewed">saved</span>{{end}}
+    <textarea name="gh_private_key" rows="4" class="mono" placeholder="{{if .D.HasKey}}Leave empty to keep the saved key{{else}}-----BEGIN RSA PRIVATE KEY-----{{end}}"></textarea></label>
+  <label>Only these orgs/accounts <small>(one per line; empty = every installation)</small>
+    <textarea name="gh_accounts" rows="2">{{lines $s.GitHub.Accounts}}</textarea></label>
+  <label class="check"><input type="checkbox" name="gh_new_repos" {{if $s.GitHub.NewReposEnabled}}checked{{end}}> Watch newly discovered repositories automatically</label>
+  <div class="actions"><button type="button" data-test="/api/test/github" data-out="gh-result">Test GitHub connection</button><span id="gh-result" class="result"></span></div>
+</section>
+
+<section class="card">
+  <h2>Model</h2>
+  <div class="row">
+    <label>Provider
+      <select name="llm_provider" id="llm-provider">
+        {{range .D.Providers}}<option value="{{.ID}}" data-base="{{.Base}}" {{if eq .ID $s.LLM.Provider}}selected{{end}}>{{.Label}}</option>{{end}}
+      </select></label>
+    <label class="grow">Base URL <input name="llm_base_url" id="llm-base" value="{{$s.LLM.BaseURL}}"></label>
+  </div>
+  <div class="row">
+    <label class="grow">API key {{if .D.HasAPIKey}}<span class="pill s-reviewed">saved</span>{{end}}
+      <input name="llm_api_key" type="password" autocomplete="off" placeholder="{{if .D.HasAPIKey}}Leave empty to keep the saved key{{else}}Only needed for Ollama Cloud or hosted APIs{{end}}"></label>
+    {{if .D.HasAPIKey}}<label class="check"><input type="checkbox" name="llm_api_key_clear"> Remove saved key</label>{{end}}
+  </div>
+  <div class="row">
+    <label class="grow">Model <input name="llm_model" list="models" value="{{$s.LLM.Model}}" placeholder="e.g. qwen2.5-coder:32b"><datalist id="models"></datalist></label>
+    <div class="actions end"><button type="button" data-test="/api/models" data-out="model-result">Load models</button></div>
+  </div>
+  <span id="model-result" class="result"></span>
+  <div class="row">
+    <label>Context tokens <input name="llm_context" type="number" min="4096" step="1024" value="{{$s.LLM.ContextTokens}}">
+      <small>Must match the model's loaded context. For Ollama this sets <code>num_ctx</code>; in LM Studio set it when loading the model.</small></label>
+    <label>Max output tokens <input name="llm_max_output" type="number" min="512" step="256" value="{{$s.LLM.MaxOutputTokens}}"></label>
+    <label>Temperature <input name="llm_temperature" type="number" min="0" max="2" step="0.05" value="{{$s.LLM.Temperature}}"></label>
+    <label>Timeout (s) <input name="llm_timeout" type="number" min="30" value="{{$s.LLM.TimeoutSeconds}}"></label>
+  </div>
+  <label class="check"><input type="checkbox" name="llm_structured" {{if $s.LLM.StructuredOutput}}checked{{end}}> Enforce JSON schema output (recommended; turn off if your server rejects <code>response_format</code>/<code>format</code>)</label>
+  <div class="actions"><button type="button" data-test="/api/test/llm" data-out="llm-result">Test model</button><span id="llm-result" class="result"></span></div>
+</section>
+
+<section class="card">
+  <h2>Reviews</h2>
+  <label class="check"><input type="checkbox" name="rv_enabled" {{if $s.Review.Enabled}}checked{{end}}> Review pull requests automatically</label>
+  <label class="check"><input type="checkbox" name="rv_skip_drafts" {{if $s.Review.SkipDrafts}}checked{{end}}> Skip draft PRs until they're marked ready</label>
+  <label class="check"><input type="checkbox" name="rv_existing" {{if $s.Review.ReviewExisting}}checked{{end}}> Also review PRs that were already open when a repository is first watched</label>
+  <label>Skill folder <small>(empty = <code>{{.D.SkillDir}}</code>; manage it on the <a href="/skill">Skill</a> page)</small>
+    <input name="rv_skill_dir" value="{{$s.Review.SkillDir}}" placeholder="{{.D.SkillDir}}"></label>
+  <div class="row">
+    <label>Wait after push (s) <input name="rv_debounce" type="number" min="0" value="{{$s.Review.DebounceSeconds}}"></label>
+    <label>Max comments per review <input name="rv_max_comments" type="number" min="1" max="100" value="{{$s.Review.MaxComments}}"></label>
+    <label>Max files per PR <input name="rv_max_files" type="number" min="1" value="{{$s.Review.MaxFiles}}"></label>
+    <label>Minimum severity
+      <select name="rv_min_severity">{{range .D.Severities}}<option {{if eq . $s.Review.MinSeverity}}selected{{end}}>{{.}}</option>{{end}}</select></label>
+  </div>
+  <div class="row">
+    <label class="grow">Skip PRs with these labels <textarea name="rv_skip_labels" rows="3">{{lines $s.Review.SkipLabels}}</textarea></label>
+    <label class="grow">Ignore files matching <small>(gitignore-style, one per line)</small><textarea name="rv_ignore" rows="6" class="mono">{{lines $s.Review.IgnorePatterns}}</textarea></label>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Conversations</h2>
+  <label class="check"><input type="checkbox" name="rp_enabled" {{if $s.Replies.Enabled}}checked{{end}}> Reply when someone responds to one of the bot's review comments</label>
+  <label class="check"><input type="checkbox" name="rp_mentions" {{if $s.Replies.Mentions}}checked{{end}}> Answer when the bot is @mentioned in a PR conversation</label>
+  <label>Max bot replies per thread <input name="rp_max" type="number" min="1" value="{{$s.Replies.MaxPerThread}}"></label>
+</section>
+
+<section class="card">
+  <h2>Polling</h2>
+  <div class="row">
+    <label>Check for PR changes every (s) <input name="poll_interval" type="number" min="15" value="{{$s.Poll.IntervalSeconds}}"></label>
+    <label>Refresh repository list every (min) <input name="poll_refresh" type="number" min="1" value="{{$s.Poll.RepoRefreshMinutes}}"></label>
+  </div>
+</section>
+
+<div class="savebar"><button class="primary">Save settings</button></div>
+</form>
+{{end}}

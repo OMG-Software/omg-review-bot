@@ -1,0 +1,14 @@
+{{define "content"}}
+<h1>Activity</h1>
+<div class="card">
+{{if .D}}
+<ul class="log">
+{{range .D}}
+  <li class="lvl-{{.Level}}"><span class="ts" title="{{when .TS}}">{{ago .TS}}</span>
+  {{if .Repo}}{{if .Number}}<a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a>{{else}}<span class="muted">{{.Repo}}</span>{{end}}{{end}}
+  <span class="msg">{{.Message}}</span></li>
+{{end}}
+</ul>
+{{else}}<p class="muted">Nothing yet.</p>{{end}}
+</div>
+{{end}}
