@@ -615,6 +615,13 @@ func TestAllowListDoesntUninstall(t *testing.T) {
 	if err := st.UpsertOrg(600, "gone", "Organization", 20); err != nil { // no longer installed
 		t.Fatal(err)
 	}
+	// An owner turned watching off for acme/web, which has an open PR.
+	if err := st.SetRepoEnabled(100, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePR(&store.PR{Repo: "acme/web", Number: 7, Open: true, Status: "pending", AccountID: 500}); err != nil {
+		t.Fatal(err)
+	}
 	cfg.GitHub.Accounts = []string{"someone-else"} // skips acme
 	if err := settings.Save(st, cfg); err != nil {
 		t.Fatal(err)
@@ -627,6 +634,22 @@ func TestAllowListDoesntUninstall(t *testing.T) {
 	}
 	if active(600) {
 		t.Error("an organization with no installation is still active")
+	}
+	// Paused, not removed: the repository keeps its setting, and its PR stays open.
+	if r, _ := st.GetRepo(100); r == nil || r.Enabled {
+		t.Errorf("repository of an organization the allow-list skips = %+v; want it kept, still not watched", r)
+	}
+	if p, _ := st.GetPR("acme/web", 7); p == nil || !p.Open {
+		t.Errorf("PR of an organization the allow-list skips = %+v; want it kept open", p)
+	}
+	// Nor is it touched by webhooks while it's paused.
+	if err := st.SetRepoEnabled(100, true); err != nil {
+		t.Fatal(err)
+	}
+	ev := &github.WebhookEvent{Action: "synchronize", Repository: &github.Repo{ID: 100, FullName: "acme/web"},
+		PullRequest: &github.PullRequest{Number: 7, State: "open", UpdatedAt: "2026-01-01T00:00:00Z"}}
+	if got := b.webhookPull(b.Settings(), ev); got != "ignored: repository isn't watched" {
+		t.Errorf("webhook for a paused organization = %q", got)
 	}
 }
 

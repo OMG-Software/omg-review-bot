@@ -57,7 +57,7 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 	}
 	var firstErr error
 	for _, r := range repos {
-		if !r.Enabled {
+		if !r.Enabled || !allowedRepo(st, r.FullName) {
 			continue
 		}
 		if ctx.Err() != nil {
@@ -91,6 +91,18 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 			orgs = append(orgs, in.Account.ID)
 		}
 		if len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, in.Account.Login) {
+			// Excluded by the allow-list, not uninstalled: its repositories
+			// stay as they are (with their watch settings and PRs), paused,
+			// until the account is allowed again.
+			if in.Account.ID != 0 {
+				kept, err := b.store.ListRepos(in.Account.ID)
+				if err != nil {
+					return 0, err
+				}
+				for _, r := range kept {
+					keep = append(keep, r.ID)
+				}
+			}
 			continue
 		}
 		repos, err := app.Installation(in.ID).Repos(ctx)
@@ -325,7 +337,7 @@ func (b *Bot) enqueueDue(st settings.Settings) {
 		return
 	}
 	for _, p := range prs {
-		if !b.settingsFor(st, p.AccountID).Review.Enabled {
+		if !b.settingsFor(st, p.AccountID).Review.Enabled || !allowedRepo(st, p.Repo) {
 			continue
 		}
 		b.enqueue(job{kind: jobReview, repo: p.Repo, number: p.Number})
@@ -350,7 +362,7 @@ func (b *Bot) maybeSweep(st settings.Settings) {
 	}
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 	for _, p := range prs {
-		if !conversationsOn(b.settingsFor(st, p.AccountID)) {
+		if !conversationsOn(b.settingsFor(st, p.AccountID)) || !allowedRepo(st, p.Repo) {
 			continue
 		}
 		// Quiet PRs are skipped to save API calls; activity there changes the ETag anyway.
@@ -359,6 +371,14 @@ func (b *Bot) maybeSweep(st settings.Settings) {
 		}
 		b.enqueue(job{kind: jobReplies, repo: p.Repo, number: p.Number})
 	}
+}
+
+// allowedRepo reports whether the "only these orgs/accounts" setting, if
+// set, includes the repository's owner. One it excludes is paused: kept, but
+// not polled, reviewed or replied in.
+func allowedRepo(st settings.Settings, fullName string) bool {
+	owner, _, _ := strings.Cut(fullName, "/")
+	return len(st.GitHub.Accounts) == 0 || containsFold(st.GitHub.Accounts, owner)
 }
 
 func containsFold(list []string, s string) bool {

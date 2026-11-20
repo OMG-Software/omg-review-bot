@@ -557,6 +557,7 @@ Notes:
 | GitHub test fails with `401` or `404` | Wrong App ID (use the number, not the `Iv1…` Client ID), the wrong App's key, or the PEM is missing its `BEGIN`/`END` lines. Also check the PC's clock: the App's sign-in token is time-limited. |
 | GitHub test: "isn't installed anywhere yet" | The credentials work; install the App on your org (step 2). |
 | No repositories listed | The App isn't installed on them, or the *Only these orgs* setting excludes the org. Click **Sync from GitHub**. |
+| An org's PRs aren't reviewed any more | The *Only these orgs* setting excludes it. That pauses the org: its repositories, settings and history are kept and people keep their access, but nothing is polled, reviewed or replied to until it's allowed again. |
 | An open PR is never reviewed | It's probably `baseline` (it was open before the repo was watched). Push to it or click **Review now**. |
 | Reviews post with zero findings | Open the review's **Raw model output**. An empty `"comments": []` means the model found nothing, which small models often do, so try a larger code model. If the raw output has comments that weren't posted, they were filtered as duplicates or below the comment level. |
 | Fixed findings aren't resolved, or the bot never approves | Thread states come from GitHub's GraphQL API. Check the activity log for "could not read review thread states". While they can't be read, every finding counts as open, so the bot doesn't approve. The model's fix checks are in the review's raw output under `fix check:`. |

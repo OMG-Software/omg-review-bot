@@ -614,6 +614,43 @@ func TestUnverifiedGitHubAccessIsPaused(t *testing.T) {
 	}
 }
 
+// TestAllowListPausesAccess: an organization the "only these accounts" setting
+// excludes keeps the GitHub-derived access people already have, and GitHub
+// withdrawing it still removes it, but nobody gains new access to it.
+func TestAllowListPausesAccess(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if err := s.st.RemoveMembership(acmeID, aliceID); err != nil { // only what GitHub gives
+		t.Fatal(err)
+	}
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || m.Source != store.SourceGitHub {
+		t.Fatalf("alice's access from GitHub = %+v", m)
+	}
+	s.cfg.GitHub.Accounts = []string{"other"} // excludes acme
+	if err := settings.Save(s.st, s.cfg); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil {
+		t.Error("access to an organization the allow-list excludes was removed at sign-in")
+	}
+	s.gh.mu.Lock()
+	s.gh.acmeRole = "forbidden"
+	s.gh.mu.Unlock()
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m != nil {
+		t.Errorf("access GitHub no longer confirms was kept because the organization is excluded: %+v", m)
+	}
+	s.gh.mu.Lock()
+	s.gh.acmeRole = "admin"
+	s.gh.mu.Unlock()
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m != nil {
+		t.Errorf("new access given to an organization the allow-list excludes: %+v", m)
+	}
+}
+
 // TestAddFormDoesntChangeRoles: adding someone who already has access is
 // refused, so the form can't demote the last owner.
 func TestAddFormDoesntChangeRoles(t *testing.T) {

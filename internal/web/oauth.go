@@ -152,10 +152,17 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 	seen := map[int64]bool{}
 	for _, in := range insts {
 		acct := in.Account
-		if acct.ID == 0 || (len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, acct.Login)) {
+		if acct.ID == 0 {
 			continue
 		}
+		// An account the allow-list excludes is paused, not gone: GitHub-
+		// derived access to it is still kept up to date (and removed when
+		// GitHub withdraws it), but nobody gains new access to it.
+		excluded := len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, acct.Login)
 		org, _ := s.store.GetOrg(acct.ID)
+		if org == nil && excluded {
+			continue // never added, so nobody has access to keep
+		}
 		if org == nil {
 			// Installed since the last repository sync: record it now.
 			if err := s.store.UpsertOrg(acct.ID, acct.Login, acct.Type, in.ID); err != nil {
@@ -197,7 +204,7 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 		// again as it writes, so access added by hand meanwhile isn't touched.
 		var removed bool
 		switch {
-		case cur == nil && role != "":
+		case cur == nil && role != "" && !excluded:
 			err = s.store.SetGitHubMembership(org.ID, u.ID, role)
 			if err == nil {
 				s.store.Log("info", "", 0, fmt.Sprintf("@%s joined %s as %s (from their GitHub role)", u.Login, org.Login, role))

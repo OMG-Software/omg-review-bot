@@ -83,7 +83,7 @@ func (b *Bot) webhookPull(st settings.Settings, ev *github.WebhookEvent) string 
 	case r == nil:
 		b.requestSync()
 		return "unknown repository; refreshing the repository list"
-	case !r.Enabled:
+	case !r.Enabled || !allowedRepo(st, r.FullName):
 		return "ignored: repository isn't watched"
 	case !r.Synced:
 		// The first poll decides which PRs are a baseline; let it run.
@@ -129,7 +129,7 @@ func (b *Bot) webhookConversation(st settings.Settings, event string, ev *github
 		return "ignored: the bot's own activity"
 	}
 	r, err := b.store.GetRepo(ev.Repository.ID)
-	if err != nil || r == nil || !r.Enabled {
+	if err != nil || r == nil || !r.Enabled || !allowedRepo(st, r.FullName) {
 		return "ignored: repository isn't watched"
 	}
 	pr, err := b.store.GetPR(r.FullName, number)
