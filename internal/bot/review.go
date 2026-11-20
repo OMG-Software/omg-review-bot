@@ -292,6 +292,14 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	}
 	p := buildPlan(st, files, budget)
 	rec.Batches = len(p.batches)
+	if len(p.batches) > 0 {
+		// Only when there's code to review, so a PR with nothing reviewable
+		// doesn't get a notice that's never followed by a review.
+		started := time.Unix(rec.StartedAt, 0)
+		if _, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, reviewStartedBody(head, started, st.LLM.Model, sk.Name)); err != nil {
+			b.logf("warn", pr.Repo, pr.Number, "could not post the review-started comment: %v", err)
+		}
+	}
 
 	// First check whether earlier findings have since been fixed: confirmed
 	// ones get a reply and are resolved, and no longer block approval.

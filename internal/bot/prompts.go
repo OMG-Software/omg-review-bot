@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
@@ -95,6 +96,27 @@ func previousFor(mine []github.ReviewComment, paths []string) []string {
 		}
 	}
 	return out
+}
+
+// ---------- the review-started notice ----------
+
+// reviewStartedBody is the PR comment posted when a review begins: which
+// commit, when (UTC), and the model and skill doing it.
+func reviewStartedBody(head string, started time.Time, model, skill string) string {
+	return fmt.Sprintf("🔍 **Review started** on `%s`\n\n"+
+		"- **Started:** %s\n- **Model:** %s\n- **Review skill:** %s\n\n"+
+		"<sub>The review will be posted here when it's done.</sub>\n<!-- prbot:review-started -->",
+		short(head), started.UTC().Format("2006-01-02 15:04:05 UTC"), inlineCode(model), inlineCode(skill))
+}
+
+// inlineCode shows a name as inline code, or "(none)". Backticks are dropped
+// so a name (such as a skill's, from its SKILL.md) can't break out of the span.
+func inlineCode(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "`", ""))
+	if s == "" {
+		return "(none)"
+	}
+	return "`" + s + "`"
 }
 
 // ---------- the bot's own finding comments ----------

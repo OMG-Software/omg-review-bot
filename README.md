@@ -355,7 +355,9 @@ event checks it for replies, so polling only catches anything missed.
 2. Files that are ignored, deleted or binary are skipped. Each remaining diff line is labelled
    with its new-file line number, so the model doesn't have to work out line numbers inside diff
    hunks. Large diffs are split into parts that fit the context, and the parts' summaries are
-   combined at the end.
+   combined at the end. If there's anything to review, the bot first posts a PR comment saying the
+   review has started, with the commit, the start time (UTC), the model and the review skill.
+   A PR with nothing reviewable gets no such comment.
 3. The model returns JSON findings. The bot checks each finding's file and line against the
    diff, moving it to the nearest changed line up to 3 lines away if needed. It drops findings
    the bot already raised in an earlier review. It drops findings below the *comment level* and

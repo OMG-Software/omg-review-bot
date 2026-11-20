@@ -46,6 +46,7 @@ type fakeGitHub struct {
 	jwtCalls  int
 	treeCalls int
 	docRefs   []string // refs project docs were read at
+	posted    []string // PR conversation comments the bot posted
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -145,6 +146,12 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			send(map[string]any{"id": id})
 		case strings.HasPrefix(p, "/repos/acme/web/compare/"):
 			send(map[string]any{"files": []any{map[string]any{"filename": "main.go"}}})
+		case p == "/repos/acme/web/issues/7/comments" && r.Method == http.MethodPost:
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.posted = append(f.posted, body["body"])
+			// Its own ID range, so review comment IDs stay as the test expects.
+			send(map[string]any{"id": 9000 + len(f.posted), "user": bot, "body": body["body"]})
 		case p == "/repos/acme/web/issues/7/comments":
 			send([]any{})
 		case strings.HasPrefix(p, "/repos/acme/web/git/trees/"):
@@ -326,6 +333,16 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	}
 	if len(gh.reviews) != 1 {
 		t.Fatalf("expected 1 review posted, got %d", len(gh.reviews))
+	}
+	// The PR is told the review has started, when, and with what.
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected 1 review-started comment, got %d: %q", len(gh.posted), gh.posted)
+	}
+	for _, want := range []string{"**Review started** on `aaa111`", "- **Model:** `test-model`",
+		"- **Review skill:** `default-code-review`", time.Now().UTC().Format("2006-01-02 "), " UTC\n", "<!-- prbot:review-started -->"} {
+		if !strings.Contains(gh.posted[0], want) {
+			t.Errorf("review-started comment missing %q:\n%s", want, gh.posted[0])
+		}
 	}
 	rv := gh.reviews[0]
 	if rv.CommitID != "aaa111" || rv.Event != "COMMENT" {
