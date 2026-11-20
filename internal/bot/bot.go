@@ -79,8 +79,9 @@ type Bot struct {
 	// the last successful sync started after. A sync only answers requests
 	// made before it started, so one made during it isn't lost.
 	syncAsked, syncDone uint64
-	syncTried           time.Time // the last repository sync started, successful or not
-	syncPending         bool      // a repository sync is scheduled for when the minute since the last one ends
+	syncGap             time.Duration // the least time between sync attempts (a minute; tests shorten it)
+	syncTried           time.Time     // the last repository sync started, successful or not
+	syncPending         bool          // a repository sync is scheduled for when the minute since the last one ends
 	lastSweep           time.Time
 	lastPoll            time.Time
 	lastWebhook         time.Time
@@ -104,6 +105,7 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		wake:    make(chan struct{}, 1),
 		kick:    make(chan struct{}, 1),
 		status:  Status{RateRemaining: -1},
+		syncGap: time.Minute,
 		// Deliveries are stored (only signed ones), so whether webhooks are
 		// arriving doesn't start over at every restart.
 		lastWebhook: st.LastDeliveryAt(),
@@ -381,6 +383,9 @@ func llmConfig(st settings.Settings) llm.Config {
 }
 
 // SkillDir is where the active review skill lives.
+// DataDir is the directory the bot keeps its files in.
+func (b *Bot) DataDir() string { return b.dataDir }
+
 func (b *Bot) SkillDir(st settings.Settings) string {
 	if st.Review.SkillDir != "" {
 		return st.Review.SkillDir

@@ -153,6 +153,7 @@ var addedColumns = []struct{ table, column, alter string }{
 	{"reviews", "sev_p4", `ALTER TABLE reviews ADD COLUMN sev_p4 INTEGER NOT NULL DEFAULT 0`},
 	{"reviews", "sev_p5", `ALTER TABLE reviews ADD COLUMN sev_p5 INTEGER NOT NULL DEFAULT 0`},
 	{"activity", "account_id", `ALTER TABLE activity ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"webhook_deliveries", "claim", `ALTER TABLE webhook_deliveries ADD COLUMN claim INTEGER NOT NULL DEFAULT 0`},
 }
 
 // postMigrate indexes the added columns, so it runs after they exist.

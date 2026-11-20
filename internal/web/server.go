@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,15 +46,20 @@ type Server struct {
 	// to end in the database; retryWait is its first wait (tests shorten it).
 	retrying  sync.Map
 	retryWait time.Duration
+	// pending lists, on disk, the people whose sessions still have to be
+	// ended in the database, so a restart doesn't let them back in.
+	pending pendingEnds
 }
 
 func New(st *store.Store, b *bot.Bot, log *slog.Logger) (*Server, error) {
 	s := &Server{store: st, bot: b, log: log, pages: map[string]*template.Template{}}
 	s.syncAccess, s.endSessions = s.syncMemberships, st.BumpUserEpoch
 	s.retryWait = 15 * time.Second
+	s.pending.path = filepath.Join(b.DataDir(), "pending-session-ends.json")
 	if err := s.loadSecret(); err != nil {
 		return nil, err
 	}
+	s.resumePendingEnds()
 	names, err := fs.Glob(assets, "templates/*.html")
 	if err != nil {
 		return nil, err

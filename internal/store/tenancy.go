@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"strings"
 	"time"
 )
@@ -404,14 +406,16 @@ const abandonedDelivery = 5 * time.Minute
 // this delivery ID was already received (GitHub redelivers on timeouts, and
 // people can redeliver by hand), unless handling it failed or never finished.
 //
-// The claim it returns (0 when not to handle it) is the claim time; a
-// takeover is minutes later, so it tells one handler's claim from another's.
+// The claim it returns (0 when not to handle it) is a random number that
+// tells this handler's claim from any other's, even one made in the same
+// second (a failed delivery can be redelivered at once).
 func (s *Store) RecordDelivery(d Delivery) (claim int64, err error) {
 	if d.ReceivedAt == 0 {
 		d.ReceivedAt = time.Now().Unix()
 	}
-	res, err := s.db.Exec(`INSERT OR IGNORE INTO webhook_deliveries(id, event, action, repo, account_id, result, received_at) VALUES(?,?,?,?,?,?,?)`,
-		d.ID, d.Event, d.Action, d.Repo, d.AccountID, d.Result, d.ReceivedAt)
+	claim = rand.Int64N(math.MaxInt64) + 1
+	res, err := s.db.Exec(`INSERT OR IGNORE INTO webhook_deliveries(id, event, action, repo, account_id, result, received_at, claim) VALUES(?,?,?,?,?,?,?,?)`,
+		d.ID, d.Event, d.Action, d.Repo, d.AccountID, d.Result, d.ReceivedAt, claim)
 	if err != nil {
 		return 0, err
 	}
@@ -423,20 +427,20 @@ func (s *Store) RecordDelivery(d Delivery) (claim int64, err error) {
 		// the result): handling takes seconds, so after a few minutes it's
 		// abandoned. Clearing the result and resetting the time claims it, so
 		// of two redeliveries at once only one runs.
-		if res, err = s.db.Exec(`UPDATE webhook_deliveries SET result='', received_at=? WHERE id=?
+		if res, err = s.db.Exec(`UPDATE webhook_deliveries SET result='', received_at=?, claim=? WHERE id=?
 AND (result LIKE 'error%' OR (result='' AND received_at<?))`,
-			d.ReceivedAt, d.ID, d.ReceivedAt-int64(abandonedDelivery.Seconds())); err != nil {
+			d.ReceivedAt, claim, d.ID, d.ReceivedAt-int64(abandonedDelivery.Seconds())); err != nil {
 			return 0, err
 		}
 		if n, _ = res.RowsAffected(); n == 0 {
 			return 0, nil
 		}
-		return d.ReceivedAt, nil
+		return claim, nil
 	}
 	if s.deliveries.Add(1)%100 == 0 {
 		_, _ = s.db.Exec(`DELETE FROM webhook_deliveries WHERE received_at < ?`, time.Now().Add(-30*24*time.Hour).Unix())
 	}
-	return d.ReceivedAt, nil
+	return claim, nil
 }
 
 // SetDeliveryResult records what the bot did with a delivery.
@@ -444,7 +448,7 @@ AND (result LIKE 'error%' OR (result='' AND received_at<?))`,
 // so long that a redelivery took the delivery over can't overwrite the
 // result of the one that took it.
 func (s *Store) SetDeliveryResult(id string, claim, accountID int64, result string) error {
-	_, err := s.db.Exec(`UPDATE webhook_deliveries SET result=?, account_id=? WHERE id=? AND received_at=?`,
+	_, err := s.db.Exec(`UPDATE webhook_deliveries SET result=?, account_id=? WHERE id=? AND claim=?`,
 		result, accountID, id, claim)
 	return err
 }

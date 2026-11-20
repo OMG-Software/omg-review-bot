@@ -901,3 +901,74 @@ func TestLastWebhookSurvivesRestart(t *testing.T) {
 		t.Error("webhooks not active after a restart, with a delivery five minutes ago")
 	}
 }
+
+// TestDelayedSyncRequestDuringSync: a sync request inside the gap since the
+// last attempt waits for a timer. When that timer fires while a sync is
+// still running, exactly one more sync follows the running one.
+func TestDelayedSyncRequestDuringSync(t *testing.T) {
+	gh := newFakeGitHub()
+	inner := gh.handler(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			once.Do(func() { close(started); <-release }) // the first sync takes a while
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b.syncGap = 100 * time.Millisecond
+	ctx := context.Background()
+	syncs := func() int {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		return gh.instCalls
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- b.poll(ctx, b.Settings()) }()
+	<-started
+	b.requestSync() // inside the gap: waits for the timer
+	b.mu.Lock()
+	pending := b.syncPending
+	b.mu.Unlock()
+	if !pending {
+		t.Fatal("a request inside the gap didn't set a timer")
+	}
+	time.Sleep(3 * b.syncGap) // the timer fires while the sync is still running
+	b.mu.Lock()
+	pending = b.syncPending
+	b.mu.Unlock()
+	if pending {
+		t.Fatal("the timer didn't fire")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := syncs(); n != 1 {
+		t.Fatalf("syncs after the first poll = %d, want 1", n)
+	}
+	for i, want := range []int{2, 2} { // one follow-up sync, then none
+		if err := b.poll(ctx, b.Settings()); err != nil {
+			t.Fatal(err)
+		}
+		if n := syncs(); n != want {
+			t.Errorf("syncs after poll %d = %d, want %d", i+2, n, want)
+		}
+	}
+}

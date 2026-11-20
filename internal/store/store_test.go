@@ -527,6 +527,26 @@ func TestAbandonedDeliveryIsRetried(t *testing.T) {
 	if c, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later + 3600}); c != 0 {
 		t.Error("a finished delivery was handled again (a late result from a handler that lost its claim overwrote it)")
 	}
+
+	// A failed delivery redelivered within the same second gets a claim of
+	// its own, so the earlier handler's claim no longer writes.
+	c1, _ := st.RecordDelivery(Delivery{ID: "d2", Event: "ping", ReceivedAt: now})
+	if err := st.SetDeliveryResult("d2", c1, 0, "error: boom"); err != nil {
+		t.Fatal(err)
+	}
+	c2, _ := st.RecordDelivery(Delivery{ID: "d2", Event: "ping", ReceivedAt: now})
+	if c2 == 0 || c2 == c1 {
+		t.Fatalf("claims of a delivery retried in the same second: %d then %d; want two different ones", c1, c2)
+	}
+	if err := st.SetDeliveryResult("d2", c2, 0, "pong"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetDeliveryResult("d2", c1, 0, "error: late"); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := st.RecordDelivery(Delivery{ID: "d2", Event: "ping", ReceivedAt: now + 1}); c != 0 {
+		t.Error("the earlier claim's late result overwrote the retry's")
+	}
 }
 
 // TestGitHubMembershipWritesSpareManualAccess: the writes sign-in uses never

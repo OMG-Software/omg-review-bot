@@ -913,3 +913,51 @@ func TestPublicURLChecked(t *testing.T) {
 		}
 	}
 }
+
+// TestPendingSessionEndsSurviveRestart: when sign-in can't update someone's
+// access and ending their sessions in the database keeps failing, a restart
+// before any retry gets through still doesn't let their earlier session back
+// in: the bot noted it on disk, and the restarted bot, whose database works
+// again, ends it. Their access is left as it was.
+func TestPendingSessionEndsSurviveRestart(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	before, _ := s.st.GetMembership(acmeID, aliceID)
+	s.srv.retryWait = time.Hour // no retry gets through before the restart
+	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
+		return nil, errors.New("database is locked")
+	}
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	if ids, _ := s.srv.pending.load(); len(ids) != 1 || ids[0] != aliceID {
+		t.Fatalf("sessions noted to end = %v, want alice's", ids)
+	}
+
+	// Restart: a new server on the same database and data directory, which
+	// works again. The old one's in-memory block goes with it.
+	s.srv.unreconciled.Delete(int64(aliceID)) // and its retry stops
+	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ts.Config.Handler = srv2
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("earlier session works again after a restart: %d %s", code, hdr.Get("Location"))
+	}
+	if ids, _ := srv2.pending.load(); len(ids) != 0 {
+		t.Errorf("sessions still noted to end after the restarted bot ended them: %v", ids)
+	}
+	if u, _ := s.st.GetUser(aliceID); u == nil || u.Epoch == 0 {
+		t.Errorf("alice's sessions weren't ended in the database: %+v", u)
+	}
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || before == nil || m.Role != before.Role || m.Source != before.Source {
+		t.Errorf("access changed: %+v, was %+v", m, before)
+	}
+	s.signIn() // and a sign-in that works lets her back in
+	if code, _, _ := s.get("/orgs"); code != http.StatusOK {
+		t.Errorf("signed in again after the restart: /orgs = %d", code)
+	}
+}

@@ -48,7 +48,7 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 	// failing would otherwise be retried at every wake.
 	needSync := (time.Since(b.lastRepoSync) > time.Duration(st.Poll.RepoRefreshMinutes)*time.Minute ||
 		b.syncAsked != b.syncDone) &&
-		time.Since(b.syncTried) >= time.Minute
+		time.Since(b.syncTried) >= b.syncGap
 	b.mu.Unlock()
 	if needSync {
 		if _, err := b.syncRepos(ctx, st, app); err != nil {

@@ -122,14 +122,20 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		s.unreconciled.Store(u.ID, true)
 		if err := s.endSessions(u.ID); err != nil {
 			s.log.Error("end sessions after a failed access update; will retry", "user", u.Login, "err", err)
-			if _, already := s.retrying.LoadOrStore(u.ID, true); !already {
-				go s.retryEndSessions(u.ID, u.Login)
+			// Noted on disk too, so a restart before a retry gets through
+			// still keeps them out.
+			if err := s.pending.add(u.ID); err != nil {
+				s.log.Error("note sessions to end after a restart", "user", u.Login, "err", err)
 			}
+			s.startRetry(u.ID, u.Login)
 		}
 		fail("Couldn't update your access, so you weren't signed in. Try again; if it keeps happening, tell an administrator.")
 		return
 	}
 	s.unreconciled.Delete(u.ID)
+	if err := s.pending.remove(u.ID); err != nil {
+		s.log.Warn("clear sessions to end", "user", u.Login, "err", err)
+	}
 	s.store.Log("info", "", 0, fmt.Sprintf("@%s signed in with GitHub", u.Login))
 	s.issueSession(w, r, u.ID, u.Epoch)
 	if len(notes) > 0 {
@@ -137,6 +143,37 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// startRetry starts retryEndSessions for id unless it's already running.
+func (s *Server) startRetry(id int64, login string) {
+	if _, already := s.retrying.LoadOrStore(id, true); !already {
+		go s.retryEndSessions(id, login)
+	}
+}
+
+// resumePendingEnds, at startup, keeps out the people whose sessions an
+// earlier run couldn't end in the database, and ends them now (or keeps
+// retrying). The database works for reads by now, but the stored epoch was
+// never bumped, so without this their old sessions would work again.
+func (s *Server) resumePendingEnds() {
+	ids, err := s.pending.load()
+	if err != nil {
+		s.log.Error("read sessions to end", "file", s.pending.path, "err", err)
+		return
+	}
+	for _, id := range ids {
+		s.unreconciled.Store(id, true)
+		if err := s.endSessions(id); err != nil {
+			s.log.Error("end sessions noted by an earlier run; will retry", "user", id, "err", err)
+			s.startRetry(id, fmt.Sprint(id))
+			continue
+		}
+		s.log.Info("ended sessions noted by an earlier run", "user", id)
+		if err := s.pending.remove(id); err != nil {
+			s.log.Warn("clear sessions to end", "user", id, "err", err)
+		}
+	}
 }
 
 // retryEndSessions keeps trying to end someone's sessions in the database,
@@ -154,6 +191,9 @@ func (s *Server) retryEndSessions(id int64, login string) {
 		err := s.endSessions(id)
 		if err == nil {
 			s.log.Info("ended sessions after a failed access update", "user", login)
+			if err := s.pending.remove(id); err != nil {
+				s.log.Warn("clear sessions to end", "user", login, "err", err)
+			}
 			return
 		}
 		s.log.Error("end sessions after a failed access update; will retry", "user", login, "err", err)
