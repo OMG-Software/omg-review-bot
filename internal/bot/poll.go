@@ -76,6 +76,9 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 // syncRepos refreshes the organizations and repositories from the App's
 // installations. Each installation's account becomes an organization.
 func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.App) (int, error) {
+	b.mu.Lock()
+	b.syncTried = time.Now() // requestSync's minute counts failed attempts too
+	b.mu.Unlock()
 	insts, err := app.Installations(ctx)
 	if err != nil {
 		return 0, err
@@ -200,7 +203,9 @@ func (b *Bot) closeMissing(st settings.Settings, repo string, open map[int]bool,
 		}
 		pr.Open = false
 		b.recompute(pr, st)
-		_ = b.store.SavePR(pr)
+		if err := b.store.SavePR(pr); err != nil {
+			refetch = true // still open here: check again next poll
+		}
 	}
 	return refetch
 }
@@ -233,9 +238,11 @@ func (b *Bot) applyPull(st settings.Settings, r store.Repo, p *github.PullReques
 	if err != nil {
 		return pullUpdate{}, err
 	}
-	if pr != nil && pr.AccountID != 0 && pr.AccountID != r.AccountID {
+	if pr != nil && (pr.AccountID != 0 && pr.AccountID != r.AccountID ||
+		pr.AccountID == 0 && pr.InstallationID != 0 && pr.InstallationID != r.InstallationID) {
 		// The name now belongs to another GitHub account (one renamed and
-		// another took its login). Nothing of the old PR carries over; its
+		// another took its login), or, for a PR recorded before accounts
+		// were, to another installation. Nothing of the old PR carries over; its
 		// reviews keep their own account, so they stay with the old one.
 		pr = nil
 	}

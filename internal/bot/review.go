@@ -83,7 +83,9 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	b.prMu.Lock()
 	defer b.prMu.Unlock()
 	cur, _ := b.store.GetPR(j.repo, j.number)
-	if cur == nil {
+	if cur == nil || cur.AccountID != pr.AccountID {
+		// Gone, or the name passed to another account while reviewing: this
+		// result isn't that PR's.
 		return
 	}
 	cur.Status = "" // leave "reviewing" so recompute can decide
@@ -112,6 +114,9 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		b.recompute(cur, st) // the head may have moved while we were reviewing
 	}
 	_ = b.store.SavePR(cur)
+	// The run loop may be asleep until a deadline worked out before this
+	// one (a retry, say) existed.
+	b.kickDue()
 }
 
 // announceReview posts the review-started notice, or, when retrying the same

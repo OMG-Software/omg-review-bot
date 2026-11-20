@@ -167,7 +167,8 @@ administrator password works until GitHub sign-in is set up:
 | Owner of a personal account that installed the App | **Owner** of it |
 
 Owners can also add people by GitHub username on the org's **Members** page, change roles and
-remove people. People added this way keep their access whatever their GitHub role. Access that
+remove people. People added this way keep their access, and the role an owner gave them, whatever their GitHub
+role. Access that
 came from GitHub is removed at the next sign-in once it no longer applies. Removing someone in
 the bot doesn't stop GitHub giving their access back at their next sign-in, so remove them on
 GitHub too, or have an administrator block them. An org always keeps at least one owner.
@@ -195,6 +196,9 @@ The administrator password has its own sign-in page, **`/admin-login`** (for exa
   `/login`.
 - **Forgot the password?** Stop the bot and run `prbot -reset-password`, then set a new one on the
   setup page. Setting it signs everyone out, so sessions from before the reset stop working.
+  Until a password is set, **anyone who can reach the bot can set it**, so do this before the bot
+  is reachable from the internet again (keep it stopped, or block `/setup` at the proxy), and set it
+  straight away.
 
 Keeping the page separate keeps the password form away from everyday users. It isn't a secret,
 though; the password is what protects it. To limit who can reach it, restrict the path in your

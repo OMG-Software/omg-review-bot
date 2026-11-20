@@ -257,6 +257,27 @@ ON CONFLICT(org_id, user_id) DO NOTHING`, orgID, userID, role, SourceManual, tim
 	return n == 1, err
 }
 
+// SetGitHubMembership records access derived from someone's GitHub role. It
+// never touches access added by hand, even if that was added after the
+// caller last read the membership.
+func (s *Store) SetGitHubMembership(orgID, userID int64, role string) error {
+	_, err := s.db.Exec(`INSERT INTO memberships(org_id, user_id, role, source, created_at) VALUES(?,?,?,?,?)
+ON CONFLICT(org_id, user_id) DO UPDATE SET role=excluded.role WHERE memberships.source=excluded.source`,
+		orgID, userID, role, SourceGitHub, time.Now().Unix())
+	return err
+}
+
+// RemoveGitHubMembership removes access derived from GitHub; access added by
+// hand, even since the caller read it, stays. It reports whether it removed it.
+func (s *Store) RemoveGitHubMembership(orgID, userID int64) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM memberships WHERE org_id=? AND user_id=? AND source=?`, orgID, userID, SourceGitHub)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (s *Store) RemoveMembership(orgID, userID int64) error {
 	_, err := s.db.Exec(`DELETE FROM memberships WHERE org_id=? AND user_id=?`, orgID, userID)
 	return err
@@ -375,9 +396,13 @@ type Delivery struct {
 	ReceivedAt int64
 }
 
+// abandonedDelivery is how long a claimed delivery can go unfinished before a
+// redelivery may handle it again.
+const abandonedDelivery = 5 * time.Minute
+
 // RecordDelivery stores a delivery and reports whether to handle it: false if
 // this delivery ID was already received (GitHub redelivers on timeouts, and
-// people can redeliver by hand), unless handling it failed last time.
+// people can redeliver by hand), unless handling it failed or never finished.
 func (s *Store) RecordDelivery(d Delivery) (bool, error) {
 	if d.ReceivedAt == 0 {
 		d.ReceivedAt = time.Now().Unix()
@@ -390,10 +415,14 @@ func (s *Store) RecordDelivery(d Delivery) (bool, error) {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		// Seen before. One that failed can be handled again: GitHub keeps a
-		// delivery's ID when someone redelivers it. Clearing its result claims
-		// it, so of two redeliveries at once only one runs.
-		if res, err = s.db.Exec(`UPDATE webhook_deliveries SET result='', received_at=? WHERE id=? AND result LIKE 'error%'`,
-			d.ReceivedAt, d.ID); err != nil {
+		// delivery's ID when someone redelivers it. So can one claimed but
+		// never finished (the bot stopped while handling it, or couldn't save
+		// the result): handling takes seconds, so after a few minutes it's
+		// abandoned. Clearing the result and resetting the time claims it, so
+		// of two redeliveries at once only one runs.
+		if res, err = s.db.Exec(`UPDATE webhook_deliveries SET result='', received_at=? WHERE id=?
+AND (result LIKE 'error%' OR (result='' AND received_at<?))`,
+			d.ReceivedAt, d.ID, d.ReceivedAt-int64(abandonedDelivery.Seconds())); err != nil {
 			return false, err
 		}
 		n, _ = res.RowsAffected()

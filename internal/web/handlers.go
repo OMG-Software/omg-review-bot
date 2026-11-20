@@ -35,15 +35,17 @@ func (s *Server) setupSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "setup.html", page{Title: "First-time setup", Err: "The passwords don't match."})
 		return
 	}
+	// Setup also follows `prbot -reset-password`, usually done because the
+	// password (or a session) leaked: a new signing key ends every session
+	// made before, as changing the password on the Account page does. The
+	// key goes first: if saving the password then fails, everyone is still
+	// signed out and setup can simply be tried again.
 	h, err := hashPassword(pw)
 	if err == nil {
-		err = s.store.Set(pwKey, h)
+		err = s.rotateSecret()
 	}
 	if err == nil {
-		// Setup also follows `prbot -reset-password`, usually done because the
-		// password (or a session) leaked: a new signing key ends every
-		// session made before, as changing the password on the Account page does.
-		err = s.rotateSecret()
+		err = s.store.Set(pwKey, h)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -134,12 +136,13 @@ func (s *Server) accountSubmit(w http.ResponseWriter, r *http.Request) {
 		fail("New passwords must match and be at least 10 characters.")
 		return
 	}
+	// The new key first, so old sessions never outlive the old password.
 	h, err := hashPassword(pw)
 	if err == nil {
-		err = s.store.Set(pwKey, h)
+		err = s.rotateSecret()
 	}
 	if err == nil {
-		err = s.rotateSecret()
+		err = s.store.Set(pwKey, h)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

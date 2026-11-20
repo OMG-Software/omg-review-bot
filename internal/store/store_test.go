@@ -39,7 +39,10 @@ func TestMigrateOldDatabase(t *testing.T) {
 		`CREATE TABLE activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, level TEXT NOT NULL,
 		  repo TEXT NOT NULL DEFAULT '', number INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL)`,
 		`INSERT INTO repos(id, installation_id, full_name) VALUES(100, 10, 'acme/web')`,
-		`INSERT INTO pulls(repo, number) VALUES('acme/web', 7)`,
+		`INSERT INTO pulls(repo, number, installation_id) VALUES('acme/web', 7, 10)`,
+		// A repository since removed, whose name another account has now: not
+		// the same installation, so not that account's.
+		`INSERT INTO pulls(repo, number, installation_id) VALUES('beta/app', 3, 99)`,
 		`INSERT INTO activity(ts, level, repo, message) VALUES(1, 'info', 'acme/web', 'old entry')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
@@ -68,6 +71,15 @@ func TestMigrateOldDatabase(t *testing.T) {
 	}
 	if p, _ := st.GetPR("acme/web", 7); p == nil || p.AccountID != 500 {
 		t.Errorf("PR not linked: %+v", p)
+	}
+	if err := st.UpsertRepo(200, 60, 600, "beta/app", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BackfillAccounts(); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := st.GetPR("beta/app", 3); p == nil || p.AccountID != 0 {
+		t.Errorf("a PR of another installation was given to the account that has the name now: %+v", p)
 	}
 	stats, err := st.ReviewStatsSince(500, at.Add(-time.Hour).Unix())
 	if err != nil || stats.Posted != 1 || stats.Comments != 2 {
@@ -363,6 +375,11 @@ func TestRepoRenameAndRemoval(t *testing.T) {
 	if _, err := st.CreateReview(&Review{Repo: "acme/web", Number: 7, Status: "posted", AccountID: 500}); err != nil {
 		t.Fatal(err)
 	}
+	st.Log("info", "acme/web", 7, "reviewed")
+	// Left over from an earlier repository that had the new name.
+	if err := st.SavePR(&PR{Repo: "acme/site", Number: 7, Open: true, Status: "pending", ReviewedSHA: "old", AccountID: 500}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := st.UpsertRepo(1, 10, 500, "acme/site", true); err != nil { // renamed
 		t.Fatal(err)
@@ -375,6 +392,9 @@ func TestRepoRenameAndRemoval(t *testing.T) {
 	}
 	if rs, _ := st.ListReviews(500, "acme/site", 7, 10); len(rs) != 1 {
 		t.Errorf("reviews under the new name = %d, want 1", len(rs))
+	}
+	if acts, _ := st.RecentActivity(500, 10, "acme/site", 7); len(acts) != 1 {
+		t.Errorf("activity under the new name = %d entries, want 1", len(acts))
 	}
 
 	if err := st.UpsertRepo(1, 20, 600, "beta/site", true); err != nil { // moved to another account
@@ -455,5 +475,81 @@ func TestOrgSummaries(t *testing.T) {
 	}
 	if _, err := st.countsByAccount(`SELECT 1, 2, 3, 4, 5`); err == nil {
 		t.Error("countsByAccount accepted a query with too many columns")
+	}
+}
+
+// TestAbandonedDeliveryIsRetried: a delivery claimed but never finished (the
+// bot stopped mid-way) can be handled again by a redelivery once it's been
+// abandoned for a while; a finished one stays a duplicate.
+func TestAbandonedDeliveryIsRetried(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().Unix()
+	if fresh, err := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: now}); !fresh || err != nil {
+		t.Fatalf("first delivery = %v, %v", fresh, err)
+	}
+	// Still being handled, for all anyone knows: a duplicate.
+	if fresh, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: now + 60}); fresh {
+		t.Error("a delivery claimed a minute ago was handled again")
+	}
+	// Never finished, long ago: handled again, once.
+	later := now + int64(abandonedDelivery.Seconds()) + 60
+	if fresh, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later}); !fresh {
+		t.Error("an abandoned delivery wasn't handled again")
+	}
+	if fresh, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later + 1}); fresh {
+		t.Error("the reclaimed delivery was claimed twice")
+	}
+	// Finished: a duplicate however long after.
+	if err := st.SetDeliveryResult("d1", 0, "pong"); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, _ := st.RecordDelivery(Delivery{ID: "d1", Event: "ping", ReceivedAt: later + 3600}); fresh {
+		t.Error("a finished delivery was handled again")
+	}
+}
+
+// TestGitHubMembershipWritesSpareManualAccess: the writes sign-in uses never
+// change or remove access added by hand, even if it was added after the
+// membership was read.
+func TestGitHubMembershipWritesSpareManualAccess(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureUser(41, "u41"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGitHubMembership(500, 41, RoleOwner); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := st.GetMembership(500, 41); m == nil || m.Role != RoleOwner || m.Source != SourceGitHub {
+		t.Fatalf("GitHub membership = %+v", m)
+	}
+	// Another owner sets the role by hand.
+	if err := st.EnsureUser(42, "u42"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMembership(500, 42, RoleOwner, SourceManual); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMemberRole(500, 41, RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGitHubMembership(500, 41, RoleOwner); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := st.RemoveGitHubMembership(500, 41); removed || err != nil {
+		t.Errorf("RemoveGitHubMembership on access added by hand = %v, %v; want false, nil", removed, err)
+	}
+	if m, _ := st.GetMembership(500, 41); m == nil || m.Role != RoleMember || m.Source != SourceManual {
+		t.Errorf("access added by hand = %+v; want it left as a manual member", m)
 	}
 }

@@ -53,7 +53,7 @@ func (b *Bot) HandleWebhook(event string, body []byte) (accountID int64, result 
 // when it ends.
 func (b *Bot) requestSync() {
 	b.mu.Lock()
-	wait := time.Minute - time.Since(b.lastRepoSync)
+	wait := time.Minute - time.Since(b.syncTried)
 	switch {
 	case wait <= 0:
 		b.lastRepoSync = time.Time{}

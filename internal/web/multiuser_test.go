@@ -496,7 +496,8 @@ func TestAdminLoginIsSeparate(t *testing.T) {
 }
 
 // TestSecureCookies checks cookies are marked Secure when the request came
-// over HTTPS through the configured Public URL, and only then.
+// over HTTPS through the configured Public URL, and only then; and that
+// GitHub sign-in starts on the Public URL.
 func TestSecureCookies(t *testing.T) {
 	s := newTestSite(t)
 	cookieFor := func(host string) *http.Cookie {
@@ -528,8 +529,21 @@ func TestSecureCookies(t *testing.T) {
 	if c := cookieFor("bot.example"); !c.Secure {
 		t.Error("request through the https Public URL: cookie not Secure")
 	}
-	if c := cookieFor(direct); c.Secure {
-		t.Error("direct plain-HTTP request: cookie marked Secure, which the browser would drop")
+	// Started on another address, sign-in moves to the Public URL first: GitHub
+	// returns there, and the state cookie must have been set there.
+	req, _ := http.NewRequest(http.MethodGet, s.ts.URL+"/auth/github?next=/orgs", nil)
+	resp, err := s.cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if loc := resp.Header.Get("Location"); resp.StatusCode != http.StatusSeeOther || loc != "https://bot.example/auth/github?next=%2Forgs" {
+		t.Errorf("sign-in started on %s = %d to %q, want the Public URL", direct, resp.StatusCode, loc)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == oauthCookie {
+			t.Errorf("state cookie set on %s, which GitHub won't return to", direct)
+		}
 	}
 }
 
@@ -615,6 +629,19 @@ func TestAddFormDoesntChangeRoles(t *testing.T) {
 	}
 	if m, _ := s.st.GetMembership(acmeID, bobID); m == nil || m.Role != store.RoleMember {
 		t.Errorf("bob's role changed through the add form: %+v", m)
+	}
+	// Nor does signing in change a role an owner set by hand, even for a
+	// GitHub admin: an owner role from GitHub must be stored as such, so it
+	// goes when GitHub takes it back.
+	if err := s.st.SetMemberRole(acmeID, bobID, store.RoleOwner); err != nil { // so acme keeps an owner
+		t.Fatal(err)
+	}
+	if err := s.st.SetMemberRole(acmeID, aliceID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn() // alice is a GitHub admin of acme
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || m.Role != store.RoleMember || m.Source != store.SourceManual {
+		t.Errorf("sign-in changed a role set by hand: %+v", m)
 	}
 }
 

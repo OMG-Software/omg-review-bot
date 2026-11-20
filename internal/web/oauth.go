@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -37,8 +38,14 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "login.html", page{Title: "Sign in", Err: "Sign in with GitHub isn't set up yet. An administrator has to add the App's client ID and secret in Settings.", D: s.loginData(r)})
 		return
 	}
-	state := randomToken()
 	next := safeNext(r.URL.Query().Get("next"))
+	if pub, err := url.Parse(st.GitHub.PublicURL); err == nil && pub.Host != "" && !strings.EqualFold(pub.Host, r.Host) {
+		// GitHub returns to the Public URL, and the browser only sends the
+		// state cookie back to the host that set it: start there.
+		http.Redirect(w, r, strings.TrimRight(st.GitHub.PublicURL, "/")+"/auth/github?next="+url.QueryEscape(next), http.StatusSeeOther)
+		return
+	}
+	state := randomToken()
 	exp := time.Now().Add(10 * time.Minute).Unix()
 	payload := fmt.Sprintf("%s|%d|%s", state, exp, base64.RawURLEncoding.EncodeToString([]byte(next)))
 	s.setCookie(w, r, oauthCookie, s.signed(payload), "/auth/github", 600)
@@ -105,8 +112,13 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	notes, err := s.syncMemberships(ctx, uc, u)
 	if err != nil {
-		// Don't sign them in with access that should have changed.
+		// Don't sign them in with access that should have changed, and end
+		// the sessions they already have, which could still use it. The next
+		// sign-in that gets through updates it.
 		s.log.Error("update access at sign-in", "user", u.Login, "err", err)
+		if err := s.store.BumpUserEpoch(u.ID); err != nil {
+			s.log.Error("end sessions after a failed access update", "user", u.Login, "err", err)
+		}
 		fail("Couldn't update your access, so you weren't signed in. Try again; if it keeps happening, tell an administrator.")
 		return
 	}
@@ -179,22 +191,25 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 		if err != nil {
 			return notes, err
 		}
+		// Access added by hand stays as an owner set it, whatever the GitHub
+		// role: a role from GitHub is only stored as coming from GitHub, so it
+		// can't outlast GitHub taking it back. The store checks the source
+		// again as it writes, so access added by hand meanwhile isn't touched.
+		var removed bool
 		switch {
 		case cur == nil && role != "":
-			err = s.store.SetMembership(org.ID, u.ID, role, store.SourceGitHub)
+			err = s.store.SetGitHubMembership(org.ID, u.ID, role)
 			if err == nil {
 				s.store.Log("info", "", 0, fmt.Sprintf("@%s joined %s as %s (from their GitHub role)", u.Login, org.Login, role))
 			}
 		case cur == nil:
 		case cur.Source == store.SourceGitHub && role == "":
-			err = s.store.RemoveMembership(org.ID, u.ID)
-			if err == nil {
+			removed, err = s.store.RemoveGitHubMembership(org.ID, u.ID)
+			if removed {
 				s.store.Log("info", "", 0, fmt.Sprintf("@%s lost access to %s (not confirmed as an admin or member on GitHub)", u.Login, org.Login))
 			}
 		case cur.Source == store.SourceGitHub && role != cur.Role:
-			err = s.store.SetMembership(org.ID, u.ID, role, store.SourceGitHub)
-		case cur.Source == store.SourceManual && role == store.RoleOwner && cur.Role != store.RoleOwner:
-			err = s.store.SetMembership(org.ID, u.ID, store.RoleOwner, store.SourceManual)
+			err = s.store.SetGitHubMembership(org.ID, u.ID, role)
 		}
 		if err != nil {
 			return notes, fmt.Errorf("update access to %s: %w", org.Login, err)
@@ -207,8 +222,12 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 	}
 	for _, m := range ms {
 		if m.Source == store.SourceGitHub && !seen[m.OrgID] {
-			if err := s.store.RemoveMembership(m.OrgID, u.ID); err != nil {
+			removed, err := s.store.RemoveGitHubMembership(m.OrgID, u.ID)
+			if err != nil {
 				return notes, fmt.Errorf("remove access to %s: %w", m.OrgLogin, err)
+			}
+			if !removed {
+				continue // added by hand meanwhile
 			}
 			s.store.Log("info", "", 0, fmt.Sprintf("@%s lost access to %s (the App's installation isn't visible to them on GitHub)", u.Login, m.OrgLogin))
 		}

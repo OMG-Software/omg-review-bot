@@ -248,12 +248,22 @@ func hasColumn(db *sql.DB, table, column string) (bool, error) {
 // their repository was synced) to the organization that owns the repository.
 func (s *Store) BackfillAccounts() error {
 	for _, q := range []string{
-		`UPDATE pulls SET account_id=(SELECT r.account_id FROM repos r WHERE r.full_name=pulls.repo AND r.account_id<>0 LIMIT 1)
-		 WHERE account_id=0 AND EXISTS(SELECT 1 FROM repos r WHERE r.full_name=pulls.repo AND r.account_id<>0)`,
+		// A name alone isn't proof: it may since have passed to another
+		// account. A PR must also have the repository's installation, and
+		// reviews and activity must come after the PR they're matched to
+		// was tracked (a later account's PR of the same number came after
+		// them). What can't be matched stays unassigned: administrators only.
+		`UPDATE pulls SET account_id=(SELECT r.account_id FROM repos r WHERE r.full_name=pulls.repo
+		 AND r.installation_id=pulls.installation_id AND r.account_id<>0 LIMIT 1)
+		 WHERE account_id=0 AND EXISTS(SELECT 1 FROM repos r WHERE r.full_name=pulls.repo
+		 AND r.installation_id=pulls.installation_id AND r.account_id<>0)`,
 		`UPDATE reviews SET account_id=(SELECT p.account_id FROM pulls p WHERE p.repo=reviews.repo AND p.number=reviews.number)
-		 WHERE account_id=0 AND EXISTS(SELECT 1 FROM pulls p WHERE p.repo=reviews.repo AND p.number=reviews.number AND p.account_id<>0)`,
-		`UPDATE activity SET account_id=(SELECT r.account_id FROM repos r WHERE r.full_name=activity.repo AND r.account_id<>0 LIMIT 1)
-		 WHERE account_id=0 AND repo<>'' AND EXISTS(SELECT 1 FROM repos r WHERE r.full_name=activity.repo AND r.account_id<>0)`,
+		 WHERE account_id=0 AND EXISTS(SELECT 1 FROM pulls p WHERE p.repo=reviews.repo AND p.number=reviews.number
+		 AND p.account_id<>0 AND p.tracked_at<=reviews.started_at)`,
+		`UPDATE activity SET account_id=(SELECT p.account_id FROM pulls p WHERE p.repo=activity.repo
+		 AND (activity.number=0 OR p.number=activity.number) AND p.account_id<>0 AND p.tracked_at<=activity.ts LIMIT 1)
+		 WHERE account_id=0 AND repo<>'' AND EXISTS(SELECT 1 FROM pulls p WHERE p.repo=activity.repo
+		 AND (activity.number=0 OR p.number=activity.number) AND p.account_id<>0 AND p.tracked_at<=activity.ts)`,
 	} {
 		if _, err := s.db.Exec(q); err != nil {
 			return err
@@ -325,7 +335,7 @@ type Repo struct {
 }
 
 // UpsertRepo records a repository. When one was renamed (same ID, new name),
-// its PRs and reviews move to the new name, as GitHub keeps a repository's PRs
+// its PRs, reviews and activity move to the new name, as GitHub keeps a repository's PRs
 // and their numbers through a rename; otherwise the PRs left under the old name
 // would stay due, and the new name's would all be reviewed again. A repository
 // moved to another account starts afresh there: its old PRs are closed.
@@ -354,11 +364,20 @@ ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id, account_
 	}
 	if oldName != "" && oldName != fullName {
 		if oldAccount == accountID {
-			if _, err = tx.Exec(`UPDATE OR IGNORE pulls SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`, fullName, oldName, oldAccount); err != nil {
+			// A name belongs to one repository at a time, so PRs still stored
+			// under the new one are left over from an earlier repository that
+			// had it. They give way, so each PR moves together with its reviews.
+			if _, err = tx.Exec(`DELETE FROM pulls WHERE repo=?`, fullName); err != nil {
 				return err
 			}
-			if _, err = tx.Exec(`UPDATE reviews SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`, fullName, oldName, oldAccount); err != nil {
-				return err
+			for _, q := range []string{
+				`UPDATE pulls SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+				`UPDATE reviews SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+				`UPDATE activity SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+			} {
+				if _, err = tx.Exec(q, fullName, oldName, oldAccount); err != nil {
+					return err
+				}
 			}
 		}
 		// Whatever is left under the old name (all of it after a move to

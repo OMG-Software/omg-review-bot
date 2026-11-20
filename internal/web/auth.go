@@ -75,8 +75,12 @@ func (s *Server) loadSecret() error {
 	if !ok {
 		return s.rotateSecret()
 	}
-	s.secret, err = hex.DecodeString(v)
-	return err
+	b, err := hex.DecodeString(v)
+	if err != nil {
+		return err
+	}
+	s.secret.Store(&b)
+	return nil
 }
 
 // rotateSecret invalidates every existing session (used on password change).
@@ -88,12 +92,12 @@ func (s *Server) rotateSecret() error {
 	if err := s.store.Set(secretKey, hex.EncodeToString(b)); err != nil {
 		return err
 	}
-	s.secret = b
+	s.secret.Store(&b) // requests signing now use either the old key or this one, whole
 	return nil
 }
 
 func (s *Server) sign(payload string) string {
-	m := hmac.New(sha256.New, s.secret)
+	m := hmac.New(sha256.New, *s.secret.Load())
 	m.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }

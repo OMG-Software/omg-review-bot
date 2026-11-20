@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/bot"
@@ -26,7 +27,7 @@ type Server struct {
 	bot    *bot.Bot
 	log    *slog.Logger
 	pages  map[string]*template.Template
-	secret []byte
+	secret atomic.Pointer[[]byte] // the session signing key; replaced whole, never changed in place
 	mux    *http.ServeMux
 }
 
