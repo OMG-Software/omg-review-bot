@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +45,7 @@ type fakeGitHubWeb struct {
 	userID int64 // who the next token belongs to
 	// noInstallations: the App isn't installed anywhere the person can see
 	noInstallations bool
+	failUser        bool // reading the profile fails, naming an internal address
 	login           string
 	acmeRole        string // alice's role in the acme GitHub org: admin | member | "" | forbidden (403)
 }
@@ -59,6 +62,9 @@ func (f *fakeGitHubWeb) handler(t *testing.T) http.Handler {
 				return
 			}
 			send(map[string]any{"access_token": "user-token"})
+		case p == "/user" && f.failUser:
+			w.WriteHeader(http.StatusBadGateway)
+			send(map[string]any{"message": "dial tcp 10.1.2.3:443: connect: connection refused"})
 		case p == "/user":
 			if r.Header.Get("Authorization") != "Bearer user-token" {
 				t.Errorf("/user without the user token")
@@ -104,10 +110,13 @@ type testSite struct {
 	st  *store.Store
 	b   *bot.Bot
 	srv *Server
-	db  string // the database file
-	gh  *fakeGitHubWeb
-	cl  *http.Client
-	cfg settings.Settings
+	// serving is the server the test server hands requests to, so a test
+	// can restart the bot without touching the running test server.
+	serving atomic.Pointer[Server]
+	db      string // the database file
+	gh      *fakeGitHubWeb
+	cl      *http.Client
+	cfg     settings.Settings
 }
 
 func newTestSite(t *testing.T) *testSite {
@@ -142,11 +151,47 @@ func newTestSite(t *testing.T) *testSite {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(srv)
-	t.Cleanup(ts.Close)
+	s := &testSite{t: t, st: st, b: b, srv: srv, db: filepath.Join(dir, "t.db"), gh: gh, cfg: cfg}
+	s.serving.Store(srv)
+	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.serving.Load().ServeHTTP(w, r) }))
+	t.Cleanup(s.ts.Close)
+	s.cl = s.newClient()
+	return s
+}
+
+// restart hands requests to srv from now on, as a restarted bot would get
+// them; the address and the browser's cookies stay.
+func (s *testSite) restart(srv *Server) { s.serving.Store(srv) }
+
+// newClient is another browser: cookies of its own, redirects not followed.
+func (s *testSite) newClient() *http.Client {
 	jar, _ := cookiejar.New(nil)
-	cl := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &testSite{t: t, ts: ts, st: st, b: b, srv: srv, db: filepath.Join(dir, "t.db"), gh: gh, cl: cl, cfg: cfg}
+	return &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
+// startSignIn and finishSignIn are trySignIn's two steps in browser cl,
+// returning errors rather than failing the test, so other goroutines can
+// use them.
+func (s *testSite) startSignIn(cl *http.Client) (string, error) {
+	resp, err := cl.Get(s.ts.URL + "/auth/github?next=/orgs")
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		return "", err
+	}
+	return loc.Query().Get("state"), nil
+}
+
+func (s *testSite) finishSignIn(cl *http.Client, state string) (int, error) {
+	resp, err := cl.Get(s.ts.URL + "/auth/github/callback?code=good-code&state=" + url.QueryEscape(state))
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
 }
 
 func testPEM(t *testing.T) string {
@@ -553,13 +598,23 @@ func TestSecureCookies(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if loc := resp.Header.Get("Location"); resp.StatusCode != http.StatusSeeOther || loc != "https://bot.example/auth/github?next=%2Forgs" {
+	if loc := resp.Header.Get("Location"); resp.StatusCode != http.StatusSeeOther || loc != "https://bot.example/auth/github?next=%2Forgs&hop=1" {
 		t.Errorf("sign-in started on %s = %d to %q, want the Public URL", direct, resp.StatusCode, loc)
 	}
 	for _, c := range resp.Cookies() {
 		if c.Name == oauthCookie {
 			t.Errorf("state cookie set on %s, which GitHub won't return to", direct)
 		}
+	}
+	// Arrived from that redirect, it goes on to GitHub even if the Host
+	// doesn't match (a proxy that passes on its own): no redirect loop.
+	req, _ = http.NewRequest(http.MethodGet, s.ts.URL+"/auth/github?next=/orgs&hop=1", nil)
+	if resp, err = s.cl.Do(req); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if loc, _ := url.Parse(resp.Header.Get("Location")); resp.StatusCode != http.StatusSeeOther || loc == nil || loc.Path != "/login/oauth/authorize" {
+		t.Errorf("sign-in after the redirect to the Public URL = %d to %q, want GitHub", resp.StatusCode, resp.Header.Get("Location"))
 	}
 }
 
@@ -944,7 +999,7 @@ func TestPendingSessionEndsSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.ts.Config.Handler = srv2
+	s.restart(srv2)
 	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
 		t.Errorf("earlier session works again after a restart: %d %s", code, hdr.Get("Location"))
 	}
@@ -1004,7 +1059,7 @@ func TestPendingNoteRetried(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.ts.Config.Handler = srv2
+	s.restart(srv2)
 	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
 		t.Errorf("earlier session works again after a restart: %d %s", code, hdr.Get("Location"))
 	}
@@ -1028,7 +1083,7 @@ func TestUnreadablePendingNoteEndsEverySession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart with an unreadable note: %v", err)
 	}
-	s.ts.Config.Handler = srv2
+	s.restart(srv2)
 	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
 		t.Errorf("a session survived a restart with an unreadable note: %d %s", code, hdr.Get("Location"))
 	}
@@ -1063,6 +1118,13 @@ func TestEarlierRepoHistoryNotLinked(t *testing.T) {
 	}
 	if !strings.Contains(body, "acme/web (earlier repository)#7") {
 		t.Error("the earlier repository's review isn't listed")
+	}
+	if !strings.Contains(body, `<option value="acme/web (earlier repository)"`) {
+		t.Error("the repository filter doesn't offer the earlier repository")
+	}
+	if code, body, _ := s.get("/orgs/acme/reviews?repo=" + url.QueryEscape("acme/web"+store.EarlierRepoSuffix)); code != http.StatusOK ||
+		!strings.Contains(body, "acme/web (earlier repository)#7") || strings.Contains(body, ">acme/web#7<") {
+		t.Errorf("filtered by the earlier repository = %d; want only its review", code)
 	}
 	if strings.Contains(body, `href="/prs/acme/web%20%28earlier`) || strings.Contains(body, `href="/prs/acme/web (earlier`) {
 		t.Error("the earlier repository's review links to a PR page")
@@ -1161,4 +1223,238 @@ VALUES('acme/web', 7, 'posted', 4, 1, ?, ?, ?)`, time.Now().Unix()-30, time.Now(
 			t.Errorf("%s = %d; want it to contain %q", path, code, want)
 		}
 	}
+}
+
+// TestSignInErrorsNotShown: when GitHub can't be reached, the person signing
+// in is told so, without the error, which can name internal addresses.
+func TestSignInErrorsNotShown(t *testing.T) {
+	s := newTestSite(t)
+	s.gh.mu.Lock()
+	s.gh.failUser = true
+	s.gh.mu.Unlock()
+	code, body, _ := s.trySignIn()
+	if code != http.StatusOK || !strings.Contains(body, "Couldn&#39;t finish signing in with GitHub") {
+		t.Fatalf("sign-in when GitHub fails = %d", code)
+	}
+	if strings.Contains(body, "10.1.2.3") || strings.Contains(body, "dial tcp") {
+		t.Error("the sign-in page shows the error from GitHub")
+	}
+}
+
+// TestHomeRedirectEscaped: someone with one organization is sent to its page,
+// even when its login has characters a path must escape.
+func TestHomeRedirectEscaped(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.gh.mu.Lock()
+	s.gh.noInstallations = true // no access from GitHub
+	s.gh.mu.Unlock()
+	if err := s.st.UpsertOrg(900, "other", "Organization", 30); err != nil { // renames the earlier "other"
+		t.Fatal(err)
+	}
+	s.signIn()
+	if _, err := s.st.AddMember(otherID, aliceID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := s.st.GetOrg(otherID)
+	code, _, hdr := s.get("/")
+	if want := "/orgs/" + url.PathEscape(old.Login); code != http.StatusSeeOther || hdr.Get("Location") != want {
+		t.Errorf("/ = %d to %q, want %q", code, hdr.Get("Location"), want)
+	}
+}
+
+// TestRunningJobShownByAccount: the running job is shown to members of the
+// account it was started for, whoever has the repository's name now.
+func TestRunningJobShownByAccount(t *testing.T) {
+	member := &viewer{ID: aliceID, Orgs: []store.Member{{OrgID: acmeID, Role: store.RoleMember}}}
+	job := bot.Status{Current: "Reviewing acme/web#7", CurrentRepo: "acme/web", CurrentAccount: otherID}
+	if st := visibleStatus(job, member); st.Current == job.Current || st.CurrentRepo != "" {
+		t.Errorf("another account's job, under a name acme has now, shown to acme: %+v", st)
+	}
+	job.CurrentAccount = acmeID
+	if st := visibleStatus(job, member); st.Current != job.Current {
+		t.Errorf("acme's own job hidden from acme: %+v", st)
+	}
+	job.CurrentAccount = 0 // not linked to an organization: administrators only
+	if st := visibleStatus(job, member); st.Current == job.Current {
+		t.Errorf("a job of no organization shown to a member: %+v", st)
+	}
+}
+
+// TestRemovedFromPausedOrgNotPromised: removing someone's GitHub-derived
+// access to a paused organization doesn't say sign-in will give it back,
+// as it won't while the organization is paused.
+func TestRemovedFromPausedOrgNotPromised(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice owns acme
+	if _, err := s.st.RecordSignIn(bobID, "bob", "Bob", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.SetGitHubMembership(acmeID, bobID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.GitHub.Accounts = []string{"someone-else"} // pauses acme
+	if err := settings.Save(s.st, s.cfg); err != nil {
+		t.Fatal(err)
+	}
+	code, hdr := s.post(fmt.Sprintf("/orgs/acme/members/%d/remove", bobID), nil)
+	loc, _ := url.Parse(hdr.Get("Location"))
+	if code != http.StatusSeeOther || loc == nil || !strings.Contains(loc.Query().Get("msg"), "Removed @bob") {
+		t.Fatalf("remove = %d %s", code, hdr.Get("Location"))
+	}
+	if msg := loc.Query().Get("msg"); strings.Contains(msg, "access again") {
+		t.Errorf("removal from a paused organization says %q", msg)
+	}
+}
+
+// TestConcurrentRotationsAgree: when two password changes overlap, the key
+// the server signs with is the one stored, so a restart keeps the sessions
+// it issued.
+func TestConcurrentRotationsAgree(t *testing.T) {
+	s := newTestSite(t)
+	save := s.srv.saveSecret
+	var calls atomic.Int32
+	saved, secondDone := make(chan struct{}), make(chan struct{})
+	s.srv.saveSecret = func(v string) error {
+		err := save(v)
+		if calls.Add(1) == 1 { // the first is slow to publish its key
+			close(saved)
+			select {
+			case <-secondDone:
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+		return err
+	}
+	first := make(chan error, 1)
+	go func() { first <- s.srv.rotateSecret() }()
+	<-saved
+	if err := s.srv.rotateSecret(); err != nil {
+		t.Fatal(err)
+	}
+	close(secondDone)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	stored, _, _ := s.st.Get(secretKey)
+	if live := hex.EncodeToString(*s.srv.secret.Load()); live != stored {
+		t.Error("after overlapping rotations the server signs with one key and stored another")
+	}
+}
+
+// TestOlderSignInKeepsNewerFailure: a sign-in that updated access but
+// hasn't finished yet doesn't undo a later sign-in's failure to update it:
+// the earlier sessions stay blocked.
+func TestOlderSignInKeepsNewerFailure(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // the session that must end
+	s.srv.retryWait = time.Hour
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	real := s.srv.syncAccess
+	firstIn, secondDone := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	s.srv.syncAccess = func(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error) {
+		if calls.Add(1) == 1 { // the first sign-in: updated, but slow to finish
+			notes, err := real(ctx, uc, u)
+			close(firstIn)
+			select {
+			case <-secondDone:
+			case <-time.After(300 * time.Millisecond):
+			}
+			return notes, err
+		}
+		return nil, errors.New("database is locked") // the second can't update access
+	}
+	ca, cb := s.newClient(), s.newClient()
+	sa, err := s.startSignIn(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := s.startSignIn(cb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := make(chan int, 1)
+	go func() {
+		code, _ := s.finishSignIn(ca, sa)
+		first <- code
+	}()
+	<-firstIn
+	if code, err := s.finishSignIn(cb, sb); err != nil || code != http.StatusOK {
+		t.Fatalf("second sign-in = %d, %v; want it refused", code, err)
+	}
+	close(secondDone)
+	<-first
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("earlier session works after a later sign-in failed to update access: %d %s", code, hdr.Get("Location"))
+	}
+	s.srv.unreconciled.Delete(int64(aliceID)) // let any retry stop
+}
+
+// TestRetryKeepsNewerFailure: a retry that has ended someone's sessions
+// doesn't clear the note of a failure recorded after it, and that failure
+// gets a retry of its own.
+func TestRetryKeepsNewerFailure(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	s.srv.retryWait = 5 * time.Millisecond
+	real, realEnd := s.srv.syncAccess, s.srv.endSessions
+	var failSync atomic.Bool
+	failSync.Store(true)
+	s.srv.syncAccess = func(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error) {
+		if failSync.Load() {
+			return nil, errors.New("database is locked")
+		}
+		return real(ctx, uc, u)
+	}
+	var ends atomic.Int32
+	done := make(chan struct{})
+	cg, cf := s.newClient(), s.newClient()
+	s.srv.endSessions = func(id int64) error {
+		switch ends.Add(1) {
+		case 1: // the failed sign-in's own try
+			return errors.New("database is locked")
+		case 2: // the retry gets through; meanwhile one sign-in works, then one fails
+			go func() {
+				defer close(done)
+				failSync.Store(false)
+				if st, err := s.startSignIn(cg); err == nil {
+					_, _ = s.finishSignIn(cg, st)
+				}
+				failSync.Store(true)
+				if st, err := s.startSignIn(cf); err == nil {
+					_, _ = s.finishSignIn(cf, st)
+				}
+			}()
+			select {
+			case <-done:
+			case <-time.After(300 * time.Millisecond):
+			}
+			return realEnd(id)
+		default:
+			return errors.New("database is locked")
+		}
+	}
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry never got through")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for ends.Load() < 4 && time.Now().Before(deadline) { // the last failure's own retry
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ids, _ := s.srv.pending.load(); len(ids) != 1 || ids[0] != aliceID {
+		t.Errorf("sessions noted to end after the last failure = %v, want alice's", ids)
+	}
+	if _, busy := s.srv.retrying.Load(int64(aliceID)); !busy {
+		t.Error("nothing is retrying the last failure")
+	}
+	s.srv.unreconciled.Delete(int64(aliceID)) // let the retry stop
 }

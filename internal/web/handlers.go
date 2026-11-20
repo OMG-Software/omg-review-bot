@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -174,7 +175,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	v := me(r)
 	if !v.Admin {
 		if len(v.Orgs) == 1 {
-			http.Redirect(w, r, "/orgs/"+v.Orgs[0].OrgLogin, http.StatusSeeOther)
+			http.Redirect(w, r, "/orgs/"+url.PathEscape(v.Orgs[0].OrgLogin), http.StatusSeeOther)
 			return
 		}
 		s.orgsPage(w, r)
@@ -187,11 +188,11 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	acts, _ := s.store.RecentActivity(store.AllAccounts, 15, "", 0)
 	counts, _ := s.store.CountPRsByStatus(store.AllAccounts)
 	orgs, _ := s.store.OrgSummaries(nil)
-	users, _ := s.store.ListUsers()
+	users, _ := s.store.CountUsers()
 	st := s.bot.Settings()
 	s.render(w, r, "dashboard.html", page{Title: "Dashboard", Nav: "dash", D: map[string]any{
 		"Reviews": reviews, "Activity": acts, "Counts": counts, "Stats": stats, "Days": days, "Orgs": orgs,
-		"Users": len(users), "SignIn": st.GitHub.SignInOn(), "WebhookOn": st.GitHub.WebhookSecret != "",
+		"Users": users, "SignIn": st.GitHub.SignInOn(), "WebhookOn": st.GitHub.WebhookSecret != "",
 		"Deliveries24h": s.store.CountDeliveriesSince(time.Now().Add(-24 * time.Hour).Unix()),
 	}})
 }
@@ -254,7 +255,7 @@ func (s *Server) prReview(w http.ResponseWriter, r *http.Request) {
 	if pr == nil {
 		return
 	}
-	if err := s.bot.ReviewNow(pr.Repo, pr.Number); err != nil {
+	if err := s.bot.ReviewNow(pr.Repo, pr.Number, pr.AccountID); err != nil {
 		redirectErr(w, r, prPath(pr.Repo, pr.Number), err)
 		return
 	}
@@ -266,7 +267,10 @@ func (s *Server) prReplies(w http.ResponseWriter, r *http.Request) {
 	if pr == nil {
 		return
 	}
-	s.bot.CheckReplies(pr.Repo, pr.Number)
+	if err := s.bot.CheckReplies(pr.Repo, pr.Number, pr.AccountID); err != nil {
+		redirectErr(w, r, prPath(pr.Repo, pr.Number), err)
+		return
+	}
 	redirectMsg(w, r, prPath(pr.Repo, pr.Number), "Checking for replies and mentions.")
 }
 
@@ -280,7 +284,7 @@ func (s *Server) prSkip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	skip := r.FormValue("skip") == "1"
-	if err := s.bot.SetSkip(pr.Repo, pr.Number, skip); err != nil {
+	if err := s.bot.SetSkip(pr.Repo, pr.Number, pr.AccountID, skip); err != nil {
 		redirectErr(w, r, prPath(pr.Repo, pr.Number), err)
 		return
 	}
@@ -314,7 +318,23 @@ func (s *Server) reviewList(w http.ResponseWriter, r *http.Request, p page, acco
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	repos, _ := s.store.ListRepos(accountID)
+	// The filter offers the repositories and the names reviews are filed
+	// under, so an earlier repository's reviews can be picked too.
+	var repos []string
+	seen := map[string]bool{}
+	stored, _ := s.store.ListRepos(accountID)
+	named, _ := s.store.ReviewRepoNames(accountID)
+	for _, n := range named {
+		seen[n] = true
+	}
+	for _, rp := range stored {
+		if !seen[rp.FullName] {
+			named = append(named, rp.FullName)
+			seen[rp.FullName] = true
+		}
+	}
+	repos = named
+	sort.Slice(repos, func(i, j int) bool { return strings.ToLower(repos[i]) < strings.ToLower(repos[j]) })
 	orgs := map[int64]string{}
 	if accountID == store.AllAccounts {
 		if all, err := s.store.ListOrgs(); err == nil {
@@ -514,13 +534,16 @@ func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
 // statusFor is the bot's status as v may see it: anyone but an administrator
 // sees neither another organization's repository nor the instance's
 // configuration problems and poll errors (which can name any repository).
-func (s *Server) statusFor(v *viewer) bot.Status {
-	st := s.bot.Status()
+func (s *Server) statusFor(v *viewer) bot.Status { return visibleStatus(s.bot.Status(), v) }
+
+// visibleStatus is the part of the bot's status v may see. The running job
+// is shown only to members of the account it was started for.
+func visibleStatus(st bot.Status, v *viewer) bot.Status {
 	if v != nil && v.Admin {
 		return st
 	}
-	if st.CurrentRepo != "" && (v == nil || !s.viewerSeesRepo(v, st.CurrentRepo)) {
-		st.Current, st.CurrentRepo = "a review for another organization", ""
+	if st.CurrentRepo != "" && (v == nil || st.CurrentAccount == 0 || v.Role(st.CurrentAccount) == "") {
+		st.Current, st.CurrentRepo, st.CurrentAccount = "a review for another organization", "", 0
 	}
 	st.ConfigIssues, st.LastPollErr = nil, ""
 	return st

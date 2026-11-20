@@ -358,6 +358,77 @@ type Repo struct {
 // name another repository of the same account has since taken.
 const EarlierRepoSuffix = " (earlier repository)"
 
+// RepoTarget is a repository's name and owner as GitHub has them now.
+type RepoTarget struct {
+	FullName  string
+	AccountID int64
+}
+
+// parkedName is where a renamed repository's records wait during a sync
+// (see ParkRenamedRepos). It can't be a GitHub name: those have a slash.
+func parkedName(id int64) string { return fmt.Sprintf("(repository %d, being renamed)", id) }
+
+// ParkRenamedRepos, before a sync records the new names, moves each renamed
+// repository (its row, PRs, reviews and activity) to a name of its own.
+// Repositories can be renamed in a chain or a swap (a to b while b goes to
+// c); recorded one at a time, the first would take the second's records
+// along with its name. Parked first, each moves from its own placeholder to
+// its new name, so a name then only holds records of a repository that's
+// gone, which stay as history as before. A repository moved to another
+// account isn't parked: it starts afresh there, and its records stay under
+// the old name.
+func (s *Store) ParkRenamedRepos(current map[int64]RepoTarget) (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	rows, err := tx.Query(`SELECT id, full_name, account_id FROM repos`)
+	if err != nil {
+		return err
+	}
+	type renamed struct {
+		id, account int64
+		name        string
+	}
+	var park []renamed
+	for rows.Next() {
+		var r renamed
+		if err = rows.Scan(&r.id, &r.name, &r.account); err != nil {
+			rows.Close()
+			return err
+		}
+		t, ok := current[r.id]
+		if ok && t.FullName != r.name && r.name != parkedName(r.id) && (r.account == t.AccountID || r.account == 0) {
+			park = append(park, r)
+		}
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range park {
+		to := parkedName(r.id)
+		if _, err = tx.Exec(`UPDATE repos SET full_name=? WHERE id=?`, to, r.id); err != nil {
+			return err
+		}
+		for _, q := range []string{
+			`UPDATE pulls SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+			`UPDATE reviews SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+			`UPDATE activity SET repo=? WHERE repo=? AND (account_id=? OR account_id=0)`,
+		} {
+			if _, err = tx.Exec(q, to, r.name, r.account); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) UpsertRepo(id, installationID, accountID int64, fullName string, defaultEnabled bool) (err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -785,6 +856,25 @@ WHERE (?=-1 OR account_id=?) AND (?='' OR repo=?) AND (?='' OR status=?) ORDER B
 func (s *Store) RecentReviews(accountID int64, limit int) ([]Review, error) {
 	out, _, err := s.QueryReviews(ReviewFilter{AccountID: accountID, Limit: limit})
 	return out, err
+}
+
+// ReviewRepoNames lists the repository names one organization's reviews (or
+// everyone's, with AllAccounts) are filed under, earlier repositories' too.
+func (s *Store) ReviewRepoNames(accountID int64) ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT repo FROM reviews WHERE (?=-1 OR account_id=?) ORDER BY repo COLLATE NOCASE`, acct(accountID)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 // LatestPostedReview returns the most recent review that was posted to GitHub, or nil.

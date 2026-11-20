@@ -80,6 +80,13 @@ func (s *Store) GetUser(id int64) (*User, error) {
 	return u, err
 }
 
+// CountUsers is how many people have signed in or been added.
+func (s *Store) CountUsers() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
 func (s *Store) ListUsers() ([]User, error) {
 	return s.queryUsers(`SELECT * FROM users_v ORDER BY login COLLATE NOCASE`)
 }
@@ -290,6 +297,19 @@ func (s *Store) SetGitHubMembership(orgID, userID int64, role string) error {
 ON CONFLICT(org_id, user_id) DO UPDATE SET role=excluded.role WHERE memberships.source=excluded.source`,
 		orgID, userID, role, SourceGitHub, time.Now().Unix())
 	return err
+}
+
+// UpdateGitHubMembership changes the role of access derived from GitHub if
+// it's still there: unlike SetGitHubMembership it never adds access, so
+// access removed since the caller read it stays removed. It reports whether
+// it changed anything.
+func (s *Store) UpdateGitHubMembership(orgID, userID int64, role string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE memberships SET role=? WHERE org_id=? AND user_id=? AND source=?`, role, orgID, userID, SourceGitHub)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // RemoveGitHubMembership removes access derived from GitHub; access added by

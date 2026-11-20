@@ -781,3 +781,99 @@ func TestOrgLoginsUnique(t *testing.T) {
 		t.Error("a second organization under a taken login was stored")
 	}
 }
+
+// TestRenameChainAndSwap: repositories renamed in a chain (a to b while b
+// goes to c) or swapped between syncs each keep their own PRs and reviews,
+// whichever the sync records first.
+func TestRenameChainAndSwap(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(st.UpsertRepo(1, 10, 500, "acme/a", true))
+	must(st.UpsertRepo(2, 10, 500, "acme/b", true))
+	reviewOf := map[string]int64{}
+	for _, p := range []PR{
+		{Repo: "acme/a", Number: 1, Title: "one", Open: true, AccountID: 500},
+		{Repo: "acme/b", Number: 1, Title: "two", Open: true, AccountID: 500},
+	} {
+		must(st.SavePR(&p))
+		id, err := st.CreateReview(&Review{Repo: p.Repo, Number: 1, AccountID: 500, Status: "posted", StartedAt: time.Now().Unix()})
+		must(err)
+		reviewOf[p.Title] = id
+	}
+	check := func(when string, names map[string]string) {
+		t.Helper()
+		for name, title := range names {
+			if p, _ := st.GetPR(name, 1); p == nil || p.Title != title || !p.Open {
+				t.Errorf("%s: PR %s#1 = %+v, want %q's", when, name, p, title)
+			}
+			rs, _, _ := st.QueryReviews(ReviewFilter{AccountID: 500, Repo: name, Limit: 10})
+			if len(rs) != 1 || rs[0].ID != reviewOf[title] {
+				t.Errorf("%s: reviews of %s = %+v, want %q's", when, name, rs, title)
+			}
+		}
+	}
+	sync := func(names map[int64]string) {
+		t.Helper()
+		cur := map[int64]RepoTarget{}
+		for id, n := range names {
+			cur[id] = RepoTarget{FullName: n, AccountID: 500}
+		}
+		must(st.ParkRenamedRepos(cur))
+		must(st.ParkRenamedRepos(cur))     // a sync that stopped after parking, run again
+		for _, id := range []int64{1, 2} { // the first takes the second's old name
+			must(st.UpsertRepo(id, 10, 500, names[id], true))
+		}
+	}
+	sync(map[int64]string{1: "acme/b", 2: "acme/c"})
+	check("after a chain of renames", map[string]string{"acme/b": "one", "acme/c": "two"})
+	sync(map[int64]string{1: "acme/c", 2: "acme/b"})
+	check("after a swap", map[string]string{"acme/c": "one", "acme/b": "two"})
+}
+
+// TestUpdateGitHubMembership changes a GitHub-derived role but never adds
+// access, nor touches access added by hand.
+func TestUpdateGitHubMembership(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{41, 42} {
+		if _, err := st.RecordSignIn(id, fmt.Sprint("user", id), "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := st.UpdateGitHubMembership(500, 41, RoleOwner); ok || err != nil {
+		t.Errorf("update of access that isn't there = %v, %v", ok, err)
+	}
+	if m, _ := st.GetMembership(500, 41); m != nil {
+		t.Errorf("update added access: %+v", m)
+	}
+	if err := st.SetGitHubMembership(500, 41, RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.UpdateGitHubMembership(500, 41, RoleOwner); !ok || err != nil {
+		t.Errorf("update of GitHub-derived access = %v, %v", ok, err)
+	}
+	if m, _ := st.GetMembership(500, 41); m == nil || m.Role != RoleOwner {
+		t.Errorf("after the update = %+v, want owner", m)
+	}
+	if _, err := st.AddMember(500, 42, RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := st.UpdateGitHubMembership(500, 42, RoleOwner); ok {
+		t.Error("update changed access added by hand")
+	}
+}

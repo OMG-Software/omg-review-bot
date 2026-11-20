@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -54,6 +55,7 @@ type fakeGitHub struct {
 	posted        []string         // PR conversation comments the bot posted
 	edited        map[int64]string // the latest text of each comment the bot edited
 	failEdits     bool             // editing issue comments fails (a 502)
+	failList      bool             // listing the PR's conversation comments fails (a 502)
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -160,6 +162,8 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			f.posted = append(f.posted, body["body"])
 			// Its own ID range, so review comment IDs stay as the test expects.
 			send(map[string]any{"id": 9000 + len(f.posted), "user": bot, "body": body["body"]})
+		case p == "/repos/acme/web/issues/7/comments" && f.failList:
+			w.WriteHeader(http.StatusBadGateway)
 		case p == "/repos/acme/web/issues/7/comments":
 			// The comments posted so far, as last edited.
 			out := []any{}
@@ -446,7 +450,7 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	if len(gh.resolves) != 0 {
 		t.Errorf("thread resolved although the model said it wasn't: %v", gh.resolves)
 	}
-	b.CheckReplies("acme/web", 7)
+	b.CheckReplies("acme/web", 7, 500)
 	drain(ctx, b)
 	if len(gh.replies) != 1 {
 		t.Fatalf("replied twice to the same message")
@@ -494,23 +498,23 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	gh.mu.Lock()
 	gh.resolved[1003] = true
 	gh.mu.Unlock()
-	b.CheckReplies("acme/web", 7)
+	b.CheckReplies("acme/web", 7, 500)
 	drain(ctx, b)
 	last := gh.reviews[len(gh.reviews)-1]
 	if len(gh.reviews) != 4 || last.Event != "APPROVE" || last.CommitID != "ddd444" || !strings.Contains(last.Body, "prbot:approval") {
 		t.Fatalf("approval after resolution = %+v (%d reviews)", last, len(gh.reviews))
 	}
-	b.CheckReplies("acme/web", 7)
+	b.CheckReplies("acme/web", 7, 500)
 	drain(ctx, b)
 	if len(gh.reviews) != 4 {
 		t.Errorf("approved the same commit twice")
 	}
 
 	// 7) Double-clicking "Review now" must produce one review, not two.
-	if err := b.ReviewNow("acme/web", 7); err != nil {
+	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReviewNow("acme/web", 7); err == nil {
+	if err := b.ReviewNow("acme/web", 7, 500); err == nil {
 		t.Error("second ReviewNow while one is queued should be refused")
 	}
 	drain(ctx, b)
@@ -1015,10 +1019,10 @@ func TestPausedOrgNotReviewedOrRepliedIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := b.ReviewNow("acme/web", 7); err == nil || !strings.Contains(err.Error(), "paused") {
+	if err := b.ReviewNow("acme/web", 7, 500); err == nil || !strings.Contains(err.Error(), "paused") {
 		t.Errorf("manual review of a paused organization's PR = %v; want it refused", err)
 	}
-	b.handleReview(context.Background(), job{kind: jobReview, repo: "acme/web", number: 7, force: true})
+	b.handleReview(context.Background(), job{kind: jobReview, repo: "acme/web", number: 7, force: true, account: 500})
 	if p, _ := st.GetPR("acme/web", 7); p == nil || p.Status != "pending" || p.Attempts != 0 || p.LastError != "" {
 		t.Errorf("a queued review of a paused organization's PR ran: %+v", p)
 	}
@@ -1106,5 +1110,216 @@ func TestUnreadablePolicyFailsClosed(t *testing.T) {
 	got := b.settingsFor(cfg, 500)
 	if got.Review.Enabled || conversationsOn(got) {
 		t.Errorf("settings with an unreadable policy = reviews %v, conversations %v; want both off", got.Review.Enabled, conversationsOn(got))
+	}
+}
+
+// TestNoticeLookupFailureSkipsNotice: if the bot can't check for this
+// commit's earlier notice, it posts none, rather than a second one.
+func TestNoticeLookupFailureSkipsNotice(t *testing.T) {
+	gh := newFakeGitHub()
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	app, err := b.getApp(ctx, b.Settings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh.mu.Lock()
+	gh.failList = true
+	gh.mu.Unlock()
+	pr := &store.PR{Repo: "acme/web", Number: 7, AccountID: 500, InstallationID: 10}
+	id := b.announceReview(ctx, app.Installation(10), pr, reviewNotice{head: "aaa111", model: "m", skill: "s", started: time.Now()})
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	if id != 0 || len(gh.posted) != 0 {
+		t.Errorf("notice when earlier ones can't be listed = %d, %d posted; want none", id, len(gh.posted))
+	}
+}
+
+// TestExcludedInstallationKeepsLegacyRepos: a repository stored before
+// organizations existed (no account yet) survives a sync while the
+// allow-list excludes its installation's account.
+func TestExcludedInstallationKeepsLegacyRepos(t *testing.T) {
+	gh := newFakeGitHub()
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	cfg.GitHub.Accounts = []string{"someone-else"} // excludes acme, installation 10
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertRepo(300, 10, 0, "acme/legacy", false); err != nil { // no account yet
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := b.SyncRepos(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := st.GetRepoByName("acme/legacy"); r == nil {
+		t.Error("an excluded installation's repository without an account was removed")
+	}
+}
+
+// TestRepoActivityUsesRepoAccount: a repository's own entries go to its
+// account, even while another repository (one that's gone, not yet pruned)
+// is stored under the same name.
+func TestRepoActivityUsesRepoAccount(t *testing.T) {
+	gh := newFakeGitHub()
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	if _, err := b.SyncRepos(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertRepo(999, 30, 900, "acme/web", true); err != nil { // the stale one, newer row
+		t.Fatal(err)
+	}
+	repos, _ := st.ListRepos(500)
+	if len(repos) != 1 {
+		t.Fatalf("acme's repositories = %+v", repos)
+	}
+	app, err := b.getApp(ctx, b.Settings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.pollRepo(ctx, b.Settings(), app, repos[0]); err != nil {
+		t.Fatal(err)
+	}
+	has := func(acct int64) bool {
+		acts, _ := st.RecentActivity(acct, 50, "", 0)
+		for _, a := range acts {
+			if strings.Contains(a.Message, "started tracking repository") {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(500) || has(900) {
+		t.Errorf("repository entry filed under acme = %v, under the stale repository's account = %v", has(500), has(900))
+	}
+}
+
+// TestManualActionsBoundToAccount: a manual review, reply check or skip
+// asked for one account's PR doesn't act on another account's PR that has
+// taken its name and number since.
+func TestManualActionsBoundToAccount(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SavePR(&store.PR{Repo: "acme/web", Number: 7, Open: true, Status: "pending", AccountID: 500}); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := b.ReviewNow("acme/web", 7, 600); err == nil {
+		t.Error("manual review for another account's PR accepted")
+	}
+	if err := b.CheckReplies("acme/web", 7, 600); err == nil {
+		t.Error("reply check for another account's PR accepted")
+	}
+	if err := b.SetSkip("acme/web", 7, 600, true); err == nil {
+		t.Error("skip for another account's PR accepted")
+	}
+	// Queued for account 600's PR, which acme's has replaced since.
+	b.handleReview(context.Background(), job{kind: jobReview, repo: "acme/web", number: 7, force: true, account: 600})
+	if p, _ := st.GetPR("acme/web", 7); p == nil || p.Skip || p.Status != "pending" || p.Attempts != 0 || p.LastError != "" {
+		t.Errorf("acme's PR after another account's manual actions = %+v", p)
+	}
+}
+
+// TestForcedReviewRetriedAfterPolicyError: a manual review postponed
+// because the organization's policy couldn't be read is queued again, even
+// with automatic reviews off (so enqueueDue won't).
+func TestForcedReviewRetriedAfterPolicyError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.Review.Enabled = false
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePR(&store.PR{Repo: "acme/web", Number: 7, Open: true, AccountID: 500}); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b.policyRetry = 10 * time.Millisecond
+	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
+		t.Fatal(err)
+	}
+	take := func() (job, bool) { // as the worker does
+		select {
+		case j := <-b.jobs:
+			b.mu.Lock()
+			delete(b.queued, j.key())
+			b.mu.Unlock()
+			return j, true
+		case <-time.After(2 * time.Second):
+			return job{}, false
+		}
+	}
+	j, _ := take()
+	// The policy can't be read for now: its table is out of the way.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`ALTER TABLE orgs RENAME TO orgs_away`); err != nil {
+		t.Fatal(err)
+	}
+	b.handleReview(context.Background(), j)
+	if _, err := db.Exec(`ALTER TABLE orgs_away RENAME TO orgs`); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := st.GetPR("acme/web", 7); p == nil || p.Status != "pending" || p.Attempts != 0 {
+		t.Fatalf("PR after a postponed review = %+v", p)
+	}
+	again, ok := take()
+	if !ok || !again.force || again.account != 500 {
+		t.Errorf("manual review after the policy read failed = %+v, %v; want it queued again", again, ok)
 	}
 }

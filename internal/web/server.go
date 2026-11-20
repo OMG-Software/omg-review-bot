@@ -32,7 +32,11 @@ type Server struct {
 	log    *slog.Logger
 	pages  map[string]*template.Template
 	secret atomic.Pointer[[]byte] // the session signing key; replaced whole, never changed in place
-	mux    *http.ServeMux
+	// secretMu makes saving a new key and publishing it one step, so two
+	// rotations can't leave the server using one key and the database the
+	// other.
+	secretMu sync.Mutex
+	mux      *http.ServeMux
 
 	// unreconciled holds the IDs of people whose access sign-in couldn't
 	// update: none of their sessions count until a sign-in does. It's kept
@@ -42,10 +46,16 @@ type Server struct {
 	// BumpUserEpoch; tests replace them to make them fail.
 	syncAccess  func(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error)
 	endSessions func(userID int64) error
+	// saveSecret stores a new signing key (tests slow it down).
+	saveSecret func(hexKey string) error
 	// retrying holds the IDs whose sessions retryEndSessions is still trying
 	// to end in the database; retryWait is its first wait (tests shorten it).
 	retrying  sync.Map
 	retryWait time.Duration
+	// userLocks holds a *sync.Mutex per person: a sign-in, from updating
+	// their access to issuing the session, and each retry of ending their
+	// sessions run one at a time, so one can't undo what another recorded.
+	userLocks sync.Map
 	// pending lists, on disk, the people whose sessions still have to be
 	// ended in the database, so a restart doesn't let them back in.
 	pending pendingEnds
@@ -54,6 +64,7 @@ type Server struct {
 func New(st *store.Store, b *bot.Bot, log *slog.Logger) (*Server, error) {
 	s := &Server{store: st, bot: b, log: log, pages: map[string]*template.Template{}}
 	s.syncAccess, s.endSessions = s.syncMemberships, st.BumpUserEpoch
+	s.saveSecret = func(v string) error { return st.Set(secretKey, v) }
 	s.retryWait = 15 * time.Second
 	s.pending.path = filepath.Join(b.DataDir(), "pending-session-ends.json")
 	if err := s.loadSecret(); err != nil {
@@ -264,12 +275,6 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, p p
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = buf.WriteTo(w)
-}
-
-// viewerSeesRepo reports whether the repository belongs to one of the viewer's organizations.
-func (s *Server) viewerSeesRepo(v *viewer, fullName string) bool {
-	rp, err := s.store.GetRepoByName(fullName)
-	return err == nil && rp != nil && v.Role(rp.AccountID) != ""
 }
 
 func redirectMsg(w http.ResponseWriter, r *http.Request, to, msg string) {

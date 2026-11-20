@@ -88,7 +88,17 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 	if err != nil {
 		return 0, err
 	}
+	stored, err := b.store.ListRepos(store.AllAccounts)
+	if err != nil {
+		return 0, err
+	}
+	type found struct {
+		in    github.Installation
+		repos []github.Repo
+	}
+	var all []found
 	var keep, orgs []int64
+	current := map[int64]store.RepoTarget{}
 	for _, in := range insts {
 		if in.Account.ID != 0 {
 			// Still installed, even if the allow-list below skips it: only an
@@ -98,13 +108,11 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 		if len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, in.Account.Login) {
 			// Excluded by the allow-list, not uninstalled: its repositories
 			// stay as they are (with their watch settings and PRs), paused,
-			// until the account is allowed again.
-			if in.Account.ID != 0 {
-				kept, err := b.store.ListRepos(in.Account.ID)
-				if err != nil {
-					return 0, err
-				}
-				for _, r := range kept {
+			// until the account is allowed again. Those of its installation
+			// too: a repository stored before organizations existed may not
+			// have its account yet.
+			for _, r := range stored {
+				if r.InstallationID == in.ID || (in.Account.ID != 0 && r.AccountID == in.Account.ID) {
 					keep = append(keep, r.ID)
 				}
 			}
@@ -114,13 +122,26 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 		if err != nil {
 			return 0, fmt.Errorf("list repos for %s: %w", in.Account.Login, err)
 		}
+		all = append(all, found{in, repos})
+		for _, r := range repos {
+			if !r.Archived {
+				current[r.ID] = store.RepoTarget{FullName: r.FullName, AccountID: in.Account.ID}
+			}
+		}
+	}
+	// Every rename first, then the names: see ParkRenamedRepos.
+	if err := b.store.ParkRenamedRepos(current); err != nil {
+		return 0, err
+	}
+	for _, f := range all {
+		in := f.in
 		accountID := in.Account.ID
 		if accountID != 0 {
 			if err := b.store.UpsertOrg(accountID, in.Account.Login, in.Account.Type, in.ID); err != nil {
 				return 0, err
 			}
 		}
-		for _, r := range repos {
+		for _, r := range f.repos {
 			if r.Archived {
 				continue
 			}
@@ -187,10 +208,12 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 	b.prMu.Unlock()
 
 	if len(newPRs) > 0 {
-		b.logf("info", r.FullName, 0, "new pull requests: %s", strings.Join(newPRs, ", "))
+		// The repository's own account: another stored under the name (one
+		// that's gone, until the next sync prunes it) mustn't get its entries.
+		b.logFor(r.AccountID, "info", r.FullName, 0, "new pull requests: %s", strings.Join(newPRs, ", "))
 	}
 	if firstSync {
-		b.logf("info", r.FullName, 0, "started tracking repository (%d open PRs)", len(pulls))
+		b.logFor(r.AccountID, "info", r.FullName, 0, "started tracking repository (%d open PRs)", len(pulls))
 	}
 	for _, j := range replyJobs {
 		b.enqueue(j)

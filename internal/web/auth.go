@@ -85,11 +85,13 @@ func (s *Server) loadSecret() error {
 
 // rotateSecret invalidates every existing session (used on password change).
 func (s *Server) rotateSecret() error {
+	s.secretMu.Lock()
+	defer s.secretMu.Unlock()
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return err
 	}
-	if err := s.store.Set(secretKey, hex.EncodeToString(b)); err != nil {
+	if err := s.saveSecret(hex.EncodeToString(b)); err != nil {
 		return err
 	}
 	s.secret.Store(&b) // requests signing now use either the old key or this one, whole

@@ -293,7 +293,11 @@ func (s *Server) orgMemberRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("%s removed @%s from %s", me(r).Display(), m.Login, org.Login))
 	msg := fmt.Sprintf("Removed @%s.", m.Login)
-	if m.Source == store.SourceGitHub {
+	st := s.bot.Settings()
+	paused := len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, org.Login)
+	// Sign-in gives access back only where it gives new access: not while
+	// the organization is uninstalled or paused.
+	if m.Source == store.SourceGitHub && org.Active && !paused {
 		msg += " They'll get access again the next time they sign in while they're a GitHub admin" +
 			map[bool]string{true: " or member", false: ""}[org.AutoJoin] + " of " + org.Login + "."
 	}

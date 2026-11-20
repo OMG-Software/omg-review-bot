@@ -66,11 +66,17 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	var st settings.Settings
 	if err == nil && pr != nil {
 		if st, err = b.policySettings(b.Settings(), pr.AccountID); err != nil {
-			// Not reviewed with the wrong policy; enqueueDue tries again.
+			// Not reviewed with the wrong policy. enqueueDue tries again, but
+			// not a manual review if automatic ones are off: that's retried
+			// here.
 			b.logf("warn", pr.Repo, pr.Number, "review postponed: couldn't read the organization's policy: %v", err)
+			if j.force && pr.AccountID == j.account {
+				b.retryForced(j)
+			}
 		}
 	}
 	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" || !allowedRepo(st, pr.Repo) ||
+		(j.force && pr.AccountID != j.account) || // the name passed to another account since it was asked for
 		(!j.force && (pr.Status != "pending" || !st.Review.Enabled)) {
 		b.prMu.Unlock()
 		return
@@ -80,7 +86,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	_ = b.store.SavePR(pr)
 	b.prMu.Unlock()
 
-	b.setCurrent(pr.Repo, "Reviewing %s#%d", pr.Repo, pr.Number)
+	b.setCurrent(pr, "Reviewing %s#%d", pr.Repo, pr.Number)
 	sha, err := b.reviewPR(ctx, st, pr)
 
 	b.prMu.Lock()
@@ -122,21 +128,38 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	b.kickDue()
 }
 
+// retryForced queues a manual review again once its organization's policy
+// couldn't be read, waiting twice as long each time, up to half an hour.
+func (b *Bot) retryForced(j job) {
+	j.tries++
+	wait := b.policyRetry
+	for i := 1; i < j.tries && wait < 30*time.Minute; i++ {
+		wait *= 2
+	}
+	time.AfterFunc(min(wait, 30*time.Minute), func() { b.enqueue(j) })
+}
+
 // announceReview posts the review-started notice, or, when this commit
 // already has one, turns that back into one, so retries and reviews cut
 // short by a restart don't pile up comments (or leave one saying a review
 // is under way). It returns the comment's ID (0 if it couldn't be posted).
 func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.PR, n reviewNotice) int64 {
-	if cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number); err == nil {
-		if id := findNotice(cs, b.BotLogin(), n.head); id != 0 {
-			// Even if it can't be edited now, it's this commit's notice: a
-			// second one would leave this one behind, never updated again.
-			// The edit when the review ends tries again.
-			if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err != nil {
-				b.logf("warn", pr.Repo, pr.Number, "could not update the review-started comment: %v", err)
-			}
-			return id
+	cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number)
+	if err != nil {
+		// This commit may have a notice already (from before a restart), and
+		// a second would leave that one saying a review is under way. The
+		// review goes ahead without one.
+		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier review-started comment, so none is posted: %v", err)
+		return 0
+	}
+	if id := findNotice(cs, b.BotLogin(), n.head); id != 0 {
+		// Even if it can't be edited now, it's this commit's notice: a
+		// second one would leave this one behind, never updated again.
+		// The edit when the review ends tries again.
+		if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err != nil {
+			b.logf("warn", pr.Repo, pr.Number, "could not update the review-started comment: %v", err)
 		}
+		return id
 	}
 	c, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, n.startedBody())
 	if err != nil {
@@ -382,7 +405,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	var summaries []string
 	for i, bt := range p.batches {
 		if len(p.batches) > 1 {
-			b.setCurrent(pr.Repo, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
+			b.setCurrent(pr, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
 		}
 		user := batchPrompt(header, i, len(p.batches), bt, previousFor(mine, bt.paths))
 		var out modelOutput

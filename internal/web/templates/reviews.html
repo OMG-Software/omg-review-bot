@@ -3,7 +3,7 @@
 <form method="get" action="{{.D.Base}}" class="row filters">
   <label>Repository
     <select name="repo"><option value="">All repositories</option>
-      {{range .D.Repos}}<option value="{{.FullName}}" {{if eq .FullName $.D.Repo}}selected{{end}}>{{.FullName}}</option>{{end}}
+      {{range .D.Repos}}<option value="{{.}}" {{if eq . $.D.Repo}}selected{{end}}>{{.}}</option>{{end}}
     </select></label>
   <label>Result
     <select name="status"><option value="">Any result</option>

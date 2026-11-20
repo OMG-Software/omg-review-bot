@@ -22,19 +22,23 @@ import (
 
 // Status is a snapshot shown on the dashboard.
 type Status struct {
-	Configured    bool
-	ConfigIssues  []string
-	BotLogin      string
-	AppName       string
-	LastPoll      time.Time
-	LastPollDur   time.Duration
-	LastPollErr   string
-	Current       string
-	CurrentRepo   string // repository of the running job, so org views can hide others' work
-	CurrentSince  time.Time
-	QueueLen      int
-	RateRemaining int64
-	LastWebhook   time.Time
+	Configured   bool
+	ConfigIssues []string
+	BotLogin     string
+	AppName      string
+	LastPoll     time.Time
+	LastPollDur  time.Duration
+	LastPollErr  string
+	Current      string
+	CurrentRepo  string // repository of the running job
+	// CurrentAccount owns the running job's PR, so org views can hide others'
+	// work. It's recorded with the job, not looked up from CurrentRepo: the
+	// name can pass to another account while the job runs.
+	CurrentAccount int64
+	CurrentSince   time.Time
+	QueueLen       int
+	RateRemaining  int64
+	LastWebhook    time.Time
 	// WebhooksActive: deliveries arrived recently, so polling has slowed to a safety net.
 	WebhooksActive bool
 }
@@ -51,6 +55,10 @@ type job struct {
 	repo   string
 	number int
 	force  bool
+	// account a manual review was requested for: if the PR's name and
+	// number pass to another account first, it isn't reviewed there.
+	account int64
+	tries   int // policy reads failed so far (manual reviews; see retryForced)
 }
 
 func (j job) key() string { return fmt.Sprintf("%s:%s#%d", j.kind, j.repo, j.number) }
@@ -80,12 +88,15 @@ type Bot struct {
 	// made before it started, so one made during it isn't lost.
 	syncAsked, syncDone uint64
 	syncGap             time.Duration // the least time between sync attempts (a minute; tests shorten it)
-	syncTried           time.Time     // the last repository sync started, successful or not
-	syncPending         bool          // a repository sync is scheduled for when the minute since the last one ends
-	lastSweep           time.Time
-	lastPoll            time.Time
-	lastWebhook         time.Time
-	queued              map[string]bool
+	// policyRetry is the first wait before a manual review whose policy couldn't
+	// be read is tried again (tests shorten it).
+	policyRetry time.Duration
+	syncTried   time.Time // the last repository sync started, successful or not
+	syncPending bool      // a repository sync is scheduled for when the minute since the last one ends
+	lastSweep   time.Time
+	lastPoll    time.Time
+	lastWebhook time.Time
+	queued      map[string]bool
 
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
@@ -97,15 +108,16 @@ type Bot struct {
 
 func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 	return &Bot{
-		store:   st,
-		dataDir: dataDir,
-		log:     log,
-		queued:  map[string]bool{},
-		jobs:    make(chan job, 4096),
-		wake:    make(chan struct{}, 1),
-		kick:    make(chan struct{}, 1),
-		status:  Status{RateRemaining: -1},
-		syncGap: time.Minute,
+		store:       st,
+		dataDir:     dataDir,
+		log:         log,
+		queued:      map[string]bool{},
+		jobs:        make(chan job, 4096),
+		wake:        make(chan struct{}, 1),
+		kick:        make(chan struct{}, 1),
+		status:      Status{RateRemaining: -1},
+		syncGap:     time.Minute,
+		policyRetry: time.Minute,
 		// Deliveries are stored (only signed ones), so whether webhooks are
 		// arriving doesn't start over at every restart.
 		lastWebhook: st.LastDeliveryAt(),
@@ -248,18 +260,24 @@ func (b *Bot) Status() Status {
 	return s
 }
 
-func (b *Bot) setCurrent(repo, format string, args ...any) {
+func (b *Bot) setCurrent(pr *store.PR, format string, args ...any) {
 	b.mu.Lock()
 	b.status.Current = fmt.Sprintf(format, args...)
-	b.status.CurrentRepo = repo
+	b.status.CurrentRepo, b.status.CurrentAccount = pr.Repo, pr.AccountID
 	b.status.CurrentSince = time.Now()
 	b.mu.Unlock()
 }
 
 // logf writes to both the process log and the activity log shown in the UI.
 func (b *Bot) logf(level, repo string, number int, format string, args ...any) {
+	b.logFor(0, level, repo, number, format, args...)
+}
+
+// logFor is logf for an entry whose organization the caller knows (0 works it
+// out from the PR, then the repository's name).
+func (b *Bot) logFor(accountID int64, level, repo string, number int, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	b.store.Log(level, repo, number, msg)
+	b.store.LogFor(accountID, level, repo, number, msg)
 	attrs := []any{"repo", repo, "pr", number}
 	switch level {
 	case "error":
@@ -298,7 +316,7 @@ func (b *Bot) worker(ctx context.Context) {
 			b.mu.Unlock()
 			b.runJob(ctx, j)
 			b.mu.Lock()
-			b.status.Current, b.status.CurrentRepo = "", ""
+			b.status.Current, b.status.CurrentRepo, b.status.CurrentAccount = "", "", 0
 			b.mu.Unlock()
 		}
 	}
@@ -422,10 +440,12 @@ func (b *Bot) loadSkill(st settings.Settings) *skill.Skill {
 // ---------- actions used by the web UI ----------
 
 // ReviewNow queues an immediate review, ignoring debounce, drafts and skip flags.
-func (b *Bot) ReviewNow(repo string, number int) error {
+// ReviewNow queues a manual review of a PR of accountID's (the account the
+// caller checked the person may act for).
+func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
 	b.prMu.Lock()
 	pr, err := b.store.GetPR(repo, number)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || pr.AccountID != accountID {
 		b.prMu.Unlock()
 		return fmt.Errorf("PR %s#%d is not tracked", repo, number)
 	}
@@ -445,23 +465,32 @@ func (b *Bot) ReviewNow(repo string, number int) error {
 	if err != nil {
 		return err
 	}
-	if !b.enqueue(job{kind: jobReview, repo: repo, number: number, force: true}) {
+	if !b.enqueue(job{kind: jobReview, repo: repo, number: number, force: true, account: accountID}) {
 		return fmt.Errorf("a review of %s#%d is already queued", repo, number)
 	}
 	b.logf("info", repo, number, "manual review requested")
 	return nil
 }
 
-// CheckReplies queues an immediate scan for replies/mentions on a PR.
-func (b *Bot) CheckReplies(repo string, number int) {
+// CheckReplies queues an immediate scan for replies/mentions on a PR of
+// accountID's.
+func (b *Bot) CheckReplies(repo string, number int, accountID int64) error {
+	b.prMu.Lock()
+	pr, err := b.store.GetPR(repo, number)
+	b.prMu.Unlock()
+	if err != nil || pr == nil || pr.AccountID != accountID {
+		return fmt.Errorf("PR %s#%d is not tracked", repo, number)
+	}
 	b.enqueue(job{kind: jobReplies, repo: repo, number: number})
+	return nil
 }
 
-func (b *Bot) SetSkip(repo string, number int, skip bool) error {
+// SetSkip stops or resumes automatic reviews of a PR of accountID's.
+func (b *Bot) SetSkip(repo string, number int, accountID int64, skip bool) error {
 	b.prMu.Lock()
 	defer b.prMu.Unlock()
 	pr, err := b.store.GetPR(repo, number)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || pr.AccountID != accountID {
 		return fmt.Errorf("PR %s#%d is not tracked", repo, number)
 	}
 	pr.Skip = skip

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
@@ -41,10 +42,12 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := safeNext(r.URL.Query().Get("next"))
-	if pub, err := url.Parse(st.GitHub.PublicURL); err == nil && pub.Host != "" && !strings.EqualFold(pub.Host, r.Host) {
+	if pub, err := url.Parse(st.GitHub.PublicURL); err == nil && pub.Host != "" && !strings.EqualFold(pub.Host, r.Host) &&
+		r.URL.Query().Get("hop") == "" {
 		// GitHub returns to the Public URL, and the browser only sends the
-		// state cookie back to the host that set it: start there.
-		http.Redirect(w, r, strings.TrimRight(st.GitHub.PublicURL, "/")+"/auth/github?next="+url.QueryEscape(next), http.StatusSeeOther)
+		// state cookie back to the host that set it: start there. Only once:
+		// a proxy that passes on another Host would send it round again.
+		http.Redirect(w, r, strings.TrimRight(st.GitHub.PublicURL, "/")+"/auth/github?next="+url.QueryEscape(next)+"&hop=1", http.StatusSeeOther)
 		return
 	}
 	state := randomToken()
@@ -92,21 +95,28 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	token, err := github.ExchangeCode(ctx, github.WebBaseURL(st.GitHub.APIBaseURL), st.GitHub.ClientID, st.GitHub.ClientSecret,
 		q.Get("code"), s.callbackURL(r))
+	// What went wrong is logged, not shown: anyone can sign in, and the
+	// error can name internal hosts.
 	if err != nil {
-		s.log.Warn("GitHub sign-in", "err", err)
-		fail(err.Error())
+		s.log.Warn("GitHub sign-in: exchange the code", "err", err)
+		fail(signInFailed)
 		return
 	}
 	uc := github.NewUserClient(st.GitHub.APIBaseURL, token)
 	gu, err := uc.Me(ctx)
 	if err != nil {
-		fail("Couldn't read your GitHub profile: " + err.Error())
+		s.log.Warn("GitHub sign-in: read the profile", "err", err)
+		fail(signInFailed)
 		return
 	}
 	if old, _ := s.store.GetUser(gu.ID); old != nil && old.Disabled {
 		fail("Your account has been blocked on this bot. Ask an administrator.")
 		return
 	}
+	// One sign-in or retry at a time for this person (see userLocks).
+	mu := s.userLock(gu.ID)
+	mu.Lock()
+	defer mu.Unlock()
 	u, err := s.store.RecordSignIn(gu.ID, gu.Login, gu.Name, gu.AvatarURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -149,8 +159,18 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
+// signInFailed is shown when GitHub couldn't be reached or refused.
+const signInFailed = "Couldn't finish signing in with GitHub. Try again; if it keeps happening, tell an administrator."
+
+// userLock returns the lock for one person's sign-ins and retries.
+func (s *Server) userLock(id int64) *sync.Mutex {
+	mu, _ := s.userLocks.LoadOrStore(id, new(sync.Mutex))
+	return mu.(*sync.Mutex)
+}
+
 // startRetry starts retryEndSessions for id unless it's already running.
-// noted says whether the pending file already lists them.
+// noted says whether the pending file already lists them. Callers hold the
+// person's lock, as retryEndSessions does when it stops.
 func (s *Server) startRetry(id int64, login string, noted bool) {
 	if _, already := s.retrying.LoadOrStore(id, true); !already {
 		go s.retryEndSessions(id, login, noted)
@@ -195,31 +215,45 @@ func (s *Server) resumePendingEnds() error {
 // their access. Until then only the in-memory block stops their sessions, and
 // that wouldn't last a restart.
 func (s *Server) retryEndSessions(id int64, login string, noted bool) {
-	defer s.retrying.Delete(id)
 	wait := s.retryWait
 	for {
 		time.Sleep(wait)
-		if _, still := s.unreconciled.Load(id); !still {
+		if s.retryEndOnce(id, login, &noted) {
 			return
 		}
-		if !noted {
-			if err := s.pending.add(id); err == nil {
-				noted = true
-			} else {
-				s.log.Error("note sessions to end after a restart; will retry", "user", login, "err", err)
-			}
-		}
-		err := s.endSessions(id)
-		if err == nil {
-			s.log.Info("ended sessions after a failed access update", "user", login)
-			if err := s.pending.remove(id); err != nil {
-				s.log.Warn("clear sessions to end", "user", login, "err", err)
-			}
-			return
-		}
-		s.log.Error("end sessions after a failed access update; will retry", "user", login, "err", err)
 		wait = min(wait*2, 5*time.Minute)
 	}
+}
+
+// retryEndOnce is one try of retryEndSessions; it reports whether it's done.
+// It holds the person's lock throughout, so no sign-in comes between ending
+// the sessions and clearing the note: a failure recorded after it is left for
+// a retry of its own, which can start once this one has stopped.
+func (s *Server) retryEndOnce(id int64, login string, noted *bool) bool {
+	mu := s.userLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, still := s.unreconciled.Load(id); !still {
+		s.retrying.Delete(id)
+		return true
+	}
+	if !*noted {
+		if err := s.pending.add(id); err == nil {
+			*noted = true
+		} else {
+			s.log.Error("note sessions to end after a restart; will retry", "user", login, "err", err)
+		}
+	}
+	if err := s.endSessions(id); err != nil {
+		s.log.Error("end sessions after a failed access update; will retry", "user", login, "err", err)
+		return false
+	}
+	s.log.Info("ended sessions after a failed access update", "user", login)
+	if err := s.pending.remove(id); err != nil {
+		s.log.Warn("clear sessions to end", "user", login, "err", err)
+	}
+	s.retrying.Delete(id)
+	return true
 }
 
 // syncMemberships derives the person's organization access from GitHub:
@@ -237,7 +271,7 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 	insts, err := uc.Installations(ctx)
 	if err != nil {
 		s.log.Warn("list user installations", "user", u.Login, "err", err)
-		notes = append(notes, "Couldn't read your organizations from GitHub ("+err.Error()+"), so access that comes from GitHub is paused until you sign in again.")
+		notes = append(notes, "Couldn't read your organizations from GitHub, so access that comes from GitHub is paused until you sign in again.")
 		insts = nil // the clean-up below removes GitHub-derived access
 	}
 	seen := map[int64]bool{}
@@ -279,7 +313,8 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 			case err != nil && !github.IsStatus(err, http.StatusNotFound):
 				// Unconfirmed: treat as no role, so access from GitHub is
 				// paused (access added by hand stays).
-				notes = append(notes, fmt.Sprintf("Couldn't read your role in %s (%v), so access that comes from GitHub is paused until you sign in again. The GitHub App needs the \"Members: Read-only\" organization permission.", acct.Login, err))
+				s.log.Warn("read GitHub organization role", "user", u.Login, "org", acct.Login, "err", err)
+				notes = append(notes, fmt.Sprintf("Couldn't read your role in %s, so access that comes from GitHub is paused until you sign in again. The GitHub App needs the \"Members: Read-only\" organization permission.", acct.Login))
 			case err != nil:
 			case m.State == "active" && m.Role == "admin":
 				role = store.RoleOwner
@@ -308,6 +343,10 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 			if removed {
 				s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("@%s lost access to %s (not confirmed as an admin or member on GitHub)", u.Login, org.Login))
 			}
+		case cur.Source == store.SourceGitHub && role != cur.Role && excluded:
+			// Kept up to date, but if it was removed since it was read, it
+			// stays removed: nobody gains access to a paused organization.
+			_, err = s.store.UpdateGitHubMembership(org.ID, u.ID, role)
 		case cur.Source == store.SourceGitHub && role != cur.Role:
 			err = s.store.SetGitHubMembership(org.ID, u.ID, role)
 		}
