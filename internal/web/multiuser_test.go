@@ -426,6 +426,12 @@ func TestAdminLoginIsSeparate(t *testing.T) {
 			t.Errorf("/login mentions %q", leak)
 		}
 	}
+	// The page to return to is encoded into the sign-in link, so an "&" in it
+	// doesn't split off into a parameter of its own.
+	_, body, _ = s.get("/login?next=" + url.QueryEscape("/reviews?status=posted&page=2"))
+	if want := `href="/auth/github?next=%2freviews%3fstatus%3dposted%26page%3d2"`; !strings.Contains(body, want) {
+		t.Errorf("/login sign-in link isn't encoded; want %s", want)
+	}
 	if code, _ := s.post("/login", url.Values{"password": {"admin-password-1"}}); code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /login = %d, want 405", code)
 	}

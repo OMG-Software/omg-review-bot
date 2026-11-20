@@ -130,8 +130,12 @@ func (b *Bot) webhookConversation(st settings.Settings, event string, ev *github
 	if login := b.BotLogin(); login != "" && ev.Sender.Login == login {
 		return "ignored: the bot's own activity"
 	}
-	pr, err := b.store.GetPR(ev.Repository.FullName, number)
-	if err != nil || pr == nil || !pr.Open {
+	r, err := b.store.GetRepo(ev.Repository.ID)
+	if err != nil || r == nil || !r.Enabled {
+		return "ignored: repository isn't watched"
+	}
+	pr, err := b.store.GetPR(r.FullName, number)
+	if err != nil || pr == nil || !pr.Open || pr.AccountID != r.AccountID {
 		return "ignored: pull request isn't tracked"
 	}
 	if !conversationsOn(b.settingsFor(st, pr.AccountID)) {

@@ -567,6 +567,64 @@ func TestStaleSnapshotIgnored(t *testing.T) {
 	}
 }
 
+// TestReusedRepoName: when a repository name passes to another GitHub account
+// (one renamed, another took its login), the new account's PR starts afresh
+// instead of inheriting the old one's state; and reply webhooks are ignored
+// for a repository that isn't watched, or a PR of another account.
+func TestReusedRepoName(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := settings.Defaults()
+	pull := func(sha, updated string) *github.PullRequest {
+		p := &github.PullRequest{Number: 7, State: "open", UpdatedAt: updated}
+		p.Head.SHA = sha
+		return p
+	}
+	if err := st.UpsertRepo(100, 10, 500, "acme/web", true); err != nil {
+		t.Fatal(err)
+	}
+	old := store.Repo{ID: 100, InstallationID: 10, AccountID: 500, FullName: "acme/web", Enabled: true, Synced: true}
+	u, err := b.applyPull(cfg, old, pull("aaa", "2026-01-01T00:10:00Z"), false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.pr.ReviewedSHA = "aaa"
+	if err := st.SavePR(u.pr); err != nil {
+		t.Fatal(err)
+	}
+
+	// The other account's PR has an older timestamp: still not "stale".
+	other := store.Repo{ID: 200, InstallationID: 20, AccountID: 600, FullName: "acme/web", Enabled: true, Synced: true}
+	if u, err = b.applyPull(cfg, other, pull("aaa", "2026-01-01T00:05:00Z"), false, 0); err != nil {
+		t.Fatal(err)
+	}
+	pr, _ := st.GetPR("acme/web", 7)
+	if !u.isNew || u.stale || pr.AccountID != 600 || pr.ReviewedSHA != "" {
+		t.Errorf("reused name: isNew=%v stale=%v account=%d reviewed=%q; want a fresh PR of account 600",
+			u.isNew, u.stale, pr.AccountID, pr.ReviewedSHA)
+	}
+
+	ev := &github.WebhookEvent{Action: "created", Repository: &github.Repo{ID: 100, FullName: "acme/web"},
+		PullRequest: &github.PullRequest{Number: 7}}
+	if got := b.webhookConversation(cfg, "pull_request_review_comment", ev); got != "ignored: pull request isn't tracked" {
+		t.Errorf("reply on another account's PR: %q", got)
+	}
+	if err := st.SetRepoEnabled(100, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.webhookConversation(cfg, "pull_request_review_comment", ev); got != "ignored: repository isn't watched" {
+		t.Errorf("reply on an unwatched repository: %q", got)
+	}
+	ev.Repository.ID = 999
+	if got := b.webhookConversation(cfg, "pull_request_review_comment", ev); got != "ignored: repository isn't watched" {
+		t.Errorf("reply on an unknown repository: %q", got)
+	}
+}
+
 // TestReviewNotice: the notice names the commit, time, model and skill; a
 // failed review says so (with no error details, which can name internal
 // hosts); and a retry finds the bot's own notice for the same commit.

@@ -229,6 +229,12 @@ func (b *Bot) applyPull(st settings.Settings, r store.Repo, p *github.PullReques
 	if err != nil {
 		return pullUpdate{}, err
 	}
+	if pr != nil && pr.AccountID != 0 && pr.AccountID != r.AccountID {
+		// The name now belongs to another GitHub account (one renamed and
+		// another took its login). Nothing of the old PR carries over; its
+		// reviews keep their own account, so they stay with the old one.
+		pr = nil
+	}
 	if pr != nil && newerOnGitHub(pr.GHUpdatedAt, p.UpdatedAt) {
 		// A webhook (or a later poll) already recorded a newer state of this
 		// PR than this snapshot, which arrived out of order.
