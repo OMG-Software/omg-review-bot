@@ -1351,3 +1351,50 @@ func TestReviewThreadWebhookHasPR(t *testing.T) {
 		t.Errorf("review-thread event = %q", got)
 	}
 }
+
+// TestUnknownRepoAccountActivityUnassigned: a repository not yet linked to an
+// organization has its entries left unassigned (administrators only), not
+// filed under another repository that has had the name.
+func TestUnknownRepoAccountActivityUnassigned(t *testing.T) {
+	gh := newFakeGitHub()
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	if err := st.UpsertRepo(999, 30, 900, "acme/web", true); err != nil { // another account's, under the name
+		t.Fatal(err)
+	}
+	app, err := b.getApp(ctx, b.Settings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := store.Repo{ID: 100, InstallationID: 10, FullName: "acme/web", Enabled: true} // no account yet
+	if err := b.pollRepo(ctx, b.Settings(), app, legacy); err != nil {
+		t.Fatal(err)
+	}
+	has := func(acct int64) bool {
+		acts, _ := st.RecentActivity(acct, 50, "", 0)
+		for _, a := range acts {
+			if strings.Contains(a.Message, "started tracking repository") {
+				return true
+			}
+		}
+		return false
+	}
+	if has(900) || !has(0) {
+		t.Errorf("entry of a repository with no account: under the other account = %v, unassigned = %v", has(900), has(0))
+	}
+}
