@@ -100,6 +100,9 @@ func (s *Server) webhooksPage(w http.ResponseWriter, r *http.Request) {
 
 // webhook receives GitHub's deliveries. It answers quickly: the bot only
 // records state and queues work, and GitHub gives up after 10 seconds.
+// maxWebhookBody is the largest webhook payload the bot accepts.
+const maxWebhookBody = 5 << 20
+
 func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -111,7 +114,9 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "webhooks are not enabled on this bot (no webhook secret is set)", http.StatusNotFound)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 25<<20)) // GitHub caps payloads at 25 MB
+	// Read before the signature can be checked, so kept small: the events the
+	// bot subscribes to carry no diffs and are far below this.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
 	if err != nil {
 		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 		return

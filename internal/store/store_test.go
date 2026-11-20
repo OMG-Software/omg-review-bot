@@ -394,3 +394,63 @@ func TestRepoRenameAndRemoval(t *testing.T) {
 		t.Errorf("PR of a removed repository = %+v; want it closed", p)
 	}
 }
+
+// TestOrgSummaries: the per-organization counts, gathered with one query per
+// table, land on the right organization.
+func TestOrgSummaries(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, o := range []struct {
+		id    int64
+		login string
+	}{{500, "acme"}, {600, "beta"}} {
+		if err := st.UpsertOrg(o.id, o.login, "Organization", o.id/10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []int64{41, 42} {
+		if err := st.EnsureUser(id, fmt.Sprint("u", id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _ = st.AddMember(500, 41, RoleOwner)
+	_, _ = st.AddMember(500, 42, RoleMember)
+	_, _ = st.AddMember(600, 42, RoleOwner)
+	_ = st.UpsertRepo(1, 50, 500, "acme/web", true)
+	_ = st.UpsertRepo(2, 50, 500, "acme/api", false)
+	_ = st.UpsertRepo(3, 60, 600, "beta/app", true)
+	_ = st.SavePR(&PR{Repo: "acme/web", Number: 1, Open: true, AccountID: 500})
+	_ = st.SavePR(&PR{Repo: "acme/web", Number: 2, Open: false, AccountID: 500})
+	now := time.Now().Unix()
+	for _, r := range []Review{
+		{Repo: "acme/web", Number: 1, Status: "posted", StartedAt: now, AccountID: 500},
+		{Repo: "acme/web", Number: 1, Status: "failed", StartedAt: now - 10, AccountID: 500},
+		{Repo: "beta/app", Number: 3, Status: "posted", StartedAt: now - 90*24*3600, AccountID: 600}, // outside 30 days
+	} {
+		if _, err := st.CreateReview(&r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sums, err := st.OrgSummaries(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[int64]OrgSummary{}
+	for _, sm := range sums {
+		by[sm.ID] = sm
+	}
+	a, b := by[500], by[600]
+	if a.Members != 2 || a.Owners != 1 || a.Repos != 2 || a.EnabledRepos != 1 || a.OpenPRs != 1 || a.Reviews30d != 1 || a.LastReview != now {
+		t.Errorf("acme = %+v", a)
+	}
+	if b.Members != 1 || b.Owners != 1 || b.Repos != 1 || b.OpenPRs != 0 || b.Reviews30d != 0 || b.LastReview != now-90*24*3600 {
+		t.Errorf("beta = %+v", b)
+	}
+	if only, _ := st.OrgSummaries([]int64{600}); len(only) != 1 || only[0].ID != 600 {
+		t.Errorf("OrgSummaries([600]) = %+v", only)
+	}
+}

@@ -347,8 +347,7 @@ func TestWebhookDelivery(t *testing.T) {
 	if err := s.st.SetRepoPolled(100, ""); err != nil {
 		t.Fatal(err)
 	}
-	send := func(event, id string, payload any, secret string) (int, string) {
-		body, _ := json.Marshal(payload)
+	sendRaw := func(event, id string, body []byte, secret string) (int, string) {
 		req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/webhooks/github", strings.NewReader(string(body)))
 		req.Header.Set("X-GitHub-Event", event)
 		req.Header.Set("X-GitHub-Delivery", id)
@@ -360,6 +359,10 @@ func TestWebhookDelivery(t *testing.T) {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
+	}
+	send := func(event, id string, payload any, secret string) (int, string) {
+		body, _ := json.Marshal(payload)
+		return sendRaw(event, id, body, secret)
 	}
 	pr := map[string]any{
 		"action":     "opened",
@@ -394,6 +397,24 @@ func TestWebhookDelivery(t *testing.T) {
 	}
 	if !s.b.Status().WebhooksActive {
 		t.Error("status should show webhooks as active")
+	}
+
+	// A delivery that failed is handled again when it's redelivered (GitHub
+	// keeps its ID); one that succeeded is still a duplicate.
+	if code, _ := sendRaw("ping", "d5", []byte(`{"zen":`), "hook-secret"); code != http.StatusBadRequest {
+		t.Fatalf("unreadable payload = %d, want 400", code)
+	}
+	if code, body := send("ping", "d5", map[string]any{"zen": "hi"}, "hook-secret"); code != 200 || !strings.Contains(body, "pong") {
+		t.Errorf("redelivery of a failed delivery = %d %s, want it handled", code, body)
+	}
+	if _, body := send("ping", "d5", map[string]any{"zen": "hi"}, "hook-secret"); !strings.Contains(body, "duplicate") {
+		t.Errorf("redelivery after it succeeded not deduplicated: %s", body)
+	}
+
+	// Payloads are read before the signature is checked, so the size is capped.
+	big, _ := json.Marshal(map[string]any{"zen": strings.Repeat("x", 6<<20)})
+	if code, _ := sendRaw("ping", "d6", big, "hook-secret"); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized payload = %d, want 413", code)
 	}
 
 	// Without a secret, webhooks are refused outright.

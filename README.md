@@ -497,7 +497,7 @@ server {
     # Keep browsers on HTTPS (see the note on cookies below).
     add_header Strict-Transport-Security "max-age=31536000" always;
 
-    # Webhook payloads and skill zip uploads can be up to 25 MB (nginx allows 1 MB by default).
+    # Skill zip uploads can be up to 25 MB, and webhook payloads up to 5 MB (nginx allows 1 MB by default).
     client_max_body_size 25m;
 
     location / {

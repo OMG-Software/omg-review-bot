@@ -374,8 +374,9 @@ type Delivery struct {
 	ReceivedAt int64
 }
 
-// RecordDelivery stores a delivery. It returns false if this delivery ID was
-// already received (GitHub redelivers on timeouts, and people can redeliver by hand).
+// RecordDelivery stores a delivery and reports whether to handle it: false if
+// this delivery ID was already received (GitHub redelivers on timeouts, and
+// people can redeliver by hand), unless handling it failed last time.
 func (s *Store) RecordDelivery(d Delivery) (bool, error) {
 	if d.ReceivedAt == 0 {
 		d.ReceivedAt = time.Now().Unix()
@@ -386,7 +387,18 @@ func (s *Store) RecordDelivery(d Delivery) (bool, error) {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	if n > 0 && s.deliveries.Add(1)%100 == 0 {
+	if n == 0 {
+		// Seen before. One that failed can be handled again: GitHub keeps a
+		// delivery's ID when someone redelivers it. Clearing its result claims
+		// it, so of two redeliveries at once only one runs.
+		if res, err = s.db.Exec(`UPDATE webhook_deliveries SET result='', received_at=? WHERE id=? AND result LIKE 'error%'`,
+			d.ReceivedAt, d.ID); err != nil {
+			return false, err
+		}
+		n, _ = res.RowsAffected()
+		return n > 0, nil
+	}
+	if s.deliveries.Add(1)%100 == 0 {
 		_, _ = s.db.Exec(`DELETE FROM webhook_deliveries WHERE received_at < ?`, time.Now().Add(-30*24*time.Hour).Unix())
 	}
 	return n > 0, nil
@@ -559,24 +571,62 @@ func (s *Store) OrgSummaries(only []int64) ([]OrgSummary, error) {
 	for _, id := range only {
 		want[id] = true
 	}
-	since := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	// One grouped query per table for every organization, not five per
+	// organization: the dashboard showing this refreshes itself.
+	since := DayWindowStart(30, time.Now()) // the same days as the dashboard's chart
+	members, err := s.countsByAccount(`SELECT org_id, COUNT(*), COALESCE(SUM(role='owner'),0) FROM memberships GROUP BY org_id`)
+	if err != nil {
+		return nil, err
+	}
+	repos, err := s.countsByAccount(`SELECT account_id, COUNT(*), COALESCE(SUM(enabled),0) FROM repos GROUP BY account_id`)
+	if err != nil {
+		return nil, err
+	}
+	pulls, err := s.countsByAccount(`SELECT account_id, COUNT(*), 0 FROM pulls WHERE open=1 GROUP BY account_id`)
+	if err != nil {
+		return nil, err
+	}
+	reviews, err := s.countsByAccount(`SELECT account_id, COALESCE(SUM(status='posted' AND started_at>=?),0),
+COALESCE(SUM(CASE WHEN started_at>=? THEN comments+notes ELSE 0 END),0), COALESCE(MAX(started_at),0)
+FROM reviews GROUP BY account_id`, since, since)
+	if err != nil {
+		return nil, err
+	}
 	var out []OrgSummary
 	for _, o := range orgs {
 		if only != nil && !want[o.ID] {
 			continue
 		}
-		sm := OrgSummary{Org: o}
-		_ = s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(role='owner'),0) FROM memberships WHERE org_id=?`, o.ID).Scan(&sm.Members, &sm.Owners)
-		_ = s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(enabled),0) FROM repos WHERE account_id=?`, o.ID).Scan(&sm.Repos, &sm.EnabledRepos)
-		_ = s.db.QueryRow(`SELECT COUNT(*) FROM pulls WHERE account_id=? AND open=1`, o.ID).Scan(&sm.OpenPRs)
-		var last sql.NullInt64
-		_ = s.db.QueryRow(`SELECT COALESCE(SUM(status='posted'),0), COALESCE(SUM(comments+notes),0) FROM reviews WHERE account_id=? AND started_at>=?`,
-			o.ID, since).Scan(&sm.Reviews30d, &sm.Findings30d)
-		_ = s.db.QueryRow(`SELECT MAX(started_at) FROM reviews WHERE account_id=?`, o.ID).Scan(&last)
-		sm.LastReview = last.Int64
-		out = append(out, sm)
+		m, r, p, rv := members[o.ID], repos[o.ID], pulls[o.ID], reviews[o.ID]
+		out = append(out, OrgSummary{Org: o, Members: int(m[0]), Owners: int(m[1]), Repos: int(r[0]), EnabledRepos: int(r[1]),
+			OpenPRs: int(p[0]), Reviews30d: int(rv[0]), Findings30d: int(rv[1]), LastReview: rv[2]})
 	}
 	return out, nil
+}
+
+// countsByAccount runs a query whose rows are an account ID followed by two or
+// three numbers, and indexes them by the ID.
+func (s *Store) countsByAccount(query string, args ...any) (map[int64][3]int64, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	out := map[int64][3]int64{}
+	for rows.Next() {
+		var id int64
+		var v [3]int64
+		dest := []any{&id, &v[0], &v[1], &v[2]}[:len(cols)]
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		out[id] = v
+	}
+	return out, rows.Err()
 }
 
 // DayWindowStart is the start (midnight UTC) of the last `days` whole UTC
