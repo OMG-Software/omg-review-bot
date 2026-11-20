@@ -248,6 +248,44 @@ func (s *Store) RemoveMembership(orgID, userID int64) error {
 	return err
 }
 
+// ErrLastOwner is returned when a change would leave an organization without an owner.
+var ErrLastOwner = errors.New("an organization needs at least one owner")
+
+// SetMemberRole sets a role chosen by hand (so sign-in won't change it).
+// Demoting an owner only succeeds while another owner remains. The check and
+// the change are one statement, which SQLite runs under its write lock, so two
+// owners demoting each other at once can't both succeed.
+func (s *Store) SetMemberRole(orgID, userID int64, role string) error {
+	res, err := s.db.Exec(`UPDATE memberships SET role=?, source='manual' WHERE org_id=? AND user_id=?
+AND (?='owner' OR role<>'owner' OR (SELECT COUNT(*) FROM memberships WHERE org_id=? AND role='owner')>1)`,
+		role, orgID, userID, role, orgID)
+	return s.lastOwnerCheck(res, err, orgID, userID)
+}
+
+// RemoveMember removes someone's access, refusing to remove the last owner,
+// with the check and the change in one statement (see SetMemberRole).
+func (s *Store) RemoveMember(orgID, userID int64) error {
+	res, err := s.db.Exec(`DELETE FROM memberships WHERE org_id=? AND user_id=?
+AND (role<>'owner' OR (SELECT COUNT(*) FROM memberships WHERE org_id=? AND role='owner')>1)`,
+		orgID, userID, orgID)
+	return s.lastOwnerCheck(res, err, orgID, userID)
+}
+
+// lastOwnerCheck turns "no row changed" into ErrLastOwner while the
+// membership still exists (if it's gone, someone else removed it: no error).
+func (s *Store) lastOwnerCheck(res sql.Result, err error, orgID, userID int64) error {
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return err
+	}
+	if m, err := s.GetMembership(orgID, userID); err != nil || m == nil {
+		return err
+	}
+	return ErrLastOwner
+}
+
 // GetMembership returns nil, nil when the person has no access to the organization.
 func (s *Store) GetMembership(orgID, userID int64) (*Member, error) {
 	ms, err := s.queryMembers(orgID, userID)
@@ -292,13 +330,6 @@ ORDER BY o.login COLLATE NOCASE, m.role='owner' DESC, u.login COLLATE NOCASE`, o
 		out = append(out, m)
 	}
 	return out, rows.Err()
-}
-
-// CountOwners counts an organization's owners.
-func (s *Store) CountOwners(orgID int64) int {
-	var n int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM memberships WHERE org_id=? AND role='owner'`, orgID).Scan(&n)
-	return n
 }
 
 // ---------- webhook deliveries ----------

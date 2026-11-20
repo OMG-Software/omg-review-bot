@@ -514,10 +514,14 @@ func (s *Store) DuePRs(now int64) ([]PR, error) {
 	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='pending' AND open=1 AND skip=0 AND not_before<=? ORDER BY not_before`, now)
 }
 
-// NextDue returns when the earliest pending review becomes due (0 if none is pending).
-func (s *Store) NextDue() int64 {
+// NextDue returns when the next pending review becomes due after the given
+// time (0 if none). Reviews already due aren't counted: they're queued by
+// every poll and wake-up, and may stay pending for a while (waiting in the
+// queue, or in an organization with reviews switched off), so counting them
+// would keep the run loop waking every second.
+func (s *Store) NextDue(after int64) int64 {
 	var n sql.NullInt64
-	_ = s.db.QueryRow(`SELECT MIN(not_before) FROM pulls WHERE status='pending' AND open=1 AND skip=0`).Scan(&n)
+	_ = s.db.QueryRow(`SELECT MIN(not_before) FROM pulls WHERE status='pending' AND open=1 AND skip=0 AND not_before>?`, after).Scan(&n)
 	return n.Int64
 }
 

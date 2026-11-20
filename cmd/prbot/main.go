@@ -71,7 +71,7 @@ func run(listen, dataDir string, resetPw bool) error {
 		if err := st.Delete("admin_password"); err != nil {
 			return err
 		}
-		fmt.Println("Admin password cleared. Start prbot and open the web UI to set a new one.")
+		fmt.Println("Admin password cleared. Start prbot and open the web UI to set a new one; doing so signs everyone out.")
 		return nil
 	}
 

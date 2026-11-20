@@ -2,8 +2,11 @@ package store
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -192,5 +195,88 @@ func TestFilters(t *testing.T) {
 	}
 	if m, _ := st.GetMembership(600, 43); m != nil {
 		t.Errorf("bob isn't in globex, got %+v", m)
+	}
+}
+
+// TestNextDueIgnoresPastReviews: a review that's already due (queued, or in an
+// org with reviews off) mustn't make the run loop wake every second.
+func TestNextDueIgnoresPastReviews(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().Unix()
+	for i, nb := range []int64{now - 600, now + 120, now + 30} {
+		if err := st.SavePR(&PR{Repo: "acme/web", Number: i + 1, Open: true, Status: "pending", NotBefore: nb}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := st.NextDue(now); got != now+30 {
+		t.Errorf("NextDue = %d, want the next future time %d", got, now+30)
+	}
+	if got := st.NextDue(now + 200); got != 0 {
+		t.Errorf("NextDue with nothing ahead = %d, want 0", got)
+	}
+}
+
+// TestLastOwnerGuard: the last owner can't be demoted or removed, even when
+// two owners demote each other at the same moment.
+func TestLastOwnerGuard(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{41, 42} {
+		if err := st.EnsureUser(id, fmt.Sprint("u", id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owners := func() (n int) {
+		ms, _ := st.ListMembers(500)
+		for _, m := range ms {
+			if m.Role == RoleOwner {
+				n++
+			}
+		}
+		return n
+	}
+
+	for round := 0; round < 20; round++ {
+		_ = st.SetMembership(500, 41, RoleOwner, SourceManual)
+		_ = st.SetMembership(500, 42, RoleOwner, SourceManual)
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		for i, id := range []int64{41, 42} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if i == 0 {
+					errs[i] = st.SetMemberRole(500, id, RoleMember)
+				} else {
+					errs[i] = st.RemoveMember(500, id)
+				}
+			}()
+		}
+		wg.Wait()
+		if n := owners(); n != 1 {
+			t.Fatalf("round %d: %d owners left (errors %v), want 1", round, n, errs)
+		}
+	}
+
+	ms, _ := st.ListMembers(500)
+	last := ms[0].ID
+	if err := st.SetMemberRole(500, last, RoleMember); !errors.Is(err, ErrLastOwner) {
+		t.Errorf("demoting the last owner: %v, want ErrLastOwner", err)
+	}
+	if err := st.RemoveMember(500, last); !errors.Is(err, ErrLastOwner) {
+		t.Errorf("removing the last owner: %v, want ErrLastOwner", err)
+	}
+	if err := st.RemoveMember(500, 999); err != nil {
+		t.Errorf("removing someone already gone: %v", err)
 	}
 }

@@ -259,12 +259,8 @@ func (s *Server) orgMemberRole(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, back, errors.New("unknown role"))
 		return
 	}
-	if m.Role == store.RoleOwner && role != store.RoleOwner && s.store.CountOwners(org.ID) <= 1 {
-		redirectErr(w, r, back, errors.New("an organization needs at least one owner"))
-		return
-	}
 	// A role set here is a deliberate choice, so sign-in won't change it.
-	if err := s.store.SetMembership(org.ID, m.ID, role, store.SourceManual); err != nil {
+	if err := s.store.SetMemberRole(org.ID, m.ID, role); err != nil {
 		redirectErr(w, r, back, err)
 		return
 	}
@@ -278,11 +274,7 @@ func (s *Server) orgMemberRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	back := orgBase(org) + "/members"
-	if m.Role == store.RoleOwner && s.store.CountOwners(org.ID) <= 1 {
-		redirectErr(w, r, back, errors.New("an organization needs at least one owner"))
-		return
-	}
-	if err := s.store.RemoveMembership(org.ID, m.ID); err != nil {
+	if err := s.store.RemoveMember(org.ID, m.ID); err != nil {
 		redirectErr(w, r, back, err)
 		return
 	}

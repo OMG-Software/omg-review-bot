@@ -123,7 +123,7 @@ func (b *Bot) Run(ctx context.Context) {
 		}
 		// Sleep until the next poll, or sooner when a debounced review falls due.
 		wait := interval - time.Since(b.lastPollTime())
-		if due := b.store.NextDue(); due > 0 {
+		if due := b.store.NextDue(time.Now().Unix()); due > 0 {
 			wait = min(wait, time.Until(time.Unix(due, 0))+time.Second)
 		}
 		t := time.NewTimer(max(wait, time.Second))

@@ -490,3 +490,32 @@ func TestSecureCookies(t *testing.T) {
 		t.Error("direct plain-HTTP request: cookie marked Secure, which the browser would drop")
 	}
 }
+
+// TestResetPasswordEndsSessions: after `prbot -reset-password`, setting the
+// new password on the setup page signs everyone out, as a password change does.
+func TestResetPasswordEndsSessions(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	if code, _, _ := s.get("/orgs"); code != http.StatusOK {
+		t.Fatalf("signed in: /orgs = %d", code)
+	}
+	if err := s.st.Delete(pwKey); err != nil { // what -reset-password does
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/setup",
+		strings.NewReader(url.Values{"password": {"new-password-1"}, "confirm": {"new-password-1"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", s.ts.URL)
+	resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("setup = %d", resp.StatusCode)
+	}
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("session from before the reset still works: %d %s", code, hdr.Get("Location"))
+	}
+}

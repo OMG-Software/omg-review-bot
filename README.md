@@ -194,7 +194,7 @@ The administrator password has its own sign-in page, **`/admin-login`** (for exa
 - **Signing out** as the administrator returns you to `/admin-login`; GitHub users return to
   `/login`.
 - **Forgot the password?** Stop the bot and run `prbot -reset-password`, then set a new one on the
-  setup page.
+  setup page. Setting it signs everyone out, so sessions from before the reset stop working.
 
 Keeping the page separate keeps the password form away from everyday users. It isn't a secret,
 though; the password is what protects it. To limit who can reach it, restrict the path in your

@@ -39,6 +39,12 @@ func (s *Server) setupSubmit(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = s.store.Set(pwKey, h)
 	}
+	if err == nil {
+		// Setup also follows `prbot -reset-password`, usually done because the
+		// password (or a session) leaked: a new signing key ends every
+		// session made before, as changing the password on the Account page does.
+		err = s.rotateSecret()
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
