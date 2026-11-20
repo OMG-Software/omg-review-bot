@@ -1553,6 +1553,54 @@ func TestUnreadablePendingNoteKept(t *testing.T) {
 	}
 }
 
+// TestUnreadableNoteAddThenRestart: a failed sign-in whose note can't be
+// added to (the file is unreadable) leaves the file as it was, and at the
+// restart that follows every existing session ends, while access, including
+// a membership added by hand, stays as it was.
+func TestUnreadableNoteAddThenRestart(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if _, err := s.st.AddMember(otherID, aliceID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn() // the session that must end
+	before, _ := s.st.UserMemberships(aliceID)
+	const unreadable = "[99," // cut short: it may list others
+	if err := os.WriteFile(s.srv.pending.path, []byte(unreadable), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.srv.retryWait = time.Hour // no retry gets through before the restart
+	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
+		return nil, errors.New("database is locked")
+	}
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	if b, _ := os.ReadFile(s.srv.pending.path); string(b) != unreadable {
+		t.Fatalf("the unreadable note was replaced with %q", b)
+	}
+	s.srv.unreconciled.Delete(int64(aliceID)) // restart; the old retry stops
+	s.cleanStop()                             // only the note keeps them out, not an unclean stop
+	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("restart with an unreadable note: %v", err)
+	}
+	s.restart(srv2)
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("a session survived a restart with an unreadable note: %d %s", code, hdr.Get("Location"))
+	}
+	if b, _ := os.ReadFile(s.srv.pending.path + ".unreadable"); string(b) != unreadable {
+		t.Errorf("note set aside = %q, want the unreadable one", b)
+	}
+	if after, _ := s.st.UserMemberships(aliceID); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Errorf("access changed: %v, was %v", after, before)
+	}
+	if m, _ := s.st.GetMembership(otherID, aliceID); m == nil || m.Source != store.SourceManual || m.Role != store.RoleMember {
+		t.Errorf("membership added by hand = %+v", m)
+	}
+}
+
 // TestPendingNoteSyncRetried: when the directory sync after the rename
 // fails, the add reports it, and its retry syncs again before reporting
 // success, rather than taking the listed ID as already on disk.
