@@ -157,18 +157,8 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 			replyJobs = append(replyJobs, job{kind: jobReplies, repo: r.FullName, number: p.Number})
 		}
 	}
-	tracked, err := b.store.OpenPRs(r.FullName)
-	if err == nil {
-		for i := range tracked {
-			pr := &tracked[i]
-			// A PR saved since the list was fetched (a webhook for a newly
-			// opened PR, say) may simply be newer than the list: leave it.
-			if !open[pr.Number] && pr.UpdatedAt < fetched {
-				pr.Open = false
-				b.recompute(pr, st)
-				_ = b.store.SavePR(pr)
-			}
-		}
+	if b.closeMissing(st, r.FullName, open, fetched) {
+		etag = r.ETag // as above: so a PR left open is checked again
 	}
 	b.prMu.Unlock()
 
@@ -182,6 +172,33 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 		b.enqueue(j)
 	}
 	return b.store.SetRepoPolled(r.ID, etag)
+}
+
+// closeMissing marks tracked open PRs that aren't in a poll's list of open
+// ones (fetched at fetched) as closed. It reports whether the poll must fetch
+// the list again, because a PR was left as it is or the PRs couldn't be read.
+// The caller holds prMu.
+func (b *Bot) closeMissing(st settings.Settings, repo string, open map[int]bool, fetched int64) (refetch bool) {
+	tracked, err := b.store.OpenPRs(repo)
+	if err != nil {
+		return true
+	}
+	for i := range tracked {
+		pr := &tracked[i]
+		if open[pr.Number] {
+			continue
+		}
+		if pr.UpdatedAt >= fetched {
+			// Saved since the list was fetched (a webhook for a newly opened
+			// PR, say), so it may be newer than the list: leave it for now.
+			refetch = true
+			continue
+		}
+		pr.Open = false
+		b.recompute(pr, st)
+		_ = b.store.SavePR(pr)
+	}
+	return refetch
 }
 
 // pullUpdate says what applyPull changed.

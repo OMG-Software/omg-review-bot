@@ -546,6 +546,25 @@ func TestStaleSnapshotIgnored(t *testing.T) {
 	if u, _ := b.applyPull(cfg, r, pull("eee", "2026-01-01T00:15:00Z"), false, 0); u.stale || !u.pushed {
 		t.Errorf("equal-timestamp webhook not applied: %+v", u)
 	}
+
+	// A PR missing from a poll's list but saved since the fetch is left open,
+	// and the poll is told to fetch again (not to save the new ETag), so a
+	// missed close webhook can't leave it open for good.
+	if refetch := b.closeMissing(cfg, "acme/web", map[int]bool{}, before); !refetch {
+		t.Error("closeMissing skipped a PR saved since the fetch without asking for a refetch")
+	}
+	if pr, _ := st.GetPR("acme/web", 7); !pr.Open {
+		t.Error("PR saved since the fetch was closed")
+	}
+	if refetch := b.closeMissing(cfg, "acme/web", map[int]bool{7: true}, time.Now().Unix()+60); refetch {
+		t.Error("closeMissing asked for a refetch with nothing skipped")
+	}
+	if refetch := b.closeMissing(cfg, "acme/web", map[int]bool{}, time.Now().Unix()+60); refetch {
+		t.Error("closeMissing asked for a refetch after closing the PR")
+	}
+	if pr, _ := st.GetPR("acme/web", 7); pr.Open {
+		t.Error("PR missing from a later poll's list wasn't closed")
+	}
 }
 
 // TestReviewNotice: the notice names the commit, time, model and skill; a
