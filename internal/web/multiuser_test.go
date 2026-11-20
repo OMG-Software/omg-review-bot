@@ -255,6 +255,16 @@ func TestGitHubSignInAndOrgAccess(t *testing.T) {
 	if _, body, _ := s.get("/"); strings.Contains(body, "other/secret") {
 		t.Error("home page leaks another organization")
 	}
+	// An organization with no reviews yet says so, not "last review —".
+	if err := s.st.UpsertOrg(700, "fresh", "Organization", 12); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.st.AddMember(700, aliceID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if _, body, _ := s.get("/orgs"); !strings.Contains(body, "no reviews yet") || !strings.Contains(body, "last review") {
+		t.Error("/orgs should say a new organization has no reviews yet, and give the others' last review")
+	}
 
 	// Another organization: invisible, not even its existence.
 	for _, p := range []string{"/orgs/other", "/orgs/other/reviews", "/prs/other/secret/3", fmt.Sprintf("/reviews/%d", otherRev)} {

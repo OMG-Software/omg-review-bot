@@ -121,6 +121,11 @@ func (n reviewNotice) postedBody(url string) string {
 	return n.body("✅ **Review posted**", note)
 }
 
+// skippedBody says no review was posted after all (the PR closed, say).
+func (n reviewNotice) skippedBody() string {
+	return n.body("⏭️ **Review skipped**", "Nothing was posted for this commit.")
+}
+
 // failedBody says the review didn't finish. The error itself isn't shown: it
 // can name internal hosts. The bot's own pages have it.
 func (n reviewNotice) failedBody(retrying bool) string {

@@ -273,7 +273,11 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		case err == nil:
 			// So the notice doesn't go on saying a review is under way.
 			b.updateNotice(cl, pr, noticeID, notice.postedBody(rec.URL))
-		case !errors.Is(err, errSkip):
+		case errors.Is(err, errSkip):
+			// Not returned once the notice is up today, but if it ever is,
+			// the notice shouldn't stay "under way" either.
+			b.updateNotice(cl, pr, noticeID, notice.skippedBody())
+		default:
 			// Same count handleReview uses to decide on a retry.
 			attempts := 1
 			if pr.AttemptSHA == pr.HeadSHA {

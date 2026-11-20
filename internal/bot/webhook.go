@@ -47,8 +47,6 @@ func (b *Bot) HandleWebhook(event string, body []byte) (accountID int64, result 
 	return accountID, "ignored: event not used", nil
 }
 
-// requestSync refreshes the organization and repository list at the next
-// poll, and polls now. Repeated requests within a minute are merged.
 // requestSync asks for the repository list to be refreshed. Syncs are at
 // most a minute apart (events for a repository the bot doesn't watch would
 // otherwise each trigger one); a request inside that minute is kept and runs

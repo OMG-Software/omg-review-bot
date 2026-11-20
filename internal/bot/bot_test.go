@@ -707,6 +707,9 @@ func TestReviewNotice(t *testing.T) {
 	if f := n.failedBody(false); !strings.Contains(f, "won't be retried") {
 		t.Errorf("failed notice (final):\n%s", f)
 	}
+	if f := n.skippedBody(); !strings.Contains(f, "**Review skipped**") || !strings.Contains(f, noticeMarker(n.head)) {
+		t.Errorf("skipped notice:\n%s", f)
+	}
 	if f := n.postedBody("https://github.example/r/1"); !strings.Contains(f, "**Review posted**") ||
 		!strings.Contains(f, "[here](https://github.example/r/1)") || !strings.Contains(f, noticeMarker(n.head)) {
 		t.Errorf("posted notice:\n%s", f)

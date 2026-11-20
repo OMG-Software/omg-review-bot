@@ -46,7 +46,7 @@
       <td>{{.OpenPRs}}</td>
       <td>{{.Reviews30d}}</td>
       <td>{{.Findings30d}}</td>
-      <td>{{ago .LastReview}}</td>
+      <td>{{if .LastReview}}{{ago .LastReview}}{{else}}<span class="muted">never</span>{{end}}</td>
     </tr>
     {{end}}
     </tbody>

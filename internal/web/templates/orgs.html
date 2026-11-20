@@ -6,7 +6,7 @@
   <a class="card orgcard" href="{{orgPath .Login}}">
     <h2>{{.Login}} {{if not .Active}}<span class="pill s-error">App uninstalled</span>{{end}}</h2>
     <p class="muted">{{$r := index $.D.Roles .ID}}{{if eq $r "admin"}}administrator{{else}}{{$r}}{{end}} · {{.EnabledRepos}} of {{.Repos}} repositories watched · {{.Members}} members</p>
-    <p><b>{{.Reviews30d}}</b> reviews and <b>{{.Findings30d}}</b> findings in 30 days · last review {{ago .LastReview}}</p>
+    <p><b>{{.Reviews30d}}</b> reviews and <b>{{.Findings30d}}</b> findings in 30 days · {{if .LastReview}}last review {{ago .LastReview}}{{else}}no reviews yet{{end}}</p>
   </a>
 {{end}}
 </div>
