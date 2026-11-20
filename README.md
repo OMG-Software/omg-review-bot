@@ -511,9 +511,10 @@ Notes:
 - **Keep the `Host` header.** Without `proxy_set_header Host $host`, nginx sends `127.0.0.1:8080`,
   and every save, sign-out and button press fails with *cross-origin request blocked*. If nginx
   listens on a port other than 443, use `$http_host` instead, which includes the port.
-- **Cookies.** The bot marks its cookies `Secure` only when it terminates TLS itself, so behind
-  nginx they aren't. The `Strict-Transport-Security` header makes browsers use HTTPS for the site,
-  so the cookies are never sent unencrypted.
+- **Cookies.** The bot marks its cookies `Secure` when a request arrives on an `https://`
+  **Public URL** (which is why nginx must pass the `Host` header) or when it terminates TLS
+  itself. A direct plain-HTTP visit, such as `http://127.0.0.1:8080` on the server, gets ordinary
+  cookies so it still works. The `Strict-Transport-Security` header keeps browsers on HTTPS.
 - **Don't expose port 8080.** Keep `-listen 127.0.0.1:8080` so the only way in is through nginx.
 - **Restricting the administrator sign-in (optional).** To allow the password sign-in only from
   your own network, add this inside the `server` block. Everyone else gets `403` there and can

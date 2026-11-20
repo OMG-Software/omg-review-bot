@@ -110,22 +110,41 @@ func (s *Server) unsign(v string) (string, bool) {
 	return payload, hmac.Equal([]byte(mac), []byte(s.sign(payload)))
 }
 
-func secureCookie(r *http.Request) bool { return r.TLS != nil }
+// secureRequest reports whether the browser reached the bot over HTTPS:
+// either the bot terminated TLS itself, or the request came in on the
+// configured https:// Public URL through a reverse proxy (which passes the
+// original Host). A direct plain-HTTP visit, such as http://127.0.0.1:8080
+// beside a proxy, isn't, so its cookies still work there.
+func (s *Server) secureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	u, err := url.Parse(s.bot.Settings().GitHub.PublicURL)
+	return err == nil && strings.EqualFold(u.Scheme, "https") && strings.EqualFold(u.Host, r.Host)
+}
+
+// setCookie sets one of the bot's cookies. Every cookie is HttpOnly and
+// SameSite=Lax, and Secure whenever the request came over HTTPS; it can't
+// always be Secure, because browsers drop Secure cookies sent over plain
+// HTTP, which the bot uses on a LAN (-listen 0.0.0.0:8080). maxAge < 0
+// deletes the cookie.
+func (s *Server) setCookie(w http.ResponseWriter, r *http.Request, name, value, path string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{
+		Name: name, Value: value, Path: path, MaxAge: maxAge,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureRequest(r),
+	})
+}
 
 // issueSession signs a person in. The session names the user and their
 // session epoch, so bumping the epoch (sign out everywhere, blocking the
 // user) ends it.
 func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID, epoch int64) {
 	exp := time.Now().Add(sessionTTL).Unix()
-	http.SetCookie(w, &http.Cookie{
-		Name: cookieName, Value: s.signed(fmt.Sprintf("%d.%d.%d", userID, epoch, exp)), Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secureCookie(r),
-		MaxAge: int(sessionTTL.Seconds()),
-	})
+	s.setCookie(w, r, cookieName, s.signed(fmt.Sprintf("%d.%d.%d", userID, epoch, exp)), "/", int(sessionTTL.Seconds()))
 }
 
-func clearSession(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+func (s *Server) clearSession(w http.ResponseWriter, r *http.Request) {
+	s.setCookie(w, r, cookieName, "", "/", -1)
 }
 
 // viewer is the signed-in person.

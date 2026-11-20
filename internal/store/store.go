@@ -141,18 +141,18 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_time ON webhook_deliveries(received_at
 
 // addedColumns were added after the first release. Opening an older database
 // adds them with ALTER TABLE.
-var addedColumns = []struct{ table, column, def string }{
-	{"repos", "account_id", "INTEGER NOT NULL DEFAULT 0"},
-	{"pulls", "account_id", "INTEGER NOT NULL DEFAULT 0"},
-	{"reviews", "account_id", "INTEGER NOT NULL DEFAULT 0"},
-	{"reviews", "event", "TEXT NOT NULL DEFAULT ''"},
-	{"reviews", "fixed", "INTEGER NOT NULL DEFAULT 0"},
-	{"reviews", "sev_p1", "INTEGER NOT NULL DEFAULT 0"},
-	{"reviews", "sev_p2", "INTEGER NOT NULL DEFAULT 0"},
-	{"reviews", "sev_p3", "INTEGER NOT NULL DEFAULT 0"},
-	{"reviews", "sev_p4", "INTEGER NOT NULL DEFAULT 0"},
-	{"reviews", "sev_p5", "INTEGER NOT NULL DEFAULT 0"},
-	{"activity", "account_id", "INTEGER NOT NULL DEFAULT 0"},
+var addedColumns = []struct{ table, column, alter string }{
+	{"repos", "account_id", `ALTER TABLE repos ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"pulls", "account_id", `ALTER TABLE pulls ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "account_id", `ALTER TABLE reviews ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "event", `ALTER TABLE reviews ADD COLUMN event TEXT NOT NULL DEFAULT ''`},
+	{"reviews", "fixed", `ALTER TABLE reviews ADD COLUMN fixed INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p1", `ALTER TABLE reviews ADD COLUMN sev_p1 INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p2", `ALTER TABLE reviews ADD COLUMN sev_p2 INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p3", `ALTER TABLE reviews ADD COLUMN sev_p3 INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p4", `ALTER TABLE reviews ADD COLUMN sev_p4 INTEGER NOT NULL DEFAULT 0`},
+	{"reviews", "sev_p5", `ALTER TABLE reviews ADD COLUMN sev_p5 INTEGER NOT NULL DEFAULT 0`},
+	{"activity", "account_id", `ALTER TABLE activity ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
 }
 
 // postMigrate indexes the added columns, so it runs after they exist.
@@ -161,6 +161,24 @@ CREATE INDEX IF NOT EXISTS idx_repos_account ON repos(account_id);
 CREATE INDEX IF NOT EXISTS idx_pulls_account ON pulls(account_id, open);
 CREATE INDEX IF NOT EXISTS idx_reviews_account ON reviews(account_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_activity_account ON activity(account_id, id);
+
+-- The views fix each table's column order for the scan functions (scanRepo,
+-- scanPR, scanReview, scanUser, scanOrg), so queries can select * from them.
+-- They're recreated on every start, so a changed column list takes effect.
+DROP VIEW IF EXISTS repos_v;
+CREATE VIEW repos_v AS SELECT id, installation_id, account_id, full_name, enabled, synced, etag, last_polled FROM repos;
+DROP VIEW IF EXISTS pulls_v;
+CREATE VIEW pulls_v AS SELECT repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
+  head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
+  not_before, tracked_at, updated_at, account_id FROM pulls;
+DROP VIEW IF EXISTS reviews_v;
+CREATE VIEW reviews_v AS SELECT id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
+  status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at,
+  account_id, event, fixed, sev_p1, sev_p2, sev_p3, sev_p4, sev_p5 FROM reviews;
+DROP VIEW IF EXISTS users_v;
+CREATE VIEW users_v AS SELECT id, login, name, avatar_url, is_admin, disabled, session_epoch, created_at, last_login FROM users;
+DROP VIEW IF EXISTS orgs_v;
+CREATE VIEW orgs_v AS SELECT id, login, type, installation_id, active, auto_join, policy, created_at FROM orgs;
 `
 
 // AllAccounts, passed as an account ID, selects the rows of every
@@ -168,13 +186,11 @@ CREATE INDEX IF NOT EXISTS idx_activity_account ON activity(account_id, id);
 // yet linked to an organization.
 const AllAccounts int64 = -1
 
-// accountWhere returns a WHERE condition on col and its arguments.
-func accountWhere(col string, accountID int64) (string, []any) {
-	if accountID == AllAccounts {
-		return "1=1", nil
-	}
-	return col + "=?", []any{accountID}
-}
+// acct returns the two arguments of the literal filter (?=-1 OR account_id=?)
+// that queries use to select one organization's rows, or every row when the
+// account is AllAccounts (-1). Keeping the condition in the SQL text, rather
+// than building it, means every query is a single literal string.
+func acct(accountID int64) []any { return []any{accountID, accountID} }
 
 // Store wraps the SQLite database.
 type Store struct {
@@ -211,7 +227,7 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 		if !has {
-			if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.def)); err != nil {
+			if _, err := db.Exec(c.alter); err != nil {
 				return fmt.Errorf("add %s.%s: %w", c.table, c.column, err)
 			}
 		}
@@ -221,25 +237,9 @@ func migrate(db *sql.DB) error {
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			cid, notNull, pk int
-			name, typ        string
-			def              sql.NullString
-		)
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &def, &pk); err != nil {
-			return false, err
-		}
-		if strings.EqualFold(name, column) {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=? COLLATE NOCASE`, table, column).Scan(&n)
+	return n > 0, err
 }
 
 // BackfillAccounts links pull requests, reviews and activity that aren't yet
@@ -330,8 +330,6 @@ ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id, account_
 	return err
 }
 
-const repoCols = `id, installation_id, account_id, full_name, enabled, synced, etag, last_polled`
-
 func scanRepo(sc scanner) (*Repo, error) {
 	var r Repo
 	var en, sy int
@@ -344,8 +342,7 @@ func scanRepo(sc scanner) (*Repo, error) {
 
 // ListRepos lists one organization's repositories, or every one with AllAccounts.
 func (s *Store) ListRepos(accountID int64) ([]Repo, error) {
-	where, args := accountWhere("account_id", accountID)
-	rows, err := s.db.Query(`SELECT `+repoCols+` FROM repos WHERE `+where+` ORDER BY full_name COLLATE NOCASE`, args...)
+	rows, err := s.db.Query(`SELECT * FROM repos_v WHERE (?=-1 OR account_id=?) ORDER BY full_name COLLATE NOCASE`, acct(accountID)...)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +360,7 @@ func (s *Store) ListRepos(accountID int64) ([]Repo, error) {
 
 // GetRepo returns nil, nil for an unknown repository.
 func (s *Store) GetRepo(id int64) (*Repo, error) {
-	r, err := scanRepo(s.db.QueryRow(`SELECT `+repoCols+` FROM repos WHERE id=?`, id))
+	r, err := scanRepo(s.db.QueryRow(`SELECT * FROM repos_v WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -372,7 +369,7 @@ func (s *Store) GetRepo(id int64) (*Repo, error) {
 
 // GetRepoByName returns nil, nil for an unknown repository.
 func (s *Store) GetRepoByName(fullName string) (*Repo, error) {
-	r, err := scanRepo(s.db.QueryRow(`SELECT `+repoCols+` FROM repos WHERE full_name=? COLLATE NOCASE LIMIT 1`, fullName))
+	r, err := scanRepo(s.db.QueryRow(`SELECT * FROM repos_v WHERE full_name=? COLLATE NOCASE LIMIT 1`, fullName))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -387,8 +384,7 @@ func (s *Store) SetRepoEnabled(id int64, enabled bool) error {
 
 // SetAllReposEnabled switches every repository of one organization (or of all, with AllAccounts).
 func (s *Store) SetAllReposEnabled(accountID int64, enabled bool) error {
-	where, args := accountWhere("account_id", accountID)
-	_, err := s.db.Exec(`UPDATE repos SET enabled=?, etag='' WHERE `+where, append([]any{b2i(enabled)}, args...)...)
+	_, err := s.db.Exec(`UPDATE repos SET enabled=?, etag='' WHERE (?=-1 OR account_id=?)`, b2i(enabled), accountID, accountID)
 	return err
 }
 
@@ -446,10 +442,6 @@ type PR struct {
 	AccountID      int64
 }
 
-const prCols = `repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
-head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
-not_before, tracked_at, updated_at, account_id`
-
 type scanner interface{ Scan(dest ...any) error }
 
 func scanPR(sc scanner) (*PR, error) {
@@ -488,7 +480,7 @@ func (s *Store) queryPRs(q string, args ...any) ([]PR, error) {
 
 // GetPR returns nil, nil when the PR is not tracked.
 func (s *Store) GetPR(repo string, number int) (*PR, error) {
-	p, err := scanPR(s.db.QueryRow(`SELECT `+prCols+` FROM pulls WHERE repo=? AND number=?`, repo, number))
+	p, err := scanPR(s.db.QueryRow(`SELECT * FROM pulls_v WHERE repo=? AND number=?`, repo, number))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -497,7 +489,9 @@ func (s *Store) GetPR(repo string, number int) (*PR, error) {
 
 func (s *Store) SavePR(p *PR) error {
 	p.UpdatedAt = time.Now().Unix()
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO pulls(`+prCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO pulls(repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
+  head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
+  not_before, tracked_at, updated_at, account_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.Repo, p.Number, p.InstallationID, p.Title, p.Author, p.URL, p.BaseRef, p.HeadRef,
 		b2i(p.Draft), b2i(p.Open), strings.Join(p.Labels, "\n"), p.HeadSHA, p.ReviewedSHA, p.AttemptSHA,
 		p.Attempts, p.GHUpdatedAt, p.CommentsSeen, p.Status, p.LastError, b2i(p.Skip), p.NotBefore,
@@ -507,20 +501,17 @@ func (s *Store) SavePR(p *PR) error {
 
 // ListPRs lists one organization's PRs (or all, with AllAccounts), most recently updated first.
 func (s *Store) ListPRs(accountID int64, includeClosed bool, limit int) ([]PR, error) {
-	where, args := accountWhere("account_id", accountID)
-	if !includeClosed {
-		where += ` AND open=1`
-	}
-	return s.queryPRs(`SELECT `+prCols+` FROM pulls WHERE `+where+` ORDER BY updated_at DESC LIMIT ?`, append(args, limit)...)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE (?=-1 OR account_id=?) AND (?=1 OR open=1) ORDER BY updated_at DESC LIMIT ?`,
+		accountID, accountID, b2i(includeClosed), limit)
 }
 
 func (s *Store) OpenPRs(repo string) ([]PR, error) {
-	return s.queryPRs(`SELECT `+prCols+` FROM pulls WHERE repo=? AND open=1`, repo)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE repo=? AND open=1`, repo)
 }
 
 // DuePRs returns PRs waiting for review whose debounce/backoff window has passed.
 func (s *Store) DuePRs(now int64) ([]PR, error) {
-	return s.queryPRs(`SELECT `+prCols+` FROM pulls WHERE status='pending' AND open=1 AND skip=0 AND not_before<=? ORDER BY not_before`, now)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='pending' AND open=1 AND skip=0 AND not_before<=? ORDER BY not_before`, now)
 }
 
 // NextDue returns when the earliest pending review becomes due (0 if none is pending).
@@ -532,7 +523,7 @@ func (s *Store) NextDue() int64 {
 
 // ReviewedOpenPRs returns open PRs the bot has reviewed (candidates for the reply sweep).
 func (s *Store) ReviewedOpenPRs() ([]PR, error) {
-	return s.queryPRs(`SELECT ` + prCols + ` FROM pulls WHERE open=1 AND status IN ('reviewed','pending')`)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE open=1 AND status IN ('reviewed','pending')`)
 }
 
 // ResetReviewing re-queues reviews interrupted by a shutdown.
@@ -542,8 +533,7 @@ func (s *Store) ResetReviewing() error {
 }
 
 func (s *Store) CountPRsByStatus(accountID int64) (map[string]int, error) {
-	where, args := accountWhere("account_id", accountID)
-	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM pulls WHERE open=1 AND `+where+` GROUP BY status`, args...)
+	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM pulls WHERE open=1 AND (?=-1 OR account_id=?) GROUP BY status`, acct(accountID)...)
 	if err != nil {
 		return nil, err
 	}
@@ -588,10 +578,6 @@ type Review struct {
 	Sev              [5]int // findings posted (inline and notes) at P1..P5
 }
 
-const reviewCols = `id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
-status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at,
-account_id, event, fixed, sev_p1, sev_p2, sev_p3, sev_p4, sev_p5`
-
 func scanReview(sc scanner) (*Review, error) {
 	var r Review
 	err := sc.Scan(&r.ID, &r.Repo, &r.Number, &r.HeadSHA, &r.GHReviewID, &r.URL, &r.Summary, &r.Comments,
@@ -621,7 +607,7 @@ event=?, fixed=?, sev_p1=?, sev_p2=?, sev_p3=?, sev_p4=?, sev_p5=? WHERE id=?`,
 }
 
 func (s *Store) GetReview(id int64) (*Review, error) {
-	r, err := scanReview(s.db.QueryRow(`SELECT `+reviewCols+` FROM reviews WHERE id=?`, id))
+	r, err := scanReview(s.db.QueryRow(`SELECT * FROM reviews_v WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -647,7 +633,7 @@ func (s *Store) queryReviews(q string, args ...any) ([]Review, error) {
 }
 
 func (s *Store) ListReviews(repo string, number, limit int) ([]Review, error) {
-	return s.queryReviews(`SELECT `+reviewCols+` FROM reviews WHERE repo=? AND number=? ORDER BY id DESC LIMIT ?`, repo, number, limit)
+	return s.queryReviews(`SELECT * FROM reviews_v WHERE repo=? AND number=? ORDER BY id DESC LIMIT ?`, repo, number, limit)
 }
 
 // ReviewFilter selects reviews for the review history pages.
@@ -661,23 +647,18 @@ type ReviewFilter struct {
 
 // QueryReviews returns the reviews matching f, newest first, and how many match in total.
 func (s *Store) QueryReviews(f ReviewFilter) ([]Review, int, error) {
-	where, args := accountWhere("account_id", f.AccountID)
-	if f.Repo != "" {
-		where += ` AND repo=?`
-		args = append(args, f.Repo)
-	}
-	if f.Status != "" {
-		where += ` AND status=?`
-		args = append(args, f.Status)
-	}
+	// An empty Repo or Status matches every review.
+	args := []any{f.AccountID, f.AccountID, f.Repo, f.Repo, f.Status, f.Status}
 	var total int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM reviews WHERE `+where, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM reviews
+WHERE (?=-1 OR account_id=?) AND (?='' OR repo=?) AND (?='' OR status=?)`, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
-	out, err := s.queryReviews(`SELECT `+reviewCols+` FROM reviews WHERE `+where+` ORDER BY id DESC LIMIT ? OFFSET ?`,
+	out, err := s.queryReviews(`SELECT * FROM reviews_v
+WHERE (?=-1 OR account_id=?) AND (?='' OR repo=?) AND (?='' OR status=?) ORDER BY id DESC LIMIT ? OFFSET ?`,
 		append(args, f.Limit, max(0, f.Offset))...)
 	return out, total, err
 }
@@ -690,7 +671,7 @@ func (s *Store) RecentReviews(accountID int64, limit int) ([]Review, error) {
 
 // LatestPostedReview returns the most recent review that was posted to GitHub, or nil.
 func (s *Store) LatestPostedReview(repo string, number int) (*Review, error) {
-	r, err := scanReview(s.db.QueryRow(`SELECT `+reviewCols+` FROM reviews WHERE repo=? AND number=? AND status='posted' ORDER BY id DESC LIMIT 1`, repo, number))
+	r, err := scanReview(s.db.QueryRow(`SELECT * FROM reviews_v WHERE repo=? AND number=? AND status='posted' ORDER BY id DESC LIMIT 1`, repo, number))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -737,15 +718,10 @@ VALUES(?,?,?,?,?,COALESCE((SELECT account_id FROM repos WHERE full_name=? LIMIT 
 // RecentActivity lists one organization's activity (or all, with
 // AllAccounts), optionally only one PR's.
 func (s *Store) RecentActivity(accountID int64, limit int, repo string, number int) ([]Activity, error) {
-	where, args := accountWhere("account_id", accountID)
-	q := `SELECT id, ts, level, repo, number, message, account_id FROM activity WHERE ` + where
-	if repo != "" {
-		q += ` AND repo=? AND number=?`
-		args = append(args, repo, number)
-	}
-	q += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.Query(q, args...)
+	// An empty repo lists everything; otherwise only that PR's entries.
+	rows, err := s.db.Query(`SELECT id, ts, level, repo, number, message, account_id FROM activity
+WHERE (?=-1 OR account_id=?) AND (?='' OR (repo=? AND number=?)) ORDER BY id DESC LIMIT ?`,
+		accountID, accountID, repo, repo, number, limit)
 	if err != nil {
 		return nil, err
 	}

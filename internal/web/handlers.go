@@ -101,7 +101,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if v := s.sessionViewer(r); v != nil && v.Local {
 		to = "/admin-login"
 	}
-	clearSession(w)
+	s.clearSession(w, r)
 	http.Redirect(w, r, to, http.StatusSeeOther)
 }
 
@@ -154,7 +154,7 @@ func (s *Server) accountSignOutAll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	clearSession(w)
+	s.clearSession(w, r)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 

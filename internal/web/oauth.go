@@ -41,10 +41,7 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 	next := safeNext(r.URL.Query().Get("next"))
 	exp := time.Now().Add(10 * time.Minute).Unix()
 	payload := fmt.Sprintf("%s|%d|%s", state, exp, base64.RawURLEncoding.EncodeToString([]byte(next)))
-	http.SetCookie(w, &http.Cookie{
-		Name: oauthCookie, Value: s.signed(payload), Path: "/auth/github",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secureCookie(r), MaxAge: 600,
-	})
+	s.setCookie(w, r, oauthCookie, s.signed(payload), "/auth/github", 600)
 	web := github.WebBaseURL(st.GitHub.APIBaseURL)
 	http.Redirect(w, r, github.AuthorizeURL(web, st.GitHub.ClientID, s.callbackURL(r), state), http.StatusSeeOther)
 }
@@ -58,7 +55,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	c, err := r.Cookie(oauthCookie)
-	http.SetCookie(w, &http.Cookie{Name: oauthCookie, Value: "", Path: "/auth/github", MaxAge: -1, HttpOnly: true})
+	s.setCookie(w, r, oauthCookie, "", "/auth/github", -1)
 	if err != nil {
 		fail("The sign-in took too long or started in another browser. Try again.")
 		return

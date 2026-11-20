@@ -452,3 +452,41 @@ func TestAdminLoginIsSeparate(t *testing.T) {
 		t.Errorf("GitHub sign-out went to %q", hdr.Get("Location"))
 	}
 }
+
+// TestSecureCookies checks cookies are marked Secure when the request came
+// over HTTPS through the configured Public URL, and only then.
+func TestSecureCookies(t *testing.T) {
+	s := newTestSite(t)
+	cookieFor := func(host string) *http.Cookie {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, s.ts.URL+"/auth/github", nil)
+		req.Host = host
+		resp, err := s.cl.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		for _, c := range resp.Cookies() {
+			if c.Name == oauthCookie {
+				return c
+			}
+		}
+		t.Fatalf("no %s cookie for host %s", oauthCookie, host)
+		return nil
+	}
+	direct := strings.TrimPrefix(s.ts.URL, "http://")
+
+	if c := cookieFor(direct); c.Secure || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("no Public URL: cookie = %+v, want HttpOnly, Lax, not Secure", c)
+	}
+	s.cfg.GitHub.PublicURL = "https://bot.example"
+	if err := settings.Save(s.st, s.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if c := cookieFor("bot.example"); !c.Secure {
+		t.Error("request through the https Public URL: cookie not Secure")
+	}
+	if c := cookieFor(direct); c.Secure {
+		t.Error("direct plain-HTTP request: cookie marked Secure, which the browser would drop")
+	}
+}

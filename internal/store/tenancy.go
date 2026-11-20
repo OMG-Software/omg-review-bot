@@ -22,8 +22,6 @@ type User struct {
 	LastLogin int64 // 0 = added by an org owner but hasn't signed in yet
 }
 
-const userCols = `id, login, name, avatar_url, is_admin, disabled, session_epoch, created_at, last_login`
-
 func scanUser(sc scanner) (*User, error) {
 	var u User
 	var admin, disabled int
@@ -72,7 +70,7 @@ func (s *Store) EnsureUser(id int64, login string) error {
 
 // GetUser returns nil, nil for an unknown user.
 func (s *Store) GetUser(id int64) (*User, error) {
-	u, err := scanUser(s.db.QueryRow(`SELECT `+userCols+` FROM users WHERE id=?`, id))
+	u, err := scanUser(s.db.QueryRow(`SELECT * FROM users_v WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -80,7 +78,7 @@ func (s *Store) GetUser(id int64) (*User, error) {
 }
 
 func (s *Store) ListUsers() ([]User, error) {
-	return s.queryUsers(`SELECT ` + userCols + ` FROM users ORDER BY login COLLATE NOCASE`)
+	return s.queryUsers(`SELECT * FROM users_v ORDER BY login COLLATE NOCASE`)
 }
 
 func (s *Store) SetUserAdmin(id int64, admin bool) error {
@@ -117,8 +115,6 @@ type Org struct {
 
 // Personal reports whether the account is a user, not an organization.
 func (o Org) Personal() bool { return o.Type == "User" }
-
-const orgCols = `id, login, type, installation_id, active, auto_join, policy, created_at`
 
 func scanOrg(sc scanner) (*Org, error) {
 	var o Org
@@ -180,7 +176,7 @@ func (s *Store) DeactivateOrgsExcept(keep []int64) error {
 
 // GetOrg returns nil, nil for an unknown organization.
 func (s *Store) GetOrg(id int64) (*Org, error) {
-	o, err := scanOrg(s.db.QueryRow(`SELECT `+orgCols+` FROM orgs WHERE id=?`, id))
+	o, err := scanOrg(s.db.QueryRow(`SELECT * FROM orgs_v WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -189,7 +185,7 @@ func (s *Store) GetOrg(id int64) (*Org, error) {
 
 // GetOrgByLogin returns nil, nil for an unknown organization.
 func (s *Store) GetOrgByLogin(login string) (*Org, error) {
-	o, err := scanOrg(s.db.QueryRow(`SELECT `+orgCols+` FROM orgs WHERE login=? COLLATE NOCASE ORDER BY active DESC LIMIT 1`, login))
+	o, err := scanOrg(s.db.QueryRow(`SELECT * FROM orgs_v WHERE login=? COLLATE NOCASE ORDER BY active DESC LIMIT 1`, login))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -197,7 +193,7 @@ func (s *Store) GetOrgByLogin(login string) (*Org, error) {
 }
 
 func (s *Store) ListOrgs() ([]Org, error) {
-	return s.queryOrgs(`SELECT ` + orgCols + ` FROM orgs ORDER BY login COLLATE NOCASE`)
+	return s.queryOrgs(`SELECT * FROM orgs_v ORDER BY login COLLATE NOCASE`)
 }
 
 func (s *Store) SetOrgAutoJoin(id int64, on bool) error {
@@ -254,7 +250,7 @@ func (s *Store) RemoveMembership(orgID, userID int64) error {
 
 // GetMembership returns nil, nil when the person has no access to the organization.
 func (s *Store) GetMembership(orgID, userID int64) (*Member, error) {
-	ms, err := s.queryMembers(`WHERE m.org_id=? AND m.user_id=?`, orgID, userID)
+	ms, err := s.queryMembers(orgID, userID)
 	if err != nil || len(ms) == 0 {
 		return nil, err
 	}
@@ -263,19 +259,23 @@ func (s *Store) GetMembership(orgID, userID int64) (*Member, error) {
 
 // ListMembers lists who has access to an organization, owners first.
 func (s *Store) ListMembers(orgID int64) ([]Member, error) {
-	return s.queryMembers(`WHERE m.org_id=? ORDER BY m.role='owner' DESC, u.login COLLATE NOCASE`, orgID)
+	return s.queryMembers(orgID, 0)
 }
 
 // UserMemberships lists the organizations a person has access to.
 func (s *Store) UserMemberships(userID int64) ([]Member, error) {
-	return s.queryMembers(`WHERE m.user_id=? ORDER BY o.login COLLATE NOCASE`, userID)
+	return s.queryMembers(0, userID)
 }
 
-func (s *Store) queryMembers(where string, args ...any) ([]Member, error) {
-	q := `SELECT u.id, u.login, u.name, u.avatar_url, u.is_admin, u.disabled, u.session_epoch, u.created_at, u.last_login,
+// queryMembers lists one organization's members (userID 0: owners first,
+// then by login), one person's organizations (orgID 0: by name), or one
+// membership (both set).
+func (s *Store) queryMembers(orgID, userID int64) ([]Member, error) {
+	rows, err := s.db.Query(`SELECT u.id, u.login, u.name, u.avatar_url, u.is_admin, u.disabled, u.session_epoch, u.created_at, u.last_login,
 m.role, m.source, m.created_at, o.id, o.login, o.active
-FROM memberships m JOIN users u ON u.id=m.user_id JOIN orgs o ON o.id=m.org_id ` + where
-	rows, err := s.db.Query(q, args...)
+FROM memberships m JOIN users u ON u.id=m.user_id JOIN orgs o ON o.id=m.org_id
+WHERE (?=0 OR m.org_id=?) AND (?=0 OR m.user_id=?)
+ORDER BY o.login COLLATE NOCASE, m.role='owner' DESC, u.login COLLATE NOCASE`, orgID, orgID, userID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +386,6 @@ func (r ReviewStats) Findings() int { return r.Comments + r.Notes }
 
 // ReviewStatsSince summarizes one organization's reviews (or all, with AllAccounts) started at or after since.
 func (s *Store) ReviewStatsSince(accountID, since int64) (ReviewStats, error) {
-	where, args := accountWhere("account_id", accountID)
 	var r ReviewStats
 	var avg sql.NullFloat64
 	err := s.db.QueryRow(`SELECT COUNT(*),
@@ -397,7 +396,7 @@ func (s *Store) ReviewStatsSince(accountID, since int64) (ReviewStats, error) {
   COALESCE(SUM(sev_p1),0), COALESCE(SUM(sev_p2),0), COALESCE(SUM(sev_p3),0), COALESCE(SUM(sev_p4),0), COALESCE(SUM(sev_p5),0),
   COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
   AVG(CASE WHEN status='posted' AND finished_at>=started_at THEN finished_at-started_at END)
-FROM reviews WHERE started_at>=? AND `+where, append([]any{since}, args...)...).Scan(
+FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?)`, since, accountID, accountID).Scan(
 		&r.Reviews, &r.Posted, &r.Errors, &r.Approvals, &r.PRs, &r.Repos, &r.Comments, &r.Notes, &r.Fixed,
 		&r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.PromptTokens, &r.CompletionTokens, &avg)
 	r.AvgSeconds = int(avg.Float64)
@@ -417,10 +416,9 @@ type DayStats struct {
 func (s *Store) ReviewsPerDay(accountID int64, days int, now time.Time) ([]DayStats, error) {
 	today := now.UTC().Truncate(24 * time.Hour)
 	start := today.AddDate(0, 0, -(days - 1))
-	where, args := accountWhere("account_id", accountID)
 	rows, err := s.db.Query(`SELECT date(started_at,'unixepoch'), COALESCE(SUM(status='posted'),0), COALESCE(SUM(status='error'),0),
   COALESCE(SUM(comments+notes),0), COALESCE(SUM(sev_p1+sev_p2),0)
-FROM reviews WHERE started_at>=? AND `+where+` GROUP BY 1`, append([]any{start.Unix()}, args...)...)
+FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY 1`, start.Unix(), accountID, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -459,11 +457,10 @@ type RepoStats struct {
 
 // RepoStatsSince ranks repositories by reviews since a time.
 func (s *Store) RepoStatsSince(accountID, since int64, limit int) ([]RepoStats, error) {
-	where, args := accountWhere("account_id", accountID)
 	rows, err := s.db.Query(`SELECT repo, COALESCE(SUM(status='posted'),0), COUNT(DISTINCT CASE WHEN status='posted' THEN number END),
   COALESCE(SUM(comments+notes),0), COALESCE(SUM(sev_p1+sev_p2),0), COALESCE(SUM(status='error'),0), MAX(started_at)
-FROM reviews WHERE started_at>=? AND `+where+` GROUP BY repo ORDER BY 2 DESC, 7 DESC LIMIT ?`,
-		append(append([]any{since}, args...), limit)...)
+FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY repo ORDER BY 2 DESC, 7 DESC LIMIT ?`,
+		since, accountID, accountID, limit)
 	if err != nil {
 		return nil, err
 	}

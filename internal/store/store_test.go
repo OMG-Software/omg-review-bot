@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,5 +74,123 @@ func TestMigrateOldDatabase(t *testing.T) {
 	days, _ := st.ReviewsPerDay(500, 7, time.Now())
 	if len(days) != 7 || days[6].Posted != 1 {
 		t.Errorf("per-day = %+v", days)
+	}
+}
+
+// TestFilters covers the optional filters written into the SQL as
+// (?=… OR column=?) conditions, so an empty or AllAccounts value matches everything.
+func TestFilters(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, r := range []struct {
+		id, acct int64
+		name     string
+	}{{1, 500, "acme/web"}, {2, 500, "acme/api"}, {3, 600, "globex/core"}} {
+		if err := st.UpsertRepo(r.id, 10, r.acct, r.name, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []PR{
+		{Repo: "acme/web", Number: 1, AccountID: 500, Open: true, Status: "pending"},
+		{Repo: "acme/web", Number: 2, AccountID: 500, Open: false, Status: "closed"},
+		{Repo: "globex/core", Number: 1, AccountID: 600, Open: true, Status: "reviewed"},
+	} {
+		if err := st.SavePR(&p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().Unix()
+	for _, r := range []Review{
+		{Repo: "acme/web", Number: 1, AccountID: 500, Status: "posted", StartedAt: now},
+		{Repo: "acme/web", Number: 1, AccountID: 500, Status: "error", StartedAt: now},
+		{Repo: "acme/api", Number: 3, AccountID: 500, Status: "posted", StartedAt: now},
+		{Repo: "globex/core", Number: 1, AccountID: 600, Status: "posted", StartedAt: now},
+	} {
+		if _, err := st.CreateReview(&r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reviews := func(f ReviewFilter) int {
+		t.Helper()
+		_, n, err := st.QueryReviews(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for _, c := range []struct {
+		f    ReviewFilter
+		want int
+	}{
+		{ReviewFilter{AccountID: AllAccounts}, 4},
+		{ReviewFilter{AccountID: 500}, 3},
+		{ReviewFilter{AccountID: 500, Repo: "acme/web"}, 2},
+		{ReviewFilter{AccountID: 500, Status: "posted"}, 2},
+		{ReviewFilter{AccountID: 500, Repo: "acme/web", Status: "error"}, 1},
+		{ReviewFilter{AccountID: 600, Repo: "acme/web"}, 0},
+	} {
+		if got := reviews(c.f); got != c.want {
+			t.Errorf("QueryReviews(%+v) = %d, want %d", c.f, got, c.want)
+		}
+	}
+
+	if prs, _ := st.ListPRs(500, false, 10); len(prs) != 1 {
+		t.Errorf("open acme PRs = %d, want 1", len(prs))
+	}
+	if prs, _ := st.ListPRs(500, true, 10); len(prs) != 2 {
+		t.Errorf("all acme PRs = %d, want 2", len(prs))
+	}
+	if prs, _ := st.ListPRs(AllAccounts, true, 10); len(prs) != 3 {
+		t.Errorf("all PRs = %d, want 3", len(prs))
+	}
+	if repos, _ := st.ListRepos(500); len(repos) != 2 || repos[0].FullName != "acme/api" {
+		t.Errorf("acme repos = %+v", repos)
+	}
+
+	st.Log("info", "acme/web", 1, "on the PR")
+	st.Log("info", "acme/web", 0, "on the repo")
+	st.Log("info", "globex/core", 1, "elsewhere")
+	if acts, _ := st.RecentActivity(500, 10, "", 0); len(acts) != 2 {
+		t.Errorf("acme activity = %d, want 2", len(acts))
+	}
+	if acts, _ := st.RecentActivity(500, 10, "acme/web", 1); len(acts) != 1 || acts[0].Message != "on the PR" {
+		t.Errorf("PR activity = %+v", acts)
+	}
+
+	for _, u := range []struct {
+		id    int64
+		login string
+	}{{41, "zed"}, {42, "amy"}, {43, "bob"}} {
+		if err := st.EnsureUser(u.id, u.login); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertOrg(600, "globex", "Organization", 11); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.SetMembership(500, 42, RoleMember, SourceManual)
+	_ = st.SetMembership(500, 43, RoleMember, SourceManual)
+	_ = st.SetMembership(500, 41, RoleOwner, SourceGitHub)
+	_ = st.SetMembership(600, 42, RoleOwner, SourceManual)
+	ms, _ := st.ListMembers(500)
+	var order []string
+	for _, m := range ms {
+		order = append(order, m.Login)
+	}
+	if strings.Join(order, ",") != "zed,amy,bob" {
+		t.Errorf("members = %v, want owners first then by login", order)
+	}
+	if ms, _ := st.UserMemberships(42); len(ms) != 2 || ms[0].OrgLogin != "acme" || ms[1].Role != RoleOwner {
+		t.Errorf("amy's memberships = %+v", ms)
+	}
+	if m, _ := st.GetMembership(600, 43); m != nil {
+		t.Errorf("bob isn't in globex, got %+v", m)
 	}
 }
