@@ -74,6 +74,9 @@ type Bot struct {
 	lastSweep    time.Time
 	queued       map[string]bool
 
+	docsMu    sync.Mutex
+	docsCache map[string]docsEntry // project guideline docs by repo@ref
+
 	jobs chan job
 	wake chan struct{}
 }

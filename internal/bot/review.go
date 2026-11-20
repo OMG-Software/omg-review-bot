@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,7 +51,7 @@ var reviewSchema = map[string]any{
 				"properties": map[string]any{
 					"path":     map[string]any{"type": "string"},
 					"line":     map[string]any{"type": "integer"},
-					"severity": map[string]any{"type": "string", "enum": settings.Severities},
+					"severity": map[string]any{"type": "string", "enum": severityIDs()},
 					"title":    map[string]any{"type": "string"},
 					"body":     map[string]any{"type": "string"},
 				},
@@ -258,12 +259,8 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		return "", fmt.Errorf("list review comments: %w", err)
 	}
 	login := b.BotLogin()
-	var mine []github.ReviewComment
-	for _, c := range existing {
-		if c.User.Login == login && c.InReplyToID == 0 {
-			mine = append(mine, c)
-		}
-	}
+	mine := botRoots(existing, login)
+	threads, threadsKnown := b.loadBotThreads(ctx, cl, pr, mine)
 
 	// Context budget: the skill gets up to 35% of the input window and the
 	// diff gets what's left after the system prompt and PR header.
@@ -272,8 +269,19 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	if truncated {
 		b.logf("warn", pr.Repo, pr.Number, "skill %q was truncated to fit a %d-token context", sk.Name, st.LLM.ContextTokens)
 	}
-	fmt.Fprintf(&raw, "skill references sent: %s\n\n", listOrNone(refs))
-	system := reviewSystemPrompt(sk.Name, skillText)
+	// The project's own docs come from the base commit: a PR can't change the rules it is judged by.
+	changedPaths := make([]string, 0, len(files))
+	for _, f := range files {
+		changedPaths = append(changedPaths, f.Filename)
+	}
+	baseRef := gp.Base.SHA
+	if baseRef == "" {
+		baseRef = gp.Base.Ref
+	}
+	guide, docsUsed := b.guidelinesFor(ctx, st, cl, pr.Repo, pr.Number, baseRef,
+		fmt.Sprintf("%s at %s", gp.Base.Ref, short(baseRef)), changedPaths, 15)
+	fmt.Fprintf(&raw, "skill references sent: %s\nproject guidelines sent: %s\n\n", listOrNone(refs), listOrNone(docsUsed))
+	system := reviewSystemPrompt(sk.Name, skillText) + guide
 	header := prHeader(gp)
 	budget := totalChars - len(system) - len(header) - 3000
 	if budget < 2000 {
@@ -281,6 +289,16 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	}
 	p := buildPlan(st, files, budget)
 	rec.Batches = len(p.batches)
+
+	// First check whether earlier findings have since been fixed: confirmed
+	// ones get a reply and are resolved, and no longer block approval.
+	fixed := 0
+	if threadsKnown {
+		vu := b.verifyFixes(ctx, st, lc, cl, pr, head, threads, files, &raw)
+		fixed = vu.fixed
+		rec.PromptTokens += vu.usage.PromptTokens
+		rec.CompletionTokens += vu.usage.CompletionTokens
+	}
 
 	if len(p.batches) == 0 {
 		rec.Status = "nothing to review"
@@ -297,7 +315,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		}
 		user := batchPrompt(header, i, len(p.batches), bt, previousFor(mine, bt.paths))
 		var out modelOutput
-		usage, rawOut, err := b.chatJSON(ctx, lc, st, system, user, &out)
+		usage, rawOut, err := b.chatJSON(ctx, lc, st, reviewSchema, "code_review", system, user, &out)
 		fmt.Fprintf(&raw, "===== part %d/%d =====\n%s\n\n", i+1, len(p.batches), rawOut)
 		rec.PromptTokens += usage.PromptTokens
 		rec.CompletionTokens += usage.CompletionTokens
@@ -320,43 +338,80 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	default:
 		summary = b.synthesizeSummary(ctx, lc, st, gp, summaries, append(append([]finding{}, inline...), notes...))
 	}
-	rereview := pr.ReviewedSHA != "" && pr.ReviewedSHA != head
-	body := reviewBody(summary, head, inline, notes, p, dropped, st.LLM.Model, sk.Name, rereview)
 
-	drafts := make([]github.DraftComment, 0, len(inline))
-	for _, f := range inline {
-		drafts = append(drafts, github.DraftComment{Path: f.Path, Line: f.Line, Side: "RIGHT", Body: commentBody(f)})
+	// Approve when nothing at or above the approval level is left open: no
+	// unresolved earlier thread and no new finding.
+	blocking := 0
+	if st.Review.ApprovalOn() {
+		blocking = countBlocking(st, threads) + countBlockingFindings(st, inline) + countBlockingFindings(st, notes)
 	}
-	req := github.ReviewRequest{CommitID: head, Body: body, Event: "COMMENT", Comments: drafts}
-	rv, err := cl.CreateReview(ctx, pr.Repo, pr.Number, req)
-	if err != nil && github.IsStatus(err, 422) && len(drafts) > 0 {
+	event := "COMMENT"
+	if st.Review.ApprovalOn() && blocking == 0 {
+		event = "APPROVE"
+	}
+	ri := reviewInfo{summary: summary, head: head, inline: inline, notes: notes, plan: p, dropped: dropped,
+		model: st.LLM.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed}
+	post := func(ri reviewInfo, event string) (*github.Review, []github.DraftComment, error) {
+		ri.verdict = verdictLine(st, event, blocking)
+		drafts := make([]github.DraftComment, 0, len(ri.inline))
+		for _, f := range ri.inline {
+			drafts = append(drafts, github.DraftComment{Path: f.Path, Line: f.Line, Side: "RIGHT", Body: commentBody(f)})
+		}
+		req := github.ReviewRequest{CommitID: head, Body: reviewBody(ri), Event: event, Comments: drafts}
+		rv, err := cl.CreateReview(ctx, pr.Repo, pr.Number, req)
+		return rv, drafts, err
+	}
+	rv, drafts, err := post(ri, event)
+	if err != nil && github.IsStatus(err, 422) && len(ri.inline) > 0 {
 		// GitHub rejected an inline position (e.g. the PR moved on). Post everything in the body instead.
 		b.logf("warn", pr.Repo, pr.Number, "inline comments rejected (%v); posting findings in the review body", err)
-		req.Comments = nil
-		req.Body = reviewBody(summary, head, nil, append(append([]finding{}, inline...), notes...), p, dropped, st.LLM.Model, sk.Name, rereview)
-		drafts = nil
-		rv, err = cl.CreateReview(ctx, pr.Repo, pr.Number, req)
+		ri.notes = append(append([]finding{}, ri.inline...), ri.notes...)
+		ri.inline = nil
+		rv, drafts, err = post(ri, event)
+	}
+	if err != nil && event == "APPROVE" && (github.IsStatus(err, 422) || github.IsStatus(err, 403)) {
+		b.logf("warn", pr.Repo, pr.Number, "GitHub refused the approval (%v); posting the review as a comment", err)
+		event = "COMMENT"
+		rv, drafts, err = post(ri, event)
 	}
 	if err != nil {
 		return "", fmt.Errorf("post review: %w", err)
 	}
+	if st.Review.ApprovalOn() && blocking > 0 {
+		b.withdrawApproval(ctx, st, cl, pr, login, blocking)
+	}
 	rec.GHReviewID, rec.URL = rv.ID, rv.HTMLURL
-	rec.Summary, rec.Comments, rec.Notes, rec.Status = summary, len(drafts), len(notes), "posted"
-	b.logf("info", pr.Repo, pr.Number, "posted review of %s: %d inline comments, %d notes (%d parts, %d+%d tokens)",
-		short(head), len(drafts), len(notes), len(p.batches), rec.PromptTokens, rec.CompletionTokens)
+	rec.Summary, rec.Comments, rec.Notes, rec.Status = summary, len(drafts), len(ri.notes), "posted"
+	b.logf("info", pr.Repo, pr.Number, "posted review of %s (%s): %d inline comments, %d notes, %d earlier findings resolved as fixed (%d parts, %d+%d tokens)",
+		short(head), strings.ToLower(event), len(drafts), len(ri.notes), fixed, len(p.batches), rec.PromptTokens, rec.CompletionTokens)
 	return head, nil
+}
+
+// verdictLine explains the approval decision in the review body.
+func verdictLine(st settings.Settings, event string, blocking int) string {
+	if !st.Review.ApprovalOn() {
+		return ""
+	}
+	level := settings.SeverityInfo(st.Review.ApprovalLevel).Label
+	if event == "APPROVE" {
+		return fmt.Sprintf("✅ **Approved:** no unresolved findings at %s or above.", level)
+	}
+	if blocking == 0 {
+		return "" // approval was refused by GitHub; the log says why
+	}
+	return fmt.Sprintf("⛔ **Not approved:** %d unresolved finding(s) at %s or above. I'll approve once they're fixed or resolved.", blocking, level)
 }
 
 // chatJSON asks for structured output, retrying once with a nudge if the
 // model's reply isn't valid JSON.
-func (b *Bot) chatJSON(ctx context.Context, lc llm.Client, st settings.Settings, system, user string, out any) (llm.Response, string, error) {
+func (b *Bot) chatJSON(ctx context.Context, lc llm.Client, st settings.Settings, schema map[string]any, schemaName, system, user string, out any) (llm.Response, string, error) {
 	msgs := []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}}
 	var total llm.Response
 	var rawAll strings.Builder
 	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
 		resp, err := lc.Chat(ctx, llm.Request{
-			Messages: msgs, Schema: reviewSchema, SchemaName: "code_review",
+			Messages: msgs, Schema: schema, SchemaName: schemaName,
 			Temperature: st.LLM.Temperature, MaxTokens: st.LLM.MaxOutputTokens,
 		})
 		if err != nil {
@@ -370,7 +425,7 @@ func (b *Bot) chatJSON(ctx context.Context, lc llm.Client, st settings.Settings,
 		}
 		hint := "Your reply was not a valid JSON object in the required format."
 		if resp.Truncated {
-			hint = "Your reply was cut off because it was too long. Report at most the 8 most important issues, with short bodies."
+			hint = "Your reply was cut off because it was too long. Be briefer: report at most the 8 most important items, with short text."
 		}
 		msgs = append(msgs,
 			llm.Message{Role: "assistant", Content: textutil.Truncate(resp.Content, 2000)},
@@ -389,7 +444,7 @@ func (b *Bot) synthesizeSummary(ctx context.Context, lc llm.Client, st settings.
 	if len(fs) > 0 {
 		sb.WriteString("\nIssues found:\n")
 		for _, f := range fs {
-			fmt.Fprintf(&sb, "- [%s] %s (%s)\n", f.Severity, f.Title, f.Path)
+			fmt.Fprintf(&sb, "- %s %s (%s)\n", settings.SeverityInfo(f.Severity).Label, f.Title, f.Path)
 		}
 	}
 	sb.WriteString("\nWrite one overall summary of the pull request in 2-5 sentences: what it changes and the main risks. Plain markdown, no headings, no preamble.")
@@ -411,7 +466,7 @@ func (b *Bot) synthesizeSummary(ctx context.Context, lc llm.Client, st settings.
 // prepareFindings normalizes, filters, de-duplicates and places findings:
 // inline ones target a commentable diff line; the rest become notes.
 func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.ReviewComment) (inline, notes []finding, dropped int) {
-	minRank := severityRank(st.Review.MinSeverity)
+	maxRank := settings.SeverityRank(st.Review.CommentLevel)
 	seen := map[string]bool{}
 	var kept []finding
 	for _, f := range all {
@@ -424,7 +479,7 @@ func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.
 		if f.Title == "" {
 			f.Title = textutil.Truncate(textutil.FirstLine(f.Body), 100)
 		}
-		if severityRank(f.Severity) < minRank {
+		if settings.SeverityRank(f.Severity) > maxRank {
 			dropped++
 			continue
 		}
@@ -440,7 +495,9 @@ func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.
 		}
 		kept = append(kept, f)
 	}
-	sort.SliceStable(kept, func(i, j int) bool { return severityRank(kept[i].Severity) > severityRank(kept[j].Severity) })
+	sort.SliceStable(kept, func(i, j int) bool {
+		return settings.SeverityRank(kept[i].Severity) < settings.SeverityRank(kept[j].Severity)
+	})
 	if max := st.Review.MaxComments; len(kept) > max {
 		dropped += len(kept) - max
 		kept = kept[:max]
@@ -500,7 +557,7 @@ func isDuplicate(f finding, mine []github.ReviewComment) bool {
 		if d < 0 {
 			d = -d
 		}
-		if d <= 10 && similarity(f.Title, textutil.FirstLine(c.Body)) >= 0.5 {
+		if d <= 10 && similarity(f.Title, findingTitle(c.Body)) >= 0.5 {
 			return true
 		}
 	}
@@ -533,26 +590,41 @@ func words(s string) map[string]bool {
 	return out
 }
 
-func normSeverity(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "critical", "blocker", "severe":
-		return "critical"
-	case "major", "high", "error", "important":
-		return "major"
-	case "nit", "low", "info", "style", "trivial", "suggestion", "nitpick":
-		return "nit"
-	default:
-		return "minor"
+var pLevelRE = regexp.MustCompile(`\bp([1-5])\b`)
+
+func severityIDs() []string {
+	ids := make([]string, 0, len(settings.Severities))
+	for _, s := range settings.Severities {
+		ids = append(ids, s.ID)
 	}
+	return ids
 }
 
-func severityRank(s string) int {
-	for i, v := range settings.Severities {
-		if v == s {
-			return i
-		}
+// normSeverity maps whatever the model wrote onto P1..P5. Besides the IDs it
+// accepts full labels ("[P3] MINOR (Defect)") and common words for each level.
+func normSeverity(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if m := pLevelRE.FindStringSubmatch(s); m != nil {
+		return "P" + m[1]
 	}
-	return 1
+	switch {
+	case strings.Contains(s, "quality"):
+		return "P4"
+	case strings.Contains(s, "defect"):
+		return "P3"
+	}
+	switch strings.Trim(s, "[]() ") {
+	case "critical", "blocker", "severe":
+		return "P1"
+	case "major", "high", "error", "important":
+		return "P2"
+	case "maintainability", "refactor", "readability", "suggestion", "improvement", "test", "tests":
+		return "P4"
+	case "nit", "nitpick", "low", "info", "style", "trivial", "cosmetic":
+		return "P5"
+	default: // "minor", "medium", "bug", unknown
+		return "P3"
+	}
 }
 
 func short(sha string) string {

@@ -91,6 +91,11 @@ textarea.mono { font-size: 13px; }
 .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0 12px; }
 .actions.end { align-self: flex-end; margin-bottom: 12px; }
 .result { font-size: 13px; overflow-wrap: anywhere; }
+.dropzone { border: 2px dashed var(--line); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 10px;
+  transition: border-color .15s, background .15s; }
+.dropzone .drop-title { margin: 0 0 8px; }
+.dropzone .drop-status { margin: 8px 0 0; min-height: 1em; }
+body.dragging .dropzone { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .savebar { position: sticky; bottom: 0; padding: 12px 0; background: var(--bg); }
 
 button { font: inherit; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }

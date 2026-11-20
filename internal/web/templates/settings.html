@@ -62,13 +62,26 @@
     <label>Wait after push (s) <input name="rv_debounce" type="number" min="0" value="{{$s.Review.DebounceSeconds}}"></label>
     <label>Max comments per review <input name="rv_max_comments" type="number" min="1" max="100" value="{{$s.Review.MaxComments}}"></label>
     <label>Max files per PR <input name="rv_max_files" type="number" min="1" value="{{$s.Review.MaxFiles}}"></label>
-    <label>Minimum severity
-      <select name="rv_min_severity">{{range .D.Severities}}<option {{if eq . $s.Review.MinSeverity}}selected{{end}}>{{.}}</option>{{end}}</select></label>
   </div>
+  <div class="row">
+    <label>Post comments at
+      <select name="rv_comment_level">{{range .D.Severities}}<option value="{{.ID}}" {{if eq .ID $s.Review.CommentLevel}}selected{{end}}>{{.Label}} and above</option>{{end}}</select>
+      <small>Less severe findings are counted in the review summary but not posted.</small></label>
+    <label>Approve when nothing is unresolved at
+      <select name="rv_approval_level"><option value="off" {{if eq "off" $s.Review.ApprovalLevel}}selected{{end}}>Never approve</option>{{range .D.Severities}}<option value="{{.ID}}" {{if eq .ID $s.Review.ApprovalLevel}}selected{{end}}>{{.Label}} and above</option>{{end}}</select>
+      <small>Can't be broader than the comment level. The bot withdraws its approval if a new push brings back a finding at this level.</small></label>
+  </div>
+  <p class="hint">Levels: {{range $i, $v := .D.Severities}}{{if $i}} · {{end}}<b>{{$v.Label}}</b> {{$v.Meaning}}{{end}}.
+    When a later push fixes a finding, the bot replies in its thread to confirm and then resolves it.</p>
   <div class="row">
     <label class="grow">Skip PRs with these labels <textarea name="rv_skip_labels" rows="3">{{lines $s.Review.SkipLabels}}</textarea></label>
     <label class="grow">Ignore files matching <small>(gitignore-style, one per line)</small><textarea name="rv_ignore" rows="6" class="mono">{{lines $s.Review.IgnorePatterns}}</textarea></label>
   </div>
+  <label>Project guideline files <small>(gitignore-style, one per line; empty = don't read any)</small>
+    <textarea name="rv_guidelines" rows="5" class="mono">{{lines $s.Review.GuidelineFiles}}</textarea>
+    <small>The repository's own rules and conventions, read from the PR's base branch and applied in reviews and replies.
+      A pattern with a <code>/</code> matches from the repository root. <code>CLAUDE.md</code> and <code>AGENTS.md</code> in a subdirectory only apply to PRs that change files under it.
+      They get up to 15% of the model context.</small></label>
 </section>
 
 <section class="card">

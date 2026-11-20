@@ -2,14 +2,22 @@
 
 A self-hosted GitHub pull request reviewer. It's a single Go binary for Windows or Linux that
 reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama**) or with
-**Ollama Cloud**. It follows a **review skill** (`SKILL.md`) that you provide.
+**Ollama Cloud**. It follows a **review skill** (`SKILL.md`) that you install. We recommend
+[code-change-review](https://github.com/OMG-Software/code-change-review-skill).
 
 - **No public endpoint needed.** It connects as a GitHub App and polls, so it works on a laptop
   behind NAT with no webhook, open port or tunnel.
 - **Reviews every push.** New PRs are reviewed, and each new commit triggers a re-review after
   a short wait. It doesn't repeat issues it has already raised.
-- **Inline comments.** Each finding is posted on the exact changed line, with a summary on top.
-  It comments only: it never approves or blocks a PR.
+- **Inline comments, graded P1–P5.** Each finding is posted on the exact changed line, labelled
+  `[P1] CRITICAL`, `[P2] MAJOR`, `[P3] MINOR (Defect)`, `[P4] MINOR (Quality)` or `[P5] NIT`,
+  with a summary on top. You choose the lowest level that gets posted.
+- **Closes the loop.** When a later push fixes a finding, the bot replies in its thread to confirm
+  the fix, then resolves the thread.
+- **Optional approval.** Pick an approval level and the bot approves once nothing at that level
+  or above is unresolved, and withdraws its approval if a later push brings one back.
+- **Follows your project's rules.** It reads the repository's own docs (`CLAUDE.md`, `AGENTS.md`,
+  `CONTRIBUTING.md`, style guides) from the base branch and reviews against them, citing the rule.
 - **Conversations.** It replies when someone answers one of its comments, and answers when
   `@<app-name>` is mentioned in the PR conversation.
 - **Web UI** for settings, the skill, repositories, PR status, review history (including the raw
@@ -79,8 +87,41 @@ In **Settings → Model**:
 
 ### 4. Add your skill
 
-On the **Skill** page, upload a `.zip` of your skill folder or a single `SKILL.md`, or edit it in
-the page. Until you add one, the bot uses built-in general review guidelines.
+Until you add one, the bot uses short built-in review guidelines. We recommend
+[code-change-review](https://github.com/OMG-Software/code-change-review-skill). It isn't bundled
+with the bot, so you always get its current version. Install it in either of these ways:
+
+**Option A: link a clone (easiest to keep up to date).** Clone the skill next to the bot:
+
+```powershell
+git clone https://github.com/OMG-Software/code-change-review-skill C:\prbot\code-change-review-skill
+```
+
+In **Settings → Reviews → Skill folder**, enter the skill's folder inside the clone,
+`C:\prbot\code-change-review-skill\skills\code-change-review`, and save. To update the skill
+later, run `git pull` in the clone. The next review uses the new version; no restart needed.
+
+**Option B: drop a zip on the web UI.** On the skill's GitHub page, click **Code → Download ZIP**.
+Then drag the zip onto the bot's **Skill** page (anywhere on the page), or choose it with the file
+picker. The zip goes to the machine the bot runs on, even if your browser is on another one, and
+is installed into the bot's skill folder (`<data>/skill`), replacing the current skill. It applies
+from the next review, with no restart. To update, download and drop the new zip.
+
+How an uploaded zip is installed:
+
+- The folder that holds `SKILL.md` becomes the skill, wherever it sits in the zip, so GitHub's
+  download (`code-change-review-skill-main/skills/code-change-review/SKILL.md`) works as is.
+  Files outside that folder, such as the repository README, are left out.
+- A zip with several skills at the same level is refused; zip just the one you want. A zip
+  without `SKILL.md`, or one over 20 MB unpacked, is refused too. In every refused case the
+  current skill stays in place.
+- If **Settings → Skill folder** points into a git clone (Option A), an upload never overwrites
+  the clone. The zip is installed into `<data>/skill` instead, and the setting switches to it.
+- The page then confirms the skill's name, where it was installed and how many reference files it
+  has. The install is also recorded in the Activity log.
+
+The **Skill** page shows the active skill's name and which reference files it sends. You can also
+upload any other skill: a `.zip` of its folder, or a single `SKILL.md` to replace just that file.
 
 ### 5. Start reviewing
 
@@ -160,7 +201,42 @@ tokens each takes. Each review's raw output begins with a `skill references sent
 
 Reviews follow the bot's own output format (JSON with path, line, severity, title and body). If
 your skill describes a different report format, that part is overridden. Its review criteria
-still apply.
+still apply. Skills that grade with `[CRITICAL]`/`[MAJOR]`/`[MINOR]`/`[NIT]` (as code-change-review
+does) are mapped onto the bot's levels: CRITICAL → P1, MAJOR → P2, a MINOR defect → P3, a MINOR
+quality issue → P4, NIT → P5. Each comment's body has an *Issue / Why it matters / Suggested fix*
+shape.
+
+| Level | Meaning |
+|---|---|
+| `[P1] CRITICAL` | Security hole, data loss or corruption, crash on a main path |
+| `[P2] MAJOR` | Wrong behaviour people will hit, or a serious risk under realistic conditions |
+| `[P3] MINOR (Defect)` | A real defect with limited impact, such as an edge case or a missing timeout |
+| `[P4] MINOR (Quality)` | Not a bug: maintainability, duplication, missing tests, clarity |
+| `[P5] NIT` | Style or taste with no behavioural effect |
+
+### Project guidelines
+
+Besides the skill, the bot reads the repository's own rules and conventions and gives them to the
+model with every review, thread reply and mention. The model applies them, cites the file and
+rule in findings that rest on them, and doesn't flag what they explicitly allow. Real defects are
+reported regardless. This works with any skill: a chat model can't open files itself, so the
+bot fetches them and puts them in the prompt.
+
+- **Which files:** set by *Project guideline files* in Settings, as gitignore-style patterns. By
+  default: `CLAUDE.md` and `AGENTS.md` in any directory, plus root-level `CONTRIBUTING.md` (also in
+  `.github/` and `docs/`), `.github/copilot-instructions.md`, `STYLEGUIDE.md`, `STYLE_GUIDE.md`,
+  `CODING_STANDARDS.md` and `CONVENTIONS.md`. Files matching *Ignore files* (such as `vendor/`)
+  are skipped. Clear the list to turn this off.
+- **Scope:** a `CLAUDE.md` or `AGENTS.md` in a subdirectory is only sent when the PR changes files
+  under that directory, and takes precedence over the root one there. Other files apply to every PR.
+- **Base branch:** the files are read from the PR's base commit, not its head, so a PR can't
+  rewrite the rules it's reviewed against. Changes a PR makes to them are reviewed like any other
+  change.
+- **Budget:** they get up to 15% of the model context in reviews (10% in replies), root files first.
+  Files that don't fit are left out and logged. Each review's raw output lists them under
+  `project guidelines sent:`.
+- **API use:** one repository file listing plus one request per matching file, cached for 10
+  minutes per repository and base.
 
 ## How it works
 
@@ -178,12 +254,22 @@ the API rate limit. The repo list itself refreshes every 15 minutes by default.
    combined at the end.
 3. The model returns JSON findings. The bot checks each finding's file and line against the
    diff, moving it to the nearest changed line up to 3 lines away if needed. It drops findings
-   the bot already raised in an earlier review. It applies the minimum severity and the
-   comment cap.
-4. It posts **one** GitHub review: inline comments plus a summary. Findings that can't be placed
+   the bot already raised in an earlier review. It drops findings below the *comment level* and
+   applies the comment cap.
+4. On a re-review, it first checks its unresolved findings on files that changed since the last
+   review. For each file it gives the model the current file and the earlier findings, and asks
+   which are fixed. For each confirmed fix it **replies in the thread** ("✅ Confirmed fixed in
+   `abc1234`…") **and then resolves the thread**. A finding whose file the PR no longer changes is
+   closed the same way. Anything the model isn't sure about stays open.
+5. It posts **one** GitHub review: inline comments plus a summary. Findings that can't be placed
    on a changed line go in the summary. If GitHub rejects an inline position, the review is
    reposted with every finding in the summary, so nothing is lost.
-5. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
+6. With an *approval level* set, the review is an **approval** when no finding at that level or
+   above is open: no unresolved earlier thread and no new finding. Otherwise it's a comment that
+   says how many are open, and any earlier approval by the bot is dismissed (a later comment
+   doesn't cancel an approval on GitHub). Approval is re-checked between pushes too, so resolving
+   the last open thread, by fix or by hand, gets the PR approved.
+7. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
    until the next push or **Review now**.
 
 **PR statuses** on the Pull requests page:
@@ -201,7 +287,10 @@ the API rate limit. The repo list itself refreshes every 15 minutes by default.
 
 **Conversations.** When someone replies in a thread the bot started, the bot answers in that
 thread. It's given the diff hunk, the current code around the line (±30 lines) and the whole
-thread. It can agree that an issue is resolved, defend its comment, or answer the question.
+thread (for an outdated comment, ±60 lines). It can agree that an issue is resolved, defend its
+comment, or answer the question. When it agrees the concern no longer applies, because the code
+now fixes it or the person showed it isn't a real problem, it says so in its reply and then
+resolves the thread.
 When someone writes `@<app-name>` in the PR conversation, the bot answers there, using the
 changed-file list, its latest review summary and the recent comments.
 
@@ -220,10 +309,12 @@ Everything except the command-line flags is set in the web UI and stored in the 
 |---|---|---|
 | Wait after push | 60 s | Delay before reviewing, so several quick pushes trigger one review |
 | Max comments per review | 20 | The most severe findings are kept |
-| Minimum severity | `nit` | `nit` < `minor` < `major` < `critical` |
+| Post comments at | `[P5] NIT` and above | Lower levels are counted in the summary, not posted. Replaces *Minimum severity*: a saved `nit`/`minor`/`major`/`critical` becomes P5/P4/P2/P1. |
+| Approve when nothing is unresolved at | Never approve | A level from P1 to P5. Can't be broader than the comment level. For example, comments at P4 with approval at P3: the bot approves when no P1–P3 finding is open, even with open P4 comments. |
 | Max files per PR | 150 | Remaining files are listed as not reviewed |
 | Skip drafts | on | |
 | Skip labels | `no-bot-review`, `skip-review` | |
+| Project guideline files | `CLAUDE.md`, `AGENTS.md`, root `CONTRIBUTING.md`, style guides … | See [Project guidelines](#project-guidelines). Empty = off. |
 | Ignore files | lockfiles, `go.sum`, `vendor/`, `node_modules/`, `dist/`, `*.min.js`, `*.map`, `*.pb.go`, `*.snap`, `*.svg` | gitignore-style patterns |
 | Replies / mentions | on / on | Max 5 bot replies per thread |
 | Poll interval | 60 s | Repo list refreshes every 15 min |
@@ -267,7 +358,9 @@ rebuild), then restart the bot. Reviews that were interrupted are re-queued on s
 | GitHub test: "isn't installed anywhere yet" | The credentials work; install the App on your org (step 2). |
 | No repositories listed | The App isn't installed on them, or the *Only these orgs* setting excludes the org. Click **Sync from GitHub**. |
 | An open PR is never reviewed | It's probably `baseline` (it was open before the repo was watched). Push to it or click **Review now**. |
-| Reviews post with zero findings | Open the review's **Raw model output**. An empty `"comments": []` means the model found nothing, which small models often do, so try a larger code model. If the raw output has comments that weren't posted, they were filtered as duplicates or below the minimum severity. |
+| Reviews post with zero findings | Open the review's **Raw model output**. An empty `"comments": []` means the model found nothing, which small models often do, so try a larger code model. If the raw output has comments that weren't posted, they were filtered as duplicates or below the comment level. |
+| Fixed findings aren't resolved, or the bot never approves | Thread states come from GitHub's GraphQL API. Check the activity log for "could not read review thread states". While they can't be read, every finding counts as open, so the bot doesn't approve. The model's fix checks are in the review's raw output under `fix check:`. |
+| "could not withdraw approval" | The base branch's protection limits who can dismiss reviews. Allow the App to dismiss reviews, or dismiss the approval by hand. |
 | "used all its output tokens on reasoning" | Reasoning model; raise **Max output tokens** or switch model. |
 | "model context … is too small" | Raise **Context tokens** (and the model's loaded context), or shorten the skill. |
 | "did not return valid JSON" | Turn on **Enforce JSON schema output**. If your server rejects it, use a stronger model. |
@@ -305,8 +398,8 @@ go run ./cmd/prbot -data data-dev -listen 127.0.0.1:8087
 | Package | Responsibility |
 |---|---|
 | `cmd/prbot` | Entry point, flags, Windows service / signal handling |
-| `internal/bot` | Polling, the job queue and worker, reviews, replies, prompts |
-| `internal/github` | GitHub App auth (JWT, installation tokens) and the REST calls used |
+| `internal/bot` | Polling, the job queue and worker, reviews, replies, prompts, fix checks and approval (`resolve.go`) |
+| `internal/github` | GitHub App auth (JWT, installation tokens), the REST calls used, and GraphQL for review threads |
 | `internal/llm` | OpenAI-compatible and native Ollama clients, JSON extraction |
 | `internal/skill` | `SKILL.md` parsing, zip install, language-aware reference selection |
 | `internal/diff` | Unified-diff parsing and line-numbered rendering |

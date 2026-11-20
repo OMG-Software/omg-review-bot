@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -302,9 +303,11 @@ func parseSettings(r *http.Request, cur settings.Settings) settings.Settings {
 	v.Review.SkipDrafts = on("rv_skip_drafts")
 	v.Review.SkipLabels = textutil.SplitList(r.FormValue("rv_skip_labels"))
 	v.Review.IgnorePatterns = textutil.SplitList(r.FormValue("rv_ignore"))
+	v.Review.GuidelineFiles = textutil.SplitList(r.FormValue("rv_guidelines"))
 	v.Review.DebounceSeconds = num("rv_debounce", v.Review.DebounceSeconds)
 	v.Review.MaxComments = num("rv_max_comments", v.Review.MaxComments)
-	v.Review.MinSeverity = f("rv_min_severity")
+	v.Review.CommentLevel = f("rv_comment_level")
+	v.Review.ApprovalLevel = f("rv_approval_level")
 	v.Review.MaxFiles = num("rv_max_files", v.Review.MaxFiles)
 	v.Review.ReviewExisting = on("rv_existing")
 
@@ -401,11 +404,26 @@ func (s *Server) skillUpload(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, "/skill", err)
 		return
 	}
-	dir := s.bot.SkillDir(s.bot.Settings())
-	switch strings.ToLower(filepath.Ext(hdr.Filename)) {
-	case ".zip":
+	st := s.bot.Settings()
+	dir := s.bot.SkillDir(st)
+	// A Skill folder the user pointed at a git clone is theirs to manage
+	// (updated with git pull): an upload must not replace it.
+	clone := st.Review.SkillDir != "" && inGitCheckout(dir)
+	note := ""
+	switch ext := strings.ToLower(filepath.Ext(hdr.Filename)); {
+	case ext == ".zip" && clone:
+		def := st
+		def.Review.SkillDir = ""
+		dir = s.bot.SkillDir(def) // the bot's own <data>/skill folder
+		if err = skill.InstallZip(data, dir); err == nil {
+			note = fmt.Sprintf(" Settings → Skill folder pointed at a git clone (%s), which was left untouched; it now points at the uploaded skill.", st.Review.SkillDir)
+			err = settings.Save(s.store, def)
+		}
+	case ext == ".zip":
 		err = skill.InstallZip(data, dir)
-	case ".md", ".markdown":
+	case (ext == ".md" || ext == ".markdown") && clone:
+		err = fmt.Errorf("the skill folder is a git clone (%s): edit SKILL.md there, or upload a .zip of a whole skill to install it separately", dir)
+	case ext == ".md" || ext == ".markdown":
 		err = skill.WriteSkillFile(dir, string(data))
 	default:
 		err = errors.New("upload a .zip of the skill folder or a SKILL.md file")
@@ -414,7 +432,32 @@ func (s *Server) skillUpload(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, "/skill", err)
 		return
 	}
-	redirectMsg(w, r, "/skill", "Skill installed from "+hdr.Filename+".")
+	sk, err := skill.Load(dir)
+	if err != nil {
+		redirectErr(w, r, "/skill", fmt.Errorf("installed %s, but it doesn't load: %w", hdr.Filename, err))
+		return
+	}
+	s.store.Log("info", "", 0, fmt.Sprintf("installed skill %q from %s into %s (%d reference files)", sk.Name, hdr.Filename, dir, len(sk.References)))
+	redirectMsg(w, r, "/skill", fmt.Sprintf("Installed skill %q from %s into %s, with %d reference files. It applies from the next review.%s",
+		sk.Name, hdr.Filename, dir, len(sk.References), note))
+}
+
+// inGitCheckout reports whether dir is inside a git working tree.
+func inGitCheckout(dir string) bool {
+	d, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return false
+		}
+		d = parent
+	}
 }
 
 func (s *Server) skillSave(w http.ResponseWriter, r *http.Request) {
