@@ -14,10 +14,11 @@ import (
 
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/skill"
+	"github.com/OMG-Software/omg-review-bot/internal/store"
 	"github.com/OMG-Software/omg-review-bot/internal/textutil"
 )
 
-// ---------- auth pages ----------
+// ---------- sign-in pages ----------
 
 func (s *Server) setupPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "setup.html", page{Title: "First-time setup"})
@@ -41,27 +42,31 @@ func (s *Server) setupSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.issueSession(w, r)
-	redirectMsg(w, r, "/settings", "Admin password set. Next: connect your GitHub App and model.")
+	s.issueSession(w, r, localAdminID, 0)
+	redirectMsg(w, r, "/settings", "Administrator password set. Next: connect your GitHub App and model.")
+}
+
+func (s *Server) loginData(r *http.Request) map[string]any {
+	return map[string]any{"SignIn": s.bot.Settings().GitHub.SignInOn(), "Next": safeNext(r.FormValue("next"))}
 }
 
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	if s.validSession(r) {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+	if s.sessionViewer(r) != nil {
+		http.Redirect(w, r, safeNext(r.URL.Query().Get("next")), http.StatusSeeOther)
 		return
 	}
-	s.render(w, r, "login.html", page{Title: "Sign in"})
+	s.render(w, r, "login.html", page{Title: "Sign in", D: s.loginData(r)})
 }
 
 func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	stored, _, _ := s.store.Get(pwKey)
 	if !checkPassword(stored, r.FormValue("password")) {
 		time.Sleep(700 * time.Millisecond) // slow down guessing
-		s.render(w, r, "login.html", page{Title: "Sign in", Err: "Wrong password."})
+		s.render(w, r, "login.html", page{Title: "Sign in", Err: "Wrong password.", D: s.loginData(r)})
 		return
 	}
-	s.issueSession(w, r)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	s.issueSession(w, r, localAdminID, 0)
+	http.Redirect(w, r, safeNext(r.FormValue("next")), http.StatusSeeOther)
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -70,18 +75,26 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) accountPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, "account.html", page{Title: "Account", Nav: "account"})
+	s.render(w, r, "account.html", page{Title: "Account", Nav: "account", D: s.loginData(r)})
 }
 
+// accountSubmit changes the administrator password.
 func (s *Server) accountSubmit(w http.ResponseWriter, r *http.Request) {
+	if !me(r).Local {
+		s.forbidden(w, r, "Only the password administrator has a password here; GitHub users sign in with GitHub.")
+		return
+	}
+	fail := func(msg string) {
+		s.render(w, r, "account.html", page{Title: "Account", Nav: "account", Err: msg, D: s.loginData(r)})
+	}
 	stored, _, _ := s.store.Get(pwKey)
 	if !checkPassword(stored, r.FormValue("current")) {
-		s.render(w, r, "account.html", page{Title: "Account", Nav: "account", Err: "Current password is wrong."})
+		fail("Current password is wrong.")
 		return
 	}
 	pw := r.FormValue("password")
 	if len(pw) < 10 || pw != r.FormValue("confirm") {
-		s.render(w, r, "account.html", page{Title: "Account", Nav: "account", Err: "New passwords must match and be at least 10 characters."})
+		fail("New passwords must match and be at least 10 characters.")
 		return
 	}
 	h, err := hashPassword(pw)
@@ -95,29 +108,63 @@ func (s *Server) accountSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.issueSession(w, r)
-	redirectMsg(w, r, "/account", "Password changed. Other sessions have been signed out.")
+	s.issueSession(w, r, localAdminID, 0)
+	redirectMsg(w, r, "/account", "Password changed. Everyone has been signed out, including GitHub users; they sign in again with GitHub.")
 }
 
-// ---------- dashboard, PRs, reviews ----------
+// accountSignOutAll ends every session of the signed-in GitHub user.
+func (s *Server) accountSignOutAll(w http.ResponseWriter, r *http.Request) {
+	v := me(r)
+	if v.Local {
+		s.forbidden(w, r, "Change the administrator password to sign out every administrator session.")
+		return
+	}
+	if err := s.store.BumpUserEpoch(v.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	clearSession(w)
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
 
-func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	reviews, _ := s.store.RecentReviews(10)
-	acts, _ := s.store.RecentActivity(15, "", 0)
-	counts, _ := s.store.CountPRsByStatus()
+// ---------- home and administrator dashboard ----------
+
+func (s *Server) home(w http.ResponseWriter, r *http.Request) {
+	v := me(r)
+	if !v.Admin {
+		if len(v.Orgs) == 1 {
+			http.Redirect(w, r, "/orgs/"+v.Orgs[0].OrgLogin, http.StatusSeeOther)
+			return
+		}
+		s.orgsPage(w, r)
+		return
+	}
+	since := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	stats, _ := s.store.ReviewStatsSince(store.AllAccounts, since)
+	days, _ := s.store.ReviewsPerDay(store.AllAccounts, 30, time.Now())
+	reviews, _ := s.store.RecentReviews(store.AllAccounts, 10)
+	acts, _ := s.store.RecentActivity(store.AllAccounts, 15, "", 0)
+	counts, _ := s.store.CountPRsByStatus(store.AllAccounts)
+	orgs, _ := s.store.OrgSummaries(nil)
+	users, _ := s.store.ListUsers()
+	st := s.bot.Settings()
 	s.render(w, r, "dashboard.html", page{Title: "Dashboard", Nav: "dash", D: map[string]any{
-		"Reviews": reviews, "Activity": acts, "Counts": counts,
+		"Reviews": reviews, "Activity": acts, "Counts": counts, "Stats": stats, "Days": days, "Orgs": orgs,
+		"Users": len(users), "SignIn": st.GitHub.SignInOn(), "WebhookOn": st.GitHub.WebhookSecret != "",
+		"Deliveries24h": s.store.CountDeliveriesSince(time.Now().Add(-24 * time.Hour).Unix()),
 	}})
 }
 
+// ---------- pull requests and reviews ----------
+
 func (s *Server) prsPage(w http.ResponseWriter, r *http.Request) {
 	all := r.URL.Query().Get("all") == "1"
-	prs, err := s.store.ListPRs(all, 500)
+	prs, err := s.store.ListPRs(store.AllAccounts, all, 500)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.render(w, r, "prs.html", page{Title: "Pull requests", Nav: "prs", D: map[string]any{"PRs": prs, "All": all}})
+	s.render(w, r, "prs.html", page{Title: "Pull requests", Nav: "prs", D: map[string]any{"PRs": prs, "All": all, "Base": "/prs"}})
 }
 
 func prKey(r *http.Request) (string, int, error) {
@@ -130,90 +177,140 @@ func prKey(r *http.Request) (string, int, error) {
 
 func prPath(repo string, n int) string { return fmt.Sprintf("/prs/%s/%d", repo, n) }
 
-func (s *Server) prPage(w http.ResponseWriter, r *http.Request) {
+// prFor loads the PR in the URL if the viewer may see it; otherwise it
+// answers 404 and returns nil.
+func (s *Server) prFor(w http.ResponseWriter, r *http.Request) *store.PR {
 	repo, n, err := prKey(r)
 	if err != nil {
-		http.NotFound(w, r)
-		return
+		s.notFound(w, r)
+		return nil
 	}
 	pr, err := s.store.GetPR(repo, n)
-	if err != nil || pr == nil {
-		http.NotFound(w, r)
+	if err != nil || pr == nil || me(r).Role(pr.AccountID) == "" {
+		s.notFound(w, r)
+		return nil
+	}
+	return pr
+}
+
+func (s *Server) prPage(w http.ResponseWriter, r *http.Request) {
+	pr := s.prFor(w, r)
+	if pr == nil {
 		return
 	}
-	reviews, _ := s.store.ListReviews(repo, n, 50)
-	acts, _ := s.store.RecentActivity(50, repo, n)
-	s.render(w, r, "pr.html", page{Title: fmt.Sprintf("%s#%d", repo, n), Nav: "prs", D: map[string]any{
-		"PR": pr, "Reviews": reviews, "Activity": acts,
+	reviews, _ := s.store.ListReviews(pr.Repo, pr.Number, 50)
+	acts, _ := s.store.RecentActivity(store.AllAccounts, 50, pr.Repo, pr.Number)
+	org, _ := s.store.GetOrg(pr.AccountID)
+	s.render(w, r, "pr.html", page{Title: fmt.Sprintf("%s#%d", pr.Repo, pr.Number), Nav: "prs", Org: org, Tab: "prs", D: map[string]any{
+		"PR": pr, "Reviews": reviews, "Activity": acts, "CanManage": me(r).CanManage(pr.AccountID),
 	}})
 }
 
 func (s *Server) prReview(w http.ResponseWriter, r *http.Request) {
-	repo, n, err := prKey(r)
-	if err != nil {
-		http.NotFound(w, r)
+	pr := s.prFor(w, r)
+	if pr == nil {
 		return
 	}
-	if err := s.bot.ReviewNow(repo, n); err != nil {
-		redirectErr(w, r, prPath(repo, n), err)
+	if err := s.bot.ReviewNow(pr.Repo, pr.Number); err != nil {
+		redirectErr(w, r, prPath(pr.Repo, pr.Number), err)
 		return
 	}
-	redirectMsg(w, r, prPath(repo, n), "Review queued.")
+	redirectMsg(w, r, prPath(pr.Repo, pr.Number), "Review queued.")
 }
 
 func (s *Server) prReplies(w http.ResponseWriter, r *http.Request) {
-	repo, n, err := prKey(r)
-	if err != nil {
-		http.NotFound(w, r)
+	pr := s.prFor(w, r)
+	if pr == nil {
 		return
 	}
-	s.bot.CheckReplies(repo, n)
-	redirectMsg(w, r, prPath(repo, n), "Checking for replies and mentions.")
+	s.bot.CheckReplies(pr.Repo, pr.Number)
+	redirectMsg(w, r, prPath(pr.Repo, pr.Number), "Checking for replies and mentions.")
 }
 
 func (s *Server) prSkip(w http.ResponseWriter, r *http.Request) {
-	repo, n, err := prKey(r)
-	if err != nil {
-		http.NotFound(w, r)
+	pr := s.prFor(w, r)
+	if pr == nil {
+		return
+	}
+	if !me(r).CanManage(pr.AccountID) {
+		s.forbidden(w, r, "Only the organization's owners can stop or resume automatic reviews.")
 		return
 	}
 	skip := r.FormValue("skip") == "1"
-	if err := s.bot.SetSkip(repo, n, skip); err != nil {
-		redirectErr(w, r, prPath(repo, n), err)
+	if err := s.bot.SetSkip(pr.Repo, pr.Number, skip); err != nil {
+		redirectErr(w, r, prPath(pr.Repo, pr.Number), err)
 		return
 	}
 	msg := "Automatic reviews resumed."
 	if skip {
 		msg = "Automatic reviews disabled for this PR."
 	}
-	redirectMsg(w, r, prPath(repo, n), msg)
+	redirectMsg(w, r, prPath(pr.Repo, pr.Number), msg)
 }
 
 func (s *Server) reviewPage(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	rv, err := s.store.GetReview(id)
-	if err != nil || rv == nil {
-		http.NotFound(w, r)
+	if err != nil || rv == nil || me(r).Role(rv.AccountID) == "" {
+		s.notFound(w, r)
 		return
 	}
-	s.render(w, r, "review.html", page{Title: fmt.Sprintf("Review %d", id), Nav: "prs", D: rv})
+	org, _ := s.store.GetOrg(rv.AccountID)
+	s.render(w, r, "review.html", page{Title: fmt.Sprintf("Review %d", id), Nav: "reviews", Org: org, Tab: "reviews", D: rv})
 }
 
-// ---------- repos ----------
-
-func (s *Server) reposPage(w http.ResponseWriter, r *http.Request) {
-	repos, err := s.store.ListRepos()
+// reviewList renders the review history for one organization or all.
+func (s *Server) reviewList(w http.ResponseWriter, r *http.Request, p page, accountID int64, base string) {
+	q := r.URL.Query()
+	pageNo, _ := strconv.Atoi(q.Get("page"))
+	pageNo = max(1, pageNo)
+	const perPage = 50
+	f := store.ReviewFilter{AccountID: accountID, Repo: q.Get("repo"), Status: q.Get("status"), Limit: perPage, Offset: (pageNo - 1) * perPage}
+	reviews, total, err := s.store.QueryReviews(f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	repos, _ := s.store.ListRepos(accountID)
+	orgs := map[int64]string{}
+	if accountID == store.AllAccounts {
+		if all, err := s.store.ListOrgs(); err == nil {
+			for _, o := range all {
+				orgs[o.ID] = o.Login
+			}
+		}
+	}
+	p.D = map[string]any{
+		"Reviews": reviews, "Total": total, "Page": pageNo, "Pages": (total + perPage - 1) / perPage,
+		"Repo": f.Repo, "Status": f.Status, "Repos": repos, "Base": base, "OrgNames": orgs,
+		"Statuses": []string{"posted", "error", "running", "skipped", "nothing to review"},
+	}
+	s.render(w, r, "reviews.html", p)
+}
+
+func (s *Server) reviewsPage(w http.ResponseWriter, r *http.Request) {
+	s.reviewList(w, r, page{Title: "Reviews", Nav: "reviews"}, store.AllAccounts, "/reviews")
+}
+
+// ---------- repositories (administrator view) ----------
+
+func (s *Server) reposPage(w http.ResponseWriter, r *http.Request) {
+	repos, err := s.store.ListRepos(store.AllAccounts)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.render(w, r, "repos.html", page{Title: "Repositories", Nav: "repos", D: reposData(repos, "/repos", true)})
+}
+
+func reposData(repos []store.Repo, base string, canManage bool) map[string]any {
 	enabled := 0
 	for _, rp := range repos {
 		if rp.Enabled {
 			enabled++
 		}
 	}
-	s.render(w, r, "repos.html", page{Title: "Repositories", Nav: "repos", D: map[string]any{"Repos": repos, "Enabled": enabled}})
+	return map[string]any{"Repos": repos, "Enabled": enabled, "Base": base, "CanManage": canManage}
 }
 
 func (s *Server) reposSync(w http.ResponseWriter, r *http.Request) {
@@ -230,7 +327,7 @@ func (s *Server) reposSync(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) reposAll(w http.ResponseWriter, r *http.Request) {
 	on := r.FormValue("enabled") == "1"
-	if err := s.store.SetAllReposEnabled(on); err != nil {
+	if err := s.store.SetAllReposEnabled(store.AllAccounts, on); err != nil {
 		redirectErr(w, r, "/repos", err)
 		return
 	}
@@ -252,11 +349,43 @@ func (s *Server) repoToggle(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	st := s.bot.Settings()
+	base := s.publicURL(r)
 	s.render(w, r, "settings.html", page{Title: "Settings", Nav: "settings", D: map[string]any{
-		"S": st, "HasKey": st.GitHub.PrivateKey != "", "HasAPIKey": st.LLM.APIKey != "",
+		"S": st, "P": st.Policy(), "HasKey": st.GitHub.PrivateKey != "", "HasAPIKey": st.LLM.APIKey != "",
+		"HasClientSecret": st.GitHub.ClientSecret != "", "HasWebhookSecret": st.GitHub.WebhookSecret != "",
+		"CallbackURL": base + "/auth/github/callback", "WebhookURL": base + "/webhooks/github",
 		"Providers": settings.Providers, "Severities": settings.Severities,
-		"SkillDir": s.bot.SkillDir(st),
+		"SkillDir": s.bot.SkillDir(st), "Instance": true,
 	}})
+}
+
+// parsePolicy merges the review policy fields of a form into cur.
+func parsePolicy(r *http.Request, cur settings.Policy) settings.Policy {
+	v := cur
+	f := func(k string) string { return strings.TrimSpace(r.FormValue(k)) }
+	on := func(k string) bool { return r.FormValue(k) != "" }
+	num := func(k string, def int) int {
+		if n, err := strconv.Atoi(f(k)); err == nil {
+			return n
+		}
+		return def
+	}
+	v.Review.Enabled = on("rv_enabled")
+	v.Review.SkipDrafts = on("rv_skip_drafts")
+	v.Review.SkipLabels = textutil.SplitList(r.FormValue("rv_skip_labels"))
+	v.Review.IgnorePatterns = textutil.SplitList(r.FormValue("rv_ignore"))
+	v.Review.GuidelineFiles = textutil.SplitList(r.FormValue("rv_guidelines"))
+	v.Review.DebounceSeconds = num("rv_debounce", v.Review.DebounceSeconds)
+	v.Review.MaxComments = num("rv_max_comments", v.Review.MaxComments)
+	v.Review.CommentLevel = f("rv_comment_level")
+	v.Review.ApprovalLevel = f("rv_approval_level")
+	v.Review.MaxFiles = num("rv_max_files", v.Review.MaxFiles)
+	v.Review.ReviewExisting = on("rv_existing")
+
+	v.Replies.Enabled = on("rp_enabled")
+	v.Replies.Mentions = on("rp_mentions")
+	v.Replies.MaxPerThread = num("rp_max", v.Replies.MaxPerThread)
+	return v
 }
 
 // parseSettings merges the settings form into cur. Secrets left blank keep their saved value.
@@ -280,6 +409,17 @@ func parseSettings(r *http.Request, cur settings.Settings) settings.Settings {
 	v.GitHub.APIBaseURL = f("gh_api_base")
 	v.GitHub.Accounts = textutil.SplitList(r.FormValue("gh_accounts"))
 	v.GitHub.NewReposEnabled = on("gh_new_repos")
+	v.GitHub.ClientID = f("gh_client_id")
+	if k := f("gh_client_secret"); k != "" {
+		v.GitHub.ClientSecret = k
+	}
+	if k := f("gh_webhook_secret"); k != "" {
+		v.GitHub.WebhookSecret = k
+	}
+	if on("gh_webhook_secret_clear") {
+		v.GitHub.WebhookSecret = ""
+	}
+	v.GitHub.PublicURL = f("gh_public_url")
 
 	v.LLM.Provider = f("llm_provider")
 	v.LLM.BaseURL = f("llm_base_url")
@@ -298,25 +438,13 @@ func parseSettings(r *http.Request, cur settings.Settings) settings.Settings {
 	v.LLM.StructuredOutput = on("llm_structured")
 	v.LLM.TimeoutSeconds = num("llm_timeout", v.LLM.TimeoutSeconds)
 
-	v.Review.Enabled = on("rv_enabled")
+	p := parsePolicy(r, v.Policy())
+	v.Review, v.Replies = p.Review, p.Replies
 	v.Review.SkillDir = f("rv_skill_dir")
-	v.Review.SkipDrafts = on("rv_skip_drafts")
-	v.Review.SkipLabels = textutil.SplitList(r.FormValue("rv_skip_labels"))
-	v.Review.IgnorePatterns = textutil.SplitList(r.FormValue("rv_ignore"))
-	v.Review.GuidelineFiles = textutil.SplitList(r.FormValue("rv_guidelines"))
-	v.Review.DebounceSeconds = num("rv_debounce", v.Review.DebounceSeconds)
-	v.Review.MaxComments = num("rv_max_comments", v.Review.MaxComments)
-	v.Review.CommentLevel = f("rv_comment_level")
-	v.Review.ApprovalLevel = f("rv_approval_level")
-	v.Review.MaxFiles = num("rv_max_files", v.Review.MaxFiles)
-	v.Review.ReviewExisting = on("rv_existing")
-
-	v.Replies.Enabled = on("rp_enabled")
-	v.Replies.Mentions = on("rp_mentions")
-	v.Replies.MaxPerThread = num("rp_max", v.Replies.MaxPerThread)
 
 	v.Poll.IntervalSeconds = num("poll_interval", v.Poll.IntervalSeconds)
 	v.Poll.RepoRefreshMinutes = num("poll_refresh", v.Poll.RepoRefreshMinutes)
+	v.Poll.WebhookIntervalSeconds = num("poll_webhook_interval", v.Poll.WebhookIntervalSeconds)
 	v.Normalize()
 	return v
 }
@@ -331,8 +459,16 @@ func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
 	redirectMsg(w, r, "/settings", "Settings saved.")
 }
 
+// apiStatus reports the bot's status, without other organizations' repositories.
 func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.bot.Status())
+	st := s.bot.Status()
+	if v := me(r); !v.Admin && st.CurrentRepo != "" && !s.viewerSeesRepo(v, st.CurrentRepo) {
+		st.Current, st.CurrentRepo = "a review for another organization", ""
+	}
+	if !me(r).Admin {
+		st.ConfigIssues, st.LastPollErr = nil, ""
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
 func (s *Server) apiTestGitHub(w http.ResponseWriter, r *http.Request) {
@@ -476,6 +612,6 @@ func (s *Server) skillSave(w http.ResponseWriter, r *http.Request) {
 // ---------- activity ----------
 
 func (s *Server) activityPage(w http.ResponseWriter, r *http.Request) {
-	acts, _ := s.store.RecentActivity(300, "", 0)
+	acts, _ := s.store.RecentActivity(store.AllAccounts, 300, "", 0)
 	s.render(w, r, "activity.html", page{Title: "Activity", Nav: "activity", D: acts})
 }

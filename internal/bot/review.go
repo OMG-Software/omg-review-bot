@@ -61,9 +61,12 @@ var reviewSchema = map[string]any{
 }
 
 func (b *Bot) handleReview(ctx context.Context, j job) {
-	st := b.Settings()
 	b.prMu.Lock()
 	pr, err := b.store.GetPR(j.repo, j.number)
+	var st settings.Settings
+	if err == nil && pr != nil {
+		st = b.SettingsFor(pr.AccountID)
+	}
 	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" ||
 		(!j.force && (pr.Status != "pending" || !st.Review.Enabled)) {
 		b.prMu.Unlock()
@@ -74,7 +77,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	_ = b.store.SavePR(pr)
 	b.prMu.Unlock()
 
-	b.setCurrent("Reviewing %s#%d", pr.Repo, pr.Number)
+	b.setCurrent(pr.Repo, "Reviewing %s#%d", pr.Repo, pr.Number)
 	sha, err := b.reviewPR(ctx, st, pr)
 
 	b.prMu.Lock()
@@ -227,7 +230,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	sk := b.loadSkill(st)
 
 	rec := &store.Review{Repo: pr.Repo, Number: pr.Number, HeadSHA: head, Model: st.LLM.Model, Skill: sk.Name,
-		Status: "running", StartedAt: time.Now().Unix()}
+		Status: "running", StartedAt: time.Now().Unix(), AccountID: pr.AccountID}
 	if id, err := b.store.CreateReview(rec); err == nil {
 		rec.ID = id
 	}
@@ -296,6 +299,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	if threadsKnown {
 		vu := b.verifyFixes(ctx, st, lc, cl, pr, head, threads, files, &raw)
 		fixed = vu.fixed
+		rec.Fixed = fixed
 		rec.PromptTokens += vu.usage.PromptTokens
 		rec.CompletionTokens += vu.usage.CompletionTokens
 	}
@@ -311,7 +315,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	var summaries []string
 	for i, bt := range p.batches {
 		if len(p.batches) > 1 {
-			b.setCurrent("Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
+			b.setCurrent(pr.Repo, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
 		}
 		user := batchPrompt(header, i, len(p.batches), bt, previousFor(mine, bt.paths))
 		var out modelOutput
@@ -382,6 +386,12 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	}
 	rec.GHReviewID, rec.URL = rv.ID, rv.HTMLURL
 	rec.Summary, rec.Comments, rec.Notes, rec.Status = summary, len(drafts), len(ri.notes), "posted"
+	rec.Event = event
+	for _, f := range append(append([]finding{}, ri.inline...), ri.notes...) {
+		if r := settings.SeverityRank(f.Severity); r > 0 {
+			rec.Sev[r-1]++
+		}
+	}
 	b.logf("info", pr.Repo, pr.Number, "posted review of %s (%s): %d inline comments, %d notes, %d earlier findings resolved as fixed (%d parts, %d+%d tokens)",
 		short(head), strings.ToLower(event), len(drafts), len(ri.notes), fixed, len(p.batches), rec.PromptTokens, rec.CompletionTokens)
 	return head, nil

@@ -81,7 +81,8 @@ func TestPagesRender(t *testing.T) {
 	}
 	post("/setup", url.Values{"password": {"supersecret1"}, "confirm": {"supersecret1"}}, ts.URL)
 
-	for _, p := range []string{"/", "/prs", "/prs?all=1", "/repos", "/settings", "/skill", "/activity", "/account"} {
+	for _, p := range []string{"/", "/prs", "/prs?all=1", "/repos", "/settings", "/skill", "/activity", "/account",
+		"/orgs", "/reviews", "/reviews?status=posted&page=2", "/admin/users", "/admin/webhooks"} {
 		code, body := get(p)
 		if code != http.StatusOK || !strings.Contains(body, "PR Review Bot") {
 			t.Errorf("GET %s = %d", p, code)

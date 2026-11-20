@@ -16,12 +16,12 @@ import (
 )
 
 func (b *Bot) handleReplies(ctx context.Context, j job) {
-	st := b.Settings()
-	if !conversationsOn(st) {
-		return
-	}
 	pr, err := b.store.GetPR(j.repo, j.number)
 	if err != nil || pr == nil {
+		return
+	}
+	st := b.SettingsFor(pr.AccountID)
+	if !conversationsOn(st) {
 		return
 	}
 	app, err := b.getApp(ctx, st)
@@ -143,7 +143,7 @@ func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, cl *github
 			}
 			continue
 		}
-		b.setCurrent("Replying to @%s on %s#%d", last.User.Login, pr.Repo, pr.Number)
+		b.setCurrent(pr.Repo, "Replying to @%s on %s#%d", last.User.Login, pr.Repo, pr.Number)
 		text, resolved, err := b.threadReply(ctx, st, cl, pr, root, list, login, last)
 		if err != nil {
 			return err
@@ -258,7 +258,7 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, cl *githu
 			_ = b.store.MarkHandled(c.ID, "mention-skipped", pr.Repo, pr.Number, 0)
 			continue
 		}
-		b.setCurrent("Answering @%s on %s#%d", c.User.Login, pr.Repo, pr.Number)
+		b.setCurrent(pr.Repo, "Answering @%s on %s#%d", c.User.Login, pr.Repo, pr.Number)
 		text, err := b.mentionReply(ctx, st, cl, pr, ics[:i+1], login)
 		if err != nil {
 			return err

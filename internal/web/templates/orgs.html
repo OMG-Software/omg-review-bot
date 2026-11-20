@@ -1,0 +1,33 @@
+{{define "content"}}
+<h1>Organizations</h1>
+{{if .D.Orgs}}
+<div class="orgcards">
+{{range .D.Orgs}}
+  <a class="card orgcard" href="{{orgPath .Login}}">
+    <h2>{{.Login}} {{if not .Active}}<span class="pill s-error">App uninstalled</span>{{end}}</h2>
+    <p class="muted">{{$r := index $.D.Roles .ID}}{{if eq $r "admin"}}administrator{{else}}{{$r}}{{end}} · {{.EnabledRepos}} of {{.Repos}} repositories watched · {{.Members}} members</p>
+    <p><b>{{.Reviews30d}}</b> reviews and <b>{{.Findings30d}}</b> findings in 30 days · last review {{ago .LastReview}}</p>
+  </a>
+{{end}}
+</div>
+{{else}}
+<div class="card">
+  <h2>You don't have access to any organization yet</h2>
+  <p>You get access when one of these is true:</p>
+  <ul>
+    <li>You're an <b>owner (admin)</b> of a GitHub organization the bot's App is installed on. You become its owner here.</li>
+    <li>The App is installed on <b>your personal account</b>.</li>
+    <li>An owner here added you on the organization's <i>Members</i> page, or let every member of the GitHub organization in.</li>
+  </ul>
+</div>
+{{end}}
+
+<div class="card">
+  <h2>Add an organization</h2>
+  <ol>
+    <li>{{if .D.InstallURL}}<a href="{{.D.InstallURL}}" target="_blank" rel="noopener">Install the GitHub App ↗</a>{{else}}Install the bot's GitHub App{{end}} on your organization and pick the repositories to review. You need to be an owner of the organization (or have the <i>GitHub App manager</i> role).</li>
+    <li>Come back and {{if and .D.SignIn (not .V.Local)}}<a href="/auth/github?next=/orgs">refresh your access</a>{{else}}sign in with GitHub{{end}}. As an admin of the organization you become its owner here, and can add your team.</li>
+  </ol>
+  <p class="hint">Your access is read from GitHub each time you sign in.</p>
+</div>
+{{end}}

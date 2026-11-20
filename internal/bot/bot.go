@@ -30,9 +30,13 @@ type Status struct {
 	LastPollDur   time.Duration
 	LastPollErr   string
 	Current       string
+	CurrentRepo   string // repository of the running job, so org views can hide others' work
 	CurrentSince  time.Time
 	QueueLen      int
 	RateRemaining int64
+	LastWebhook   time.Time
+	// WebhooksActive: deliveries arrived recently, so polling has slowed to a safety net.
+	WebhooksActive bool
 }
 
 type jobKind string
@@ -72,13 +76,16 @@ type Bot struct {
 	status       Status
 	lastRepoSync time.Time
 	lastSweep    time.Time
+	lastPoll     time.Time
+	lastWebhook  time.Time
 	queued       map[string]bool
 
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
 
 	jobs chan job
-	wake chan struct{}
+	wake chan struct{} // poll GitHub now
+	kick chan struct{} // re-check due reviews without polling
 }
 
 func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
@@ -89,6 +96,7 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		queued:  map[string]bool{},
 		jobs:    make(chan job, 4096),
 		wake:    make(chan struct{}, 1),
+		kick:    make(chan struct{}, 1),
 		status:  Status{RateRemaining: -1},
 	}
 }
@@ -100,18 +108,60 @@ func (b *Bot) Run(ctx context.Context) {
 		b.log.Warn("reset interrupted reviews", "err", err)
 	}
 	go b.worker(ctx)
+	pollNow := true
 	for {
-		b.pollOnce(ctx)
-		t := time.NewTimer(time.Duration(b.Settings().Poll.IntervalSeconds) * time.Second)
+		st := b.Settings()
+		interval := b.pollInterval(st)
+		if pollNow || time.Since(b.lastPollTime()) >= interval {
+			b.pollOnce(ctx)
+			b.mu.Lock()
+			b.lastPoll = time.Now()
+			b.mu.Unlock()
+		} else if len(st.Issues()) == 0 {
+			b.enqueueDue(st)
+			b.maybeSweep(st)
+		}
+		// Sleep until the next poll, or sooner when a debounced review falls due.
+		wait := interval - time.Since(b.lastPollTime())
+		if due := b.store.NextDue(); due > 0 {
+			wait = min(wait, time.Until(time.Unix(due, 0))+time.Second)
+		}
+		t := time.NewTimer(max(wait, time.Second))
+		pollNow = false
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			return
 		case <-b.wake:
 			t.Stop()
+			pollNow = true
+		case <-b.kick:
+			t.Stop()
 		case <-t.C:
 		}
 	}
+}
+
+func (b *Bot) lastPollTime() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastPoll
+}
+
+// pollInterval is how often GitHub is polled: the configured interval, or the
+// slower webhook interval while webhook deliveries are arriving.
+func (b *Bot) pollInterval(st settings.Settings) time.Duration {
+	if b.webhooksActive(st) {
+		return time.Duration(st.Poll.WebhookIntervalSeconds) * time.Second
+	}
+	return time.Duration(st.Poll.IntervalSeconds) * time.Second
+}
+
+// webhooksActive reports whether a verified delivery arrived in the last 24 hours.
+func (b *Bot) webhooksActive(st settings.Settings) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return st.GitHub.WebhookSecret != "" && !b.lastWebhook.IsZero() && time.Since(b.lastWebhook) < 24*time.Hour
 }
 
 // Wake triggers a poll now (e.g. after settings change).
@@ -120,6 +170,31 @@ func (b *Bot) Wake() {
 	case b.wake <- struct{}{}:
 	default:
 	}
+}
+
+// kickDue re-checks for due reviews without polling GitHub.
+func (b *Bot) kickDue() {
+	select {
+	case b.kick <- struct{}{}:
+	default:
+	}
+}
+
+// settingsFor returns the settings with an organization's own review policy
+// applied, if it has one.
+func (b *Bot) settingsFor(st settings.Settings, accountID int64) settings.Settings {
+	if accountID == 0 {
+		return st
+	}
+	if p, ok := settings.ParsePolicy(b.store.OrgPolicy(accountID)); ok {
+		return st.WithPolicy(p)
+	}
+	return st
+}
+
+// SettingsFor returns the settings that apply to an organization's repositories.
+func (b *Bot) SettingsFor(accountID int64) settings.Settings {
+	return b.settingsFor(b.Settings(), accountID)
 }
 
 func (b *Bot) Settings() settings.Settings {
@@ -131,6 +206,7 @@ func (b *Bot) Settings() settings.Settings {
 }
 
 func (b *Bot) Status() Status {
+	active := b.webhooksActive(b.Settings())
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := b.status
@@ -138,12 +214,15 @@ func (b *Bot) Status() Status {
 	if b.app != nil {
 		s.RateRemaining = b.app.RateRemaining()
 	}
+	s.LastWebhook = b.lastWebhook
+	s.WebhooksActive = active
 	return s
 }
 
-func (b *Bot) setCurrent(format string, args ...any) {
+func (b *Bot) setCurrent(repo, format string, args ...any) {
 	b.mu.Lock()
 	b.status.Current = fmt.Sprintf(format, args...)
+	b.status.CurrentRepo = repo
 	b.status.CurrentSince = time.Now()
 	b.mu.Unlock()
 }
@@ -190,7 +269,7 @@ func (b *Bot) worker(ctx context.Context) {
 			b.mu.Unlock()
 			b.runJob(ctx, j)
 			b.mu.Lock()
-			b.status.Current = ""
+			b.status.Current, b.status.CurrentRepo = "", ""
 			b.mu.Unlock()
 		}
 	}
@@ -249,6 +328,26 @@ func (b *Bot) BotLogin() string {
 		return ""
 	}
 	return b.appInfo.Slug + "[bot]"
+}
+
+// InstallURL is where an organization owner installs the App on GitHub
+// ("" until the App's credentials have been checked).
+func (b *Bot) InstallURL() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.appInfo == nil || b.appInfo.HTMLURL == "" {
+		return ""
+	}
+	return b.appInfo.HTMLURL + "/installations/new"
+}
+
+// LookupUser finds a GitHub user by login, as an organization's installation.
+func (b *Bot) LookupUser(ctx context.Context, installationID int64, login string) (*github.User, error) {
+	app, err := b.getApp(ctx, b.Settings())
+	if err != nil {
+		return nil, err
+	}
+	return app.Installation(installationID).UserByLogin(ctx, login)
 }
 
 func (b *Bot) botSlug() string {
@@ -330,7 +429,7 @@ func (b *Bot) SetSkip(repo string, number int, skip bool) error {
 		return fmt.Errorf("PR %s#%d is not tracked", repo, number)
 	}
 	pr.Skip = skip
-	b.recompute(pr, b.Settings())
+	b.recompute(pr, b.SettingsFor(pr.AccountID))
 	return b.store.SavePR(pr)
 }
 

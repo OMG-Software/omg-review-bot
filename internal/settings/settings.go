@@ -2,6 +2,7 @@
 package settings
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/OMG-Software/omg-review-bot/internal/store"
@@ -15,7 +16,20 @@ type GitHub struct {
 	APIBaseURL      string   `json:"api_base_url"`
 	Accounts        []string `json:"accounts"` // only installations on these orgs/users; empty = all
 	NewReposEnabled bool     `json:"new_repos_enabled"`
+
+	// ClientID and ClientSecret are the App's OAuth credentials, used for
+	// "Sign in with GitHub". Empty = only the administrator password works.
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	// WebhookSecret verifies webhook deliveries. Empty = webhooks are refused.
+	WebhookSecret string `json:"webhook_secret"`
+	// PublicURL is the address people and GitHub reach the bot at, e.g.
+	// https://prbot.example.com. Empty = the address the browser used.
+	PublicURL string `json:"public_url"`
 }
+
+// SignInOn reports whether "Sign in with GitHub" is configured.
+func (g GitHub) SignInOn() bool { return g.ClientID != "" && g.ClientSecret != "" }
 
 type LLM struct {
 	Provider         string  `json:"provider"` // lmstudio | ollama | ollama-cloud | openai
@@ -64,6 +78,9 @@ type Replies struct {
 type Poll struct {
 	IntervalSeconds    int `json:"interval_seconds"`
 	RepoRefreshMinutes int `json:"repo_refresh_minutes"`
+	// WebhookIntervalSeconds is the poll interval while webhooks are arriving:
+	// polling is then only a safety net for missed deliveries.
+	WebhookIntervalSeconds int `json:"webhook_interval_seconds"`
 }
 
 type Settings struct {
@@ -72,6 +89,44 @@ type Settings struct {
 	Review  Review  `json:"review"`
 	Replies Replies `json:"replies"`
 	Poll    Poll    `json:"poll"`
+}
+
+// Policy is the part of the settings an organization can set for itself.
+// The model, skill, GitHub App and polling stay instance-wide.
+type Policy struct {
+	Review  Review  `json:"review"`
+	Replies Replies `json:"replies"`
+}
+
+// Policy returns the instance-wide review policy (what organizations inherit).
+func (s Settings) Policy() Policy { return Policy{Review: s.Review, Replies: s.Replies} }
+
+// WithPolicy returns the settings with an organization's policy applied.
+func (s Settings) WithPolicy(p Policy) Settings {
+	p.Review.SkillDir = s.Review.SkillDir
+	s.Review, s.Replies = p.Review, p.Replies
+	s.Normalize()
+	return s
+}
+
+// ParsePolicy reads an organization's stored policy. ok is false when it has
+// none (it inherits the instance settings) or it can't be read.
+func ParsePolicy(raw string) (p Policy, ok bool) {
+	if strings.TrimSpace(raw) == "" {
+		return Policy{}, false
+	}
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return Policy{}, false
+	}
+	return p, true
+}
+
+// EncodePolicy stores a policy (normalized against the instance settings).
+func EncodePolicy(base Settings, p Policy) (string, error) {
+	n := base.WithPolicy(p).Policy()
+	n.Review.SkillDir = ""
+	b, err := json.Marshal(n)
+	return string(b), err
 }
 
 // Provider describes an LLM backend choice shown in the UI.
@@ -174,13 +229,17 @@ func Defaults() Settings {
 			GuidelineFiles:  DefaultGuidelineFiles(),
 		},
 		Replies: Replies{Enabled: true, Mentions: true, MaxPerThread: 5},
-		Poll:    Poll{IntervalSeconds: 60, RepoRefreshMinutes: 15},
+		Poll:    Poll{IntervalSeconds: 60, RepoRefreshMinutes: 15, WebhookIntervalSeconds: 900},
 	}
 }
 
 // Normalize trims values and clamps numbers into sane ranges.
 func (s *Settings) Normalize() {
 	s.GitHub.PrivateKey = strings.TrimSpace(s.GitHub.PrivateKey)
+	s.GitHub.ClientID = strings.TrimSpace(s.GitHub.ClientID)
+	s.GitHub.ClientSecret = strings.TrimSpace(s.GitHub.ClientSecret)
+	s.GitHub.WebhookSecret = strings.TrimSpace(s.GitHub.WebhookSecret)
+	s.GitHub.PublicURL = strings.TrimRight(strings.TrimSpace(s.GitHub.PublicURL), "/")
 	s.GitHub.APIBaseURL = strings.TrimRight(strings.TrimSpace(s.GitHub.APIBaseURL), "/")
 	if s.GitHub.APIBaseURL == "" {
 		s.GitHub.APIBaseURL = "https://api.github.com"
@@ -223,6 +282,10 @@ func (s *Settings) Normalize() {
 	s.Replies.MaxPerThread = clamp(s.Replies.MaxPerThread, 1, 50)
 	s.Poll.IntervalSeconds = clamp(s.Poll.IntervalSeconds, 15, 3600)
 	s.Poll.RepoRefreshMinutes = clamp(s.Poll.RepoRefreshMinutes, 1, 1440)
+	if s.Poll.WebhookIntervalSeconds == 0 {
+		s.Poll.WebhookIntervalSeconds = 900
+	}
+	s.Poll.WebhookIntervalSeconds = clamp(s.Poll.WebhookIntervalSeconds, s.Poll.IntervalSeconds, 86400)
 }
 
 // Issues lists what still has to be configured before the bot can run.

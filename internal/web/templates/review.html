@@ -11,7 +11,9 @@
     <dt>Tokens</dt><dd>{{.PromptTokens}} prompt / {{.CompletionTokens}} completion</dd>
     <dt>Started</dt><dd>{{when .StartedAt}}</dd>
     <dt>Duration</dt><dd>{{dur .StartedAt .FinishedAt}}</dd>
-    <dt>Posted</dt><dd>{{.Comments}} inline comments, {{.Notes}} notes</dd>
+    <dt>Posted</dt><dd>{{.Comments}} inline comments, {{.Notes}} notes{{if eq .Event "APPROVE"}} · <span class="pill s-reviewed">approved</span>{{end}}</dd>
+    <dt>By level</dt><dd>{{range $i, $n := .Sev}}{{if $i}} · {{end}}P{{add $i 1}}: {{$n}}{{end}}</dd>
+    <dt>Earlier findings fixed</dt><dd>{{.Fixed}}</dd>
     {{if .Error}}<dt>Error</dt><dd class="bad">{{.Error}}</dd>{{end}}
   </dl>
 </div>

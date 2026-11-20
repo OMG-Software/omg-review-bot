@@ -7,7 +7,8 @@
   <h2>GitHub App</h2>
   <p class="hint">Create a GitHub App for your org (<i>Org settings → Developer settings → GitHub Apps → New</i>).
     Repository permissions: <b>Pull requests: Read &amp; write</b>, <b>Contents: Read-only</b>, <b>Metadata: Read-only</b>.
-    Untick <i>Webhook → Active</i>, because this bot polls. Generate a private key, then install the App on your org.</p>
+    Organization permission: <b>Members: Read-only</b> (so sign-in can tell who administers an organization).
+    Generate a private key. Organizations then install the App themselves.</p>
   <div class="row">
     <label>App ID <input name="gh_app_id" inputmode="numeric" value="{{if $s.GitHub.AppID}}{{$s.GitHub.AppID}}{{end}}" placeholder="123456"></label>
     <label class="grow">API base URL <input name="gh_api_base" value="{{$s.GitHub.APIBaseURL}}">
@@ -15,10 +16,31 @@
   </div>
   <label>Private key (.pem contents) {{if .D.HasKey}}<span class="pill s-reviewed">saved</span>{{end}}
     <textarea name="gh_private_key" rows="4" class="mono" placeholder="{{if .D.HasKey}}Leave empty to keep the saved key{{else}}-----BEGIN RSA PRIVATE KEY-----{{end}}"></textarea></label>
-  <label>Only these orgs/accounts <small>(one per line; empty = every installation)</small>
+  <label>Only these orgs/accounts <small>(one per line; empty = every installation: any organization that installs the App is reviewed)</small>
     <textarea name="gh_accounts" rows="2">{{lines $s.GitHub.Accounts}}</textarea></label>
   <label class="check"><input type="checkbox" name="gh_new_repos" {{if $s.GitHub.NewReposEnabled}}checked{{end}}> Watch newly discovered repositories automatically</label>
   <div class="actions"><button type="button" data-test="/api/test/github" data-out="gh-result">Test GitHub connection</button><span id="gh-result" class="result"></span></div>
+</section>
+
+<section class="card" id="signin">
+  <h2>Sign-in and webhooks</h2>
+  <p class="hint">People sign in with the same GitHub App. In the App's settings set <b>Callback URL</b> to <code>{{.D.CallbackURL}}</code>,
+    then copy its <b>Client ID</b> and generate a <b>client secret</b>. For webhooks, tick <i>Webhook → Active</i>, set <b>Webhook URL</b> to
+    <code>{{.D.WebhookURL}}</code> and use the same secret as below. Without webhooks the bot polls, which works with no public address.</p>
+  <label class="grow">Public URL <input name="gh_public_url" value="{{$s.GitHub.PublicURL}}" placeholder="https://prbot.example.com">
+    <small>The address people and GitHub use to reach the bot. Empty = the address in your browser now. The callback and webhook URLs above are built from it.</small></label>
+  <div class="row">
+    <label class="grow">Client ID <input name="gh_client_id" value="{{$s.GitHub.ClientID}}" placeholder="Iv23li…" autocomplete="off"></label>
+    <label class="grow">Client secret {{if .D.HasClientSecret}}<span class="pill s-reviewed">saved</span>{{end}}
+      <input name="gh_client_secret" type="password" autocomplete="off" placeholder="{{if .D.HasClientSecret}}Leave empty to keep the saved secret{{else}}From the App's General page{{end}}"></label>
+  </div>
+  <div class="row">
+    <label class="grow">Webhook secret {{if .D.HasWebhookSecret}}<span class="pill s-reviewed">saved</span>{{end}}
+      <input name="gh_webhook_secret" id="webhook-secret" type="password" autocomplete="off" placeholder="{{if .D.HasWebhookSecret}}Leave empty to keep the saved secret{{else}}Empty = webhooks off{{end}}"></label>
+    <div class="actions end"><button type="button" data-generate="webhook-secret">Generate</button></div>
+    {{if .D.HasWebhookSecret}}<label class="check"><input type="checkbox" name="gh_webhook_secret_clear"> Turn webhooks off</label>{{end}}
+  </div>
+  <p class="hint"><a href="/admin/webhooks">Recent webhook deliveries →</a></p>
 </section>
 
 <section class="card">
@@ -53,42 +75,15 @@
 
 <section class="card">
   <h2>Reviews</h2>
-  <label class="check"><input type="checkbox" name="rv_enabled" {{if $s.Review.Enabled}}checked{{end}}> Review pull requests automatically</label>
-  <label class="check"><input type="checkbox" name="rv_skip_drafts" {{if $s.Review.SkipDrafts}}checked{{end}}> Skip draft PRs until they're marked ready</label>
-  <label class="check"><input type="checkbox" name="rv_existing" {{if $s.Review.ReviewExisting}}checked{{end}}> Also review PRs that were already open when a repository is first watched</label>
-  <label>Skill folder <small>(empty = <code>{{.D.SkillDir}}</code>; manage it on the <a href="/skill">Skill</a> page)</small>
+  <p class="hint">These are the defaults. Each organization's owners can replace them with the organization's own on its <i>Review settings</i> page.</p>
+  <label>Skill folder <small>(empty = <code>{{.D.SkillDir}}</code>; manage it on the <a href="/skill">Skill</a> page; used by every organization)</small>
     <input name="rv_skill_dir" value="{{$s.Review.SkillDir}}" placeholder="{{.D.SkillDir}}"></label>
-  <div class="row">
-    <label>Wait after push (s) <input name="rv_debounce" type="number" min="0" value="{{$s.Review.DebounceSeconds}}"></label>
-    <label>Max comments per review <input name="rv_max_comments" type="number" min="1" max="100" value="{{$s.Review.MaxComments}}"></label>
-    <label>Max files per PR <input name="rv_max_files" type="number" min="1" value="{{$s.Review.MaxFiles}}"></label>
-  </div>
-  <div class="row">
-    <label>Post comments at
-      <select name="rv_comment_level">{{range .D.Severities}}<option value="{{.ID}}" {{if eq .ID $s.Review.CommentLevel}}selected{{end}}>{{.Label}} and above</option>{{end}}</select>
-      <small>Less severe findings are counted in the review summary but not posted.</small></label>
-    <label>Approve when nothing is unresolved at
-      <select name="rv_approval_level"><option value="off" {{if eq "off" $s.Review.ApprovalLevel}}selected{{end}}>Never approve</option>{{range .D.Severities}}<option value="{{.ID}}" {{if eq .ID $s.Review.ApprovalLevel}}selected{{end}}>{{.Label}} and above</option>{{end}}</select>
-      <small>Can't be broader than the comment level. The bot withdraws its approval if a new push brings back a finding at this level.</small></label>
-  </div>
-  <p class="hint">Levels: {{range $i, $v := .D.Severities}}{{if $i}} · {{end}}<b>{{$v.Label}}</b> {{$v.Meaning}}{{end}}.
-    When a later push fixes a finding, the bot replies in its thread to confirm and then resolves it.</p>
-  <div class="row">
-    <label class="grow">Skip PRs with these labels <textarea name="rv_skip_labels" rows="3">{{lines $s.Review.SkipLabels}}</textarea></label>
-    <label class="grow">Ignore files matching <small>(gitignore-style, one per line)</small><textarea name="rv_ignore" rows="6" class="mono">{{lines $s.Review.IgnorePatterns}}</textarea></label>
-  </div>
-  <label>Project guideline files <small>(gitignore-style, one per line; empty = don't read any)</small>
-    <textarea name="rv_guidelines" rows="5" class="mono">{{lines $s.Review.GuidelineFiles}}</textarea>
-    <small>The repository's own rules and conventions, read from the PR's base branch and applied in reviews and replies.
-      A pattern with a <code>/</code> matches from the repository root. <code>CLAUDE.md</code> and <code>AGENTS.md</code> in a subdirectory only apply to PRs that change files under it.
-      They get up to 15% of the model context.</small></label>
+  {{template "policy-review" .D}}
 </section>
 
 <section class="card">
   <h2>Conversations</h2>
-  <label class="check"><input type="checkbox" name="rp_enabled" {{if $s.Replies.Enabled}}checked{{end}}> Reply when someone responds to one of the bot's review comments</label>
-  <label class="check"><input type="checkbox" name="rp_mentions" {{if $s.Replies.Mentions}}checked{{end}}> Answer when the bot is @mentioned in a PR conversation</label>
-  <label>Max bot replies per thread <input name="rp_max" type="number" min="1" value="{{$s.Replies.MaxPerThread}}"></label>
+  {{template "policy-replies" .D}}
 </section>
 
 <section class="card">
@@ -96,6 +91,8 @@
   <div class="row">
     <label>Check for PR changes every (s) <input name="poll_interval" type="number" min="15" value="{{$s.Poll.IntervalSeconds}}"></label>
     <label>Refresh repository list every (min) <input name="poll_refresh" type="number" min="1" value="{{$s.Poll.RepoRefreshMinutes}}"></label>
+    <label>While webhooks arrive, poll every (s) <input name="poll_webhook_interval" type="number" min="15" value="{{$s.Poll.WebhookIntervalSeconds}}">
+      <small>Polling is then only a safety net for missed deliveries.</small></label>
   </div>
 </section>
 

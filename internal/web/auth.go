@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/pbkdf2"
 	"crypto/rand"
@@ -14,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
 const (
@@ -22,6 +25,9 @@ const (
 	pwKey       = "admin_password"
 	secretKey   = "session_secret"
 	pbkdf2Iters = 600_000
+
+	// localAdminID is the session user ID of the password administrator.
+	localAdminID = 0
 )
 
 func hashPassword(pw string) (string, error) {
@@ -92,11 +98,28 @@ func (s *Server) sign(payload string) string {
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
-func (s *Server) issueSession(w http.ResponseWriter, r *http.Request) {
-	exp := strconv.FormatInt(time.Now().Add(sessionTTL).Unix(), 10)
+// signed returns payload.mac; unsign checks it and returns the payload.
+func (s *Server) signed(payload string) string { return payload + "." + s.sign(payload) }
+
+func (s *Server) unsign(v string) (string, bool) {
+	i := strings.LastIndexByte(v, '.')
+	if i < 0 {
+		return "", false
+	}
+	payload, mac := v[:i], v[i+1:]
+	return payload, hmac.Equal([]byte(mac), []byte(s.sign(payload)))
+}
+
+func secureCookie(r *http.Request) bool { return r.TLS != nil }
+
+// issueSession signs a person in. The session names the user and their
+// session epoch, so bumping the epoch (sign out everywhere, blocking the
+// user) ends it.
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID, epoch int64) {
+	exp := time.Now().Add(sessionTTL).Unix()
 	http.SetCookie(w, &http.Cookie{
-		Name: cookieName, Value: exp + "." + s.sign(exp), Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+		Name: cookieName, Value: s.signed(fmt.Sprintf("%d.%d.%d", userID, epoch, exp)), Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secureCookie(r),
 		MaxAge: int(sessionTTL.Seconds()),
 	})
 }
@@ -105,17 +128,90 @@ func clearSession(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
 }
 
-func (s *Server) validSession(r *http.Request) bool {
+// viewer is the signed-in person.
+type viewer struct {
+	ID     int64 // GitHub user ID; localAdminID for the password administrator
+	Login  string
+	Name   string
+	Avatar string
+	Admin  bool
+	Local  bool           // signed in with the administrator password
+	Orgs   []store.Member // organizations they have access to
+}
+
+// Display is how the viewer is named in the header.
+func (v *viewer) Display() string {
+	if v.Local {
+		return "Administrator"
+	}
+	return "@" + v.Login
+}
+
+// Role returns the viewer's role in an organization: "admin" for
+// administrators, "owner" or "member", or "" for no access.
+func (v *viewer) Role(orgID int64) string {
+	if v == nil {
+		return ""
+	}
+	if v.Admin {
+		return "admin"
+	}
+	for _, m := range v.Orgs {
+		if m.OrgID == orgID {
+			return m.Role
+		}
+	}
+	return ""
+}
+
+// CanManage reports whether the viewer may change an organization's settings.
+func (v *viewer) CanManage(orgID int64) bool {
+	r := v.Role(orgID)
+	return r == "admin" || r == store.RoleOwner
+}
+
+// sessionViewer reads and checks the session cookie; nil when not signed in.
+func (s *Server) sessionViewer(r *http.Request) *viewer {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
-		return false
+		return nil
 	}
-	exp, mac, ok := strings.Cut(c.Value, ".")
-	if !ok || !hmac.Equal([]byte(mac), []byte(s.sign(exp))) {
-		return false
+	payload, ok := s.unsign(c.Value)
+	if !ok {
+		return nil
 	}
-	n, err := strconv.ParseInt(exp, 10, 64)
-	return err == nil && time.Now().Unix() < n
+	parts := strings.Split(payload, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	uid, err1 := strconv.ParseInt(parts[0], 10, 64)
+	epoch, err2 := strconv.ParseInt(parts[1], 10, 64)
+	exp, err3 := strconv.ParseInt(parts[2], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || time.Now().Unix() >= exp {
+		return nil
+	}
+	if uid == localAdminID {
+		return &viewer{ID: localAdminID, Admin: true, Local: true}
+	}
+	u, err := s.store.GetUser(uid)
+	if err != nil || u == nil || u.Disabled || u.Epoch != epoch {
+		return nil
+	}
+	v := &viewer{ID: u.ID, Login: u.Login, Name: u.Name, Avatar: u.AvatarURL, Admin: u.Admin}
+	v.Orgs, _ = s.store.UserMemberships(u.ID)
+	return v
+}
+
+type viewerKey struct{}
+
+// me returns the request's signed-in person (set by ServeHTTP).
+func me(r *http.Request) *viewer {
+	v, _ := r.Context().Value(viewerKey{}).(*viewer)
+	return v
+}
+
+func withViewer(r *http.Request, v *viewer) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), viewerKey{}, v))
 }
 
 // sameOrigin is the CSRF check for state-changing requests: browsers always
@@ -130,4 +226,18 @@ func sameOrigin(r *http.Request) bool {
 	}
 	u, err := url.Parse(src)
 	return err == nil && u.Host == r.Host
+}
+
+// safeNext keeps a post-sign-in redirect on this site.
+func safeNext(next string) string {
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+		return "/"
+	}
+	return next
+}
+
+func randomToken() string {
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }

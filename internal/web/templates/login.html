@@ -1,10 +1,18 @@
 {{define "content"}}
 <div class="narrow card">
   <h1>🤖 PR Review Bot</h1>
+  {{if .D.SignIn}}
+  <p><a class="button primary block" href="/auth/github{{if ne .D.Next "/"}}?next={{.D.Next}}{{end}}">Sign in with GitHub</a></p>
+  <p class="hint">See the reviews for your organizations. Admins of a GitHub organization the bot is installed on can manage it here.</p>
+  <details class="admin-login">
+    <summary>Administrator password</summary>
+  {{end}}
   <form method="post" action="/login" class="stack">
-    <label>Password <input type="password" name="password" required autofocus autocomplete="current-password"></label>
-    <button class="primary">Sign in</button>
+    <input type="hidden" name="next" value="{{.D.Next}}">
+    <label>Administrator password <input type="password" name="password" required {{if not .D.SignIn}}autofocus{{end}} autocomplete="current-password"></label>
+    <button {{if not .D.SignIn}}class="primary"{{end}}>Sign in</button>
   </form>
   <p class="hint">Forgot it? Stop the bot and run <code>prbot -reset-password</code>.</p>
+  {{if .D.SignIn}}</details>{{end}}
 </div>
 {{end}}

@@ -1,0 +1,57 @@
+{{define "content"}}
+<div class="headrow">
+  <h1>Overview</h1>
+  <nav class="seg" aria-label="Period">{{range .D.Ranges}}<a href="?days={{.}}" class="{{if eq . $.D.Range}}active{{end}}">{{.}} days</a>{{end}}</nav>
+</div>
+{{if not .Org.Active}}<div class="flash warn">The GitHub App was uninstalled from {{.Org.Login}}, so nothing new is reviewed. Its history is kept here.</div>{{end}}
+{{if not .D.Enabled}}<div class="flash warn">No repositories are being watched. {{if .CanManage}}Turn some on under <a href="{{orgPath .Org.Login}}/repos">Repositories</a>.{{else}}Ask an owner to turn some on.{{end}}</div>{{end}}
+
+{{with .Status}}
+<p class="muted">Bot status: {{if .Current}}working on {{.Current}}{{else}}idle{{end}} · {{.QueueLen}} queued{{if .WebhooksActive}} · receiving webhooks{{end}}.
+  {{$.D.Enabled}} of {{$.D.Repos}} repositories watched · review settings: {{if $.D.CustomPolicy}}this organization's own{{else}}instance defaults{{end}}.</p>
+{{end}}
+
+{{template "stat-tiles" .D.Stats}}
+
+<div class="grid2">
+  <div class="card">{{template "day-chart" .D.Days}}</div>
+  <div class="card"><figure class="chart"><figcaption><b>Findings posted by level</b> <span class="muted">(last {{.D.Range}} days)</span></figcaption>{{sevChart .D.Stats.Sev}}</figure></div>
+</div>
+
+<div class="card">
+  <h2>Repositories <span class="muted small-h">last {{.D.Range}} days</span></h2>
+  {{if .D.RepoStats}}
+  <table>
+    <thead><tr><th>Repository</th><th>Reviews</th><th>PRs</th><th>Findings</th><th>P1–P2</th><th>Failed</th><th>Last review</th></tr></thead>
+    <tbody>
+    {{range .D.RepoStats}}
+    <tr>
+      <td><a href="{{query (printf "%s/reviews" (orgPath $.Org.Login)) "repo" .Repo}}">{{.Repo}}</a></td>
+      <td>{{.Reviews}}</td><td>{{.PRs}}</td><td>{{.Findings}}</td>
+      <td>{{if .Serious}}<b>{{.Serious}}</b>{{else}}<span class="muted">0</span>{{end}}</td>
+      <td>{{if .Errors}}<span class="bad">{{.Errors}}</span>{{else}}<span class="muted">0</span>{{end}}</td>
+      <td>{{ago .Last}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="muted">No reviews in this period.</p>{{end}}
+</div>
+
+<div class="card">
+  <h2>Open pull requests <a class="small" href="{{orgPath .Org.Login}}/prs">all →</a></h2>
+  {{if .D.Counts}}
+  <div class="chips">{{range $k, $v := .D.Counts}}<span class="pill s-{{$k}}">{{$k}}: {{$v}}</span>{{end}}</div>
+  {{else}}<p class="muted">None open.</p>{{end}}
+</div>
+
+<div class="card">
+  <h2>Recent reviews <a class="small" href="{{orgPath .Org.Login}}/reviews">all →</a></h2>
+  {{template "review-table" .D.Reviews}}
+</div>
+
+<div class="card">
+  <h2>Activity <a class="small" href="{{orgPath .Org.Login}}/activity">all →</a></h2>
+  {{template "activity-list" .D.Activity}}
+</div>
+{{end}}

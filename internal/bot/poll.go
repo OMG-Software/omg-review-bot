@@ -51,7 +51,7 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 			return fmt.Errorf("sync repositories: %w", err)
 		}
 	}
-	repos, err := b.store.ListRepos()
+	repos, err := b.store.ListRepos(store.AllAccounts)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := b.pollRepo(ctx, st, app, r); err != nil {
+		if err := b.pollRepo(ctx, b.settingsFor(st, r.AccountID), app, r); err != nil {
 			b.log.Warn("poll repo", "repo", r.FullName, "err", err)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: %w", r.FullName, err)
@@ -73,12 +73,14 @@ func (b *Bot) poll(ctx context.Context, st settings.Settings) error {
 	return firstErr
 }
 
+// syncRepos refreshes the organizations and repositories from the App's
+// installations. Each installation's account becomes an organization.
 func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.App) (int, error) {
 	insts, err := app.Installations(ctx)
 	if err != nil {
 		return 0, err
 	}
-	var keep []int64
+	var keep, orgs []int64
 	for _, in := range insts {
 		if len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, in.Account.Login) {
 			continue
@@ -87,17 +89,30 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 		if err != nil {
 			return 0, fmt.Errorf("list repos for %s: %w", in.Account.Login, err)
 		}
+		accountID := in.Account.ID
+		if accountID != 0 {
+			if err := b.store.UpsertOrg(accountID, in.Account.Login, in.Account.Type, in.ID); err != nil {
+				return 0, err
+			}
+			orgs = append(orgs, accountID)
+		}
 		for _, r := range repos {
 			if r.Archived {
 				continue
 			}
-			if err := b.store.UpsertRepo(r.ID, in.ID, r.FullName, st.GitHub.NewReposEnabled); err != nil {
+			if err := b.store.UpsertRepo(r.ID, in.ID, accountID, r.FullName, st.GitHub.NewReposEnabled); err != nil {
 				return 0, err
 			}
 			keep = append(keep, r.ID)
 		}
 	}
 	if err := b.store.PruneRepos(keep); err != nil {
+		return 0, err
+	}
+	if err := b.store.DeactivateOrgsExcept(orgs); err != nil {
+		return 0, err
+	}
+	if err := b.store.BackfillAccounts(); err != nil {
 		return 0, err
 	}
 	b.mu.Lock()
@@ -116,55 +131,24 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 		return nil
 	}
 	firstSync := !r.Synced
-	now := time.Now().Unix()
 	open := map[int]bool{}
 	var replyJobs []job
 	var newPRs []string
 
 	b.prMu.Lock()
-	for _, p := range pulls {
+	for i := range pulls {
+		p := &pulls[i]
 		open[p.Number] = true
-		pr, err := b.store.GetPR(r.FullName, p.Number)
+		u, err := b.applyPull(st, r, p, firstSync)
 		if err != nil {
 			b.prMu.Unlock()
 			return err
 		}
-		isNew := pr == nil
-		if isNew {
-			pr = &store.PR{Repo: r.FullName, Number: p.Number, TrackedAt: now, Status: "new", CommentsSeen: p.UpdatedAt}
-			if firstSync && !st.Review.ReviewExisting {
-				// First time we see this repo: record existing PRs as a baseline
-				// instead of flooding the model with a backlog.
-				pr.ReviewedSHA = p.Head.SHA
-				pr.Status = "baseline"
-			} else {
-				newPRs = append(newPRs, fmt.Sprintf("#%d", p.Number))
-			}
+		if u.isNew && !u.baseline {
+			newPRs = append(newPRs, fmt.Sprintf("#%d", p.Number))
 		}
-		pr.InstallationID = r.InstallationID
-		pr.Title, pr.Author, pr.URL = p.Title, p.User.Login, p.HTMLURL
-		pr.BaseRef, pr.HeadRef = p.Base.Ref, p.Head.Ref
-		pr.Draft, pr.Open = p.Draft, true
-		pr.Labels = pr.Labels[:0]
-		for _, l := range p.Labels {
-			pr.Labels = append(pr.Labels, l.Name)
-		}
-		if pr.HeadSHA != p.Head.SHA {
-			pr.HeadSHA = p.Head.SHA
-			// Debounce: people often push several commits in a row.
-			pr.NotBefore = now + int64(st.Review.DebounceSeconds)
-		}
-		pr.GHUpdatedAt = p.UpdatedAt
-		if !isNew && pr.CommentsSeen != p.UpdatedAt {
-			pr.CommentsSeen = p.UpdatedAt
-			if conversationsOn(st) {
-				replyJobs = append(replyJobs, job{kind: jobReplies, repo: pr.Repo, number: pr.Number})
-			}
-		}
-		b.recompute(pr, st)
-		if err := b.store.SavePR(pr); err != nil {
-			b.prMu.Unlock()
-			return err
+		if u.activity && conversationsOn(st) {
+			replyJobs = append(replyJobs, job{kind: jobReplies, repo: r.FullName, number: p.Number})
 		}
 	}
 	tracked, err := b.store.OpenPRs(r.FullName)
@@ -192,6 +176,60 @@ func (b *Bot) pollRepo(ctx context.Context, st settings.Settings, app *github.Ap
 	return b.store.SetRepoPolled(r.ID, etag)
 }
 
+// pullUpdate says what applyPull changed.
+type pullUpdate struct {
+	isNew    bool // first time the PR was seen
+	baseline bool // recorded as already reviewed (open before the repo was watched)
+	pushed   bool // the head commit changed
+	activity bool // updated since last seen (possible new comments)
+	pr       *store.PR
+}
+
+// applyPull records the current state of an open or closed PR, from a poll
+// or a webhook. The caller holds prMu.
+func (b *Bot) applyPull(st settings.Settings, r store.Repo, p *github.PullRequest, firstSync bool) (pullUpdate, error) {
+	now := time.Now().Unix()
+	pr, err := b.store.GetPR(r.FullName, p.Number)
+	if err != nil {
+		return pullUpdate{}, err
+	}
+	var u pullUpdate
+	if pr == nil {
+		u.isNew = true
+		pr = &store.PR{Repo: r.FullName, Number: p.Number, TrackedAt: now, Status: "new", CommentsSeen: p.UpdatedAt}
+		if firstSync && !st.Review.ReviewExisting {
+			// First time we see this repo: record existing PRs as a baseline
+			// instead of flooding the model with a backlog.
+			pr.ReviewedSHA = p.Head.SHA
+			pr.Status = "baseline"
+			u.baseline = true
+		}
+	}
+	pr.InstallationID = r.InstallationID
+	pr.AccountID = r.AccountID
+	pr.Title, pr.Author, pr.URL = p.Title, p.User.Login, p.HTMLURL
+	pr.BaseRef, pr.HeadRef = p.Base.Ref, p.Head.Ref
+	pr.Draft, pr.Open = p.Draft, p.State != "closed"
+	pr.Labels = pr.Labels[:0]
+	for _, l := range p.Labels {
+		pr.Labels = append(pr.Labels, l.Name)
+	}
+	if p.Head.SHA != "" && pr.HeadSHA != p.Head.SHA {
+		pr.HeadSHA = p.Head.SHA
+		u.pushed = true
+		// Debounce: people often push several commits in a row.
+		pr.NotBefore = now + int64(st.Review.DebounceSeconds)
+	}
+	pr.GHUpdatedAt = p.UpdatedAt
+	if !u.isNew && pr.CommentsSeen != p.UpdatedAt {
+		pr.CommentsSeen = p.UpdatedAt
+		u.activity = true
+	}
+	b.recompute(pr, st)
+	u.pr = pr
+	return u, b.store.SavePR(pr)
+}
+
 // recompute derives a PR's status from its facts and the settings.
 func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 	switch {
@@ -217,25 +255,22 @@ func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 }
 
 func (b *Bot) enqueueDue(st settings.Settings) {
-	if !st.Review.Enabled {
-		return
-	}
 	prs, err := b.store.DuePRs(time.Now().Unix())
 	if err != nil {
 		b.log.Warn("due PRs", "err", err)
 		return
 	}
 	for _, p := range prs {
+		if !b.settingsFor(st, p.AccountID).Review.Enabled {
+			continue
+		}
 		b.enqueue(job{kind: jobReview, repo: p.Repo, number: p.Number})
 	}
 }
 
 // maybeSweep periodically re-checks reviewed PRs for replies, as a safety net
-// in case a reply didn't change the PR list's ETag.
+// in case a reply didn't change the PR list's ETag (or its webhook was missed).
 func (b *Bot) maybeSweep(st settings.Settings) {
-	if !conversationsOn(st) {
-		return
-	}
 	b.mu.Lock()
 	due := time.Since(b.lastSweep) > sweepInterval
 	if due {
@@ -251,6 +286,9 @@ func (b *Bot) maybeSweep(st settings.Settings) {
 	}
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 	for _, p := range prs {
+		if !conversationsOn(b.settingsFor(st, p.AccountID)) {
+			continue
+		}
 		// Quiet PRs are skipped to save API calls; activity there changes the ETag anyway.
 		if t, err := time.Parse(time.RFC3339, p.GHUpdatedAt); err == nil && t.Before(cutoff) {
 			continue
