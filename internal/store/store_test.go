@@ -553,3 +553,38 @@ func TestGitHubMembershipWritesSpareManualAccess(t *testing.T) {
 		t.Errorf("access added by hand = %+v; want it left as a manual member", m)
 	}
 }
+
+// TestActivityAccount: an entry is filed under the organization it's given,
+// else the PR's, else the repository's; when a name has belonged to two
+// accounts, the newer repository's.
+func TestActivityAccount(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// acme/web was acme's (repo 100); the name now belongs to repo 900, globex's.
+	for _, r := range []struct{ id, acct int64 }{{100, 500}, {900, 600}} {
+		if _, err := st.db.Exec(`INSERT INTO repos(id, installation_id, full_name, account_id) VALUES(?,?,?,?)`,
+			r.id, r.acct/10, "acme/web", r.acct); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.SavePR(&PR{Repo: "acme/web", Number: 1, Open: true, AccountID: 500}); err != nil {
+		t.Fatal(err)
+	}
+	st.LogFor(500, "info", "", 0, "org event")
+	st.Log("info", "acme/web", 1, "PR event")
+	st.Log("info", "acme/web", 0, "repo event")
+	st.Log("info", "", 0, "instance event")
+	want := map[string]int64{"org event": 500, "PR event": 500, "repo event": 600, "instance event": 0}
+	acts, err := st.RecentActivity(AllAccounts, 10, "", 0)
+	if err != nil || len(acts) != len(want) {
+		t.Fatalf("activity = %+v, %v", acts, err)
+	}
+	for _, a := range acts {
+		if a.AccountID != want[a.Message] {
+			t.Errorf("%q filed under %d, want %d", a.Message, a.AccountID, want[a.Message])
+		}
+	}
+}

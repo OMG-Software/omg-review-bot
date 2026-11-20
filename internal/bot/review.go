@@ -283,10 +283,12 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 			// the notice shouldn't stay "under way" either.
 			b.updateNotice(cl, pr, noticeID, notice.skippedBody())
 		default:
-			// Same count handleReview uses to decide on a retry.
+			// Same count handleReview uses to decide on a retry, from the PR
+			// as stored now: pr is from before the fetch, and a push since
+			// may have changed the head the attempts are counted against.
 			attempts := 1
-			if pr.AttemptSHA == pr.HeadSHA {
-				attempts += pr.Attempts
+			if cur, _ := b.store.GetPR(pr.Repo, pr.Number); cur != nil && cur.AttemptSHA == cur.HeadSHA {
+				attempts += cur.Attempts
 			}
 			b.updateNotice(cl, pr, noticeID, notice.failedBody(attempts < maxAttempts))
 		}

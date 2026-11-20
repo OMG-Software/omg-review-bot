@@ -237,7 +237,7 @@ func (s *Server) orgMemberAdd(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, back, err)
 		return
 	}
-	s.store.Log("info", "", 0, fmt.Sprintf("%s added @%s to %s as %s", me(r).Display(), gu.Login, org.Login, role))
+	s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("%s added @%s to %s as %s", me(r).Display(), gu.Login, org.Login, role))
 	redirectMsg(w, r, back, fmt.Sprintf("Added @%s as %s. They can now sign in with GitHub.", gu.Login, role))
 }
 
@@ -276,7 +276,7 @@ func (s *Server) orgMemberRole(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, back, err)
 		return
 	}
-	s.store.Log("info", "", 0, fmt.Sprintf("%s made @%s %s of %s", me(r).Display(), m.Login, role, org.Login))
+	s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("%s made @%s %s of %s", me(r).Display(), m.Login, role, org.Login))
 	redirectMsg(w, r, back, fmt.Sprintf("@%s is now %s.", m.Login, role))
 }
 
@@ -290,7 +290,7 @@ func (s *Server) orgMemberRemove(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, back, err)
 		return
 	}
-	s.store.Log("info", "", 0, fmt.Sprintf("%s removed @%s from %s", me(r).Display(), m.Login, org.Login))
+	s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("%s removed @%s from %s", me(r).Display(), m.Login, org.Login))
 	msg := fmt.Sprintf("Removed @%s.", m.Login)
 	if m.Source == store.SourceGitHub {
 		msg += " They'll get access again the next time they sign in while they're a GitHub admin" +
@@ -347,7 +347,7 @@ func (s *Server) orgSettingsSubmit(w http.ResponseWriter, r *http.Request) {
 			redirectErr(w, r, back, err)
 			return
 		}
-		s.store.Log("info", "", 0, fmt.Sprintf("%s reset %s's review settings to the instance defaults", me(r).Display(), org.Login))
+		s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("%s reset %s's review settings to the instance defaults", me(r).Display(), org.Login))
 		s.bot.Wake()
 		redirectMsg(w, r, back, "Now using the instance's default review settings.")
 		return
@@ -365,7 +365,7 @@ func (s *Server) orgSettingsSubmit(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, back, err)
 		return
 	}
-	s.store.Log("info", "", 0, fmt.Sprintf("%s changed %s's review settings", me(r).Display(), org.Login))
+	s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("%s changed %s's review settings", me(r).Display(), org.Login))
 	s.bot.Wake()
 	redirectMsg(w, r, back, "Review settings saved. They apply from the next review.")
 }

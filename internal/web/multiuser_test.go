@@ -741,3 +741,15 @@ func TestMemberIDMustBeValid(t *testing.T) {
 		t.Errorf("GetMembership(org, 0) = %+v, want nil", m)
 	}
 }
+
+// TestOrgEventsInOrgActivity: changes an owner makes to their organization
+// show on its own activity page, not only on the administrator's.
+func TestOrgEventsInOrgActivity(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice owns acme
+	s.post("/orgs/acme/members", url.Values{"login": {"bob"}, "role": {"member"}})
+	if code, body, _ := s.get("/orgs/acme/activity"); code != http.StatusOK || !strings.Contains(body, "added @bob to acme") {
+		t.Errorf("acme's activity page (%d) doesn't show bob being added", code)
+	}
+}

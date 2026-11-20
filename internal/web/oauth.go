@@ -211,13 +211,13 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 		case cur == nil && role != "" && !excluded:
 			err = s.store.SetGitHubMembership(org.ID, u.ID, role)
 			if err == nil {
-				s.store.Log("info", "", 0, fmt.Sprintf("@%s joined %s as %s (from their GitHub role)", u.Login, org.Login, role))
+				s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("@%s joined %s as %s (from their GitHub role)", u.Login, org.Login, role))
 			}
 		case cur == nil:
 		case cur.Source == store.SourceGitHub && role == "":
 			removed, err = s.store.RemoveGitHubMembership(org.ID, u.ID)
 			if removed {
-				s.store.Log("info", "", 0, fmt.Sprintf("@%s lost access to %s (not confirmed as an admin or member on GitHub)", u.Login, org.Login))
+				s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("@%s lost access to %s (not confirmed as an admin or member on GitHub)", u.Login, org.Login))
 			}
 		case cur.Source == store.SourceGitHub && role != cur.Role:
 			err = s.store.SetGitHubMembership(org.ID, u.ID, role)
@@ -240,7 +240,7 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 			if !removed {
 				continue // added by hand meanwhile
 			}
-			s.store.Log("info", "", 0, fmt.Sprintf("@%s lost access to %s (the App's installation isn't visible to them on GitHub)", u.Login, m.OrgLogin))
+			s.store.LogFor(m.OrgID, "info", "", 0, fmt.Sprintf("@%s lost access to %s (the App's installation isn't visible to them on GitHub)", u.Login, m.OrgLogin))
 		}
 	}
 	return notes, nil

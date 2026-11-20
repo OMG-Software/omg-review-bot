@@ -792,9 +792,20 @@ type Activity struct {
 // Log records an activity entry. An entry about a repository is linked to the
 // organization that owns it; the rest (account 0) only administrators see.
 func (s *Store) Log(level, repo string, number int, msg string) {
+	s.LogFor(0, level, repo, number, msg)
+}
+
+// LogFor records an activity entry under an organization. With accountID 0
+// it's worked out from the PR, then the repository (the most recently
+// created one, if a name has belonged to two accounts); an entry about
+// neither is instance-wide, shown only to administrators.
+func (s *Store) LogFor(accountID int64, level, repo string, number int, msg string) {
 	_, _ = s.db.Exec(`INSERT INTO activity(ts, level, repo, number, message, account_id)
-VALUES(?,?,?,?,?,COALESCE((SELECT account_id FROM repos WHERE full_name=? LIMIT 1),0))`,
-		time.Now().Unix(), level, repo, number, msg, repo)
+VALUES(?,?,?,?,?,COALESCE(NULLIF(?,0),
+  (SELECT account_id FROM pulls WHERE repo=? AND number=? AND account_id<>0),
+  (SELECT account_id FROM repos WHERE full_name=? AND account_id<>0 ORDER BY id DESC LIMIT 1),
+  0))`,
+		time.Now().Unix(), level, repo, number, msg, accountID, repo, number, repo)
 	if s.logs.Add(1)%200 == 0 {
 		_, _ = s.db.Exec(`DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 20000`)
 	}
