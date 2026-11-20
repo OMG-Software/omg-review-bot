@@ -82,6 +82,11 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 	}
 	var keep, orgs []int64
 	for _, in := range insts {
+		if in.Account.ID != 0 {
+			// Still installed, even if the allow-list below skips it: only an
+			// organization whose installation is gone is marked uninstalled.
+			orgs = append(orgs, in.Account.ID)
+		}
 		if len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, in.Account.Login) {
 			continue
 		}
@@ -94,7 +99,6 @@ func (b *Bot) syncRepos(ctx context.Context, st settings.Settings, app *github.A
 			if err := b.store.UpsertOrg(accountID, in.Account.Login, in.Account.Type, in.ID); err != nil {
 				return 0, err
 			}
-			orgs = append(orgs, accountID)
 		}
 		for _, r := range repos {
 			if r.Archived {

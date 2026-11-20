@@ -21,9 +21,10 @@ func (s *Server) usersPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	orgs := map[int64][]store.Member{}
-	for _, u := range users {
-		orgs[u.ID], _ = s.store.UserMemberships(u.ID)
+	orgs, err := s.store.MembershipsByUser()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	s.render(w, r, "users.html", page{Title: "Users", Nav: "users", D: map[string]any{
 		"Users": users, "Orgs": orgs, "Me": me(r).ID,

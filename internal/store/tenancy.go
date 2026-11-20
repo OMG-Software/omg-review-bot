@@ -321,6 +321,19 @@ func (s *Store) UserMemberships(userID int64) ([]Member, error) {
 	return s.queryMembers(0, userID)
 }
 
+// MembershipsByUser lists everyone's organizations in one query, by user ID.
+func (s *Store) MembershipsByUser() (map[int64][]Member, error) {
+	ms, err := s.queryMembers(0, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := map[int64][]Member{}
+	for _, m := range ms {
+		out[m.ID] = append(out[m.ID], m)
+	}
+	return out, nil
+}
+
 // queryMembers lists one organization's members (userID 0: owners first,
 // then by login), one person's organizations (orgID 0: by name), or one
 // membership (both set).

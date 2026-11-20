@@ -92,7 +92,7 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			f.jwtCalls++
 			send(map[string]any{"id": 1, "slug": "testbot", "name": "Test Bot"})
 		case p == "/app/installations":
-			send([]any{map[string]any{"id": 10, "account": map[string]any{"login": "acme"}}})
+			send([]any{map[string]any{"id": 10, "account": map[string]any{"id": 500, "login": "acme", "type": "Organization"}}})
 		case p == "/app/installations/10/access_tokens":
 			send(map[string]any{"token": "inst-token", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)})
 		case p == "/installation/repositories":
@@ -564,6 +564,57 @@ func TestStaleSnapshotIgnored(t *testing.T) {
 	}
 	if pr, _ := st.GetPR("acme/web", 7); pr.Open {
 		t.Error("PR missing from a later poll's list wasn't closed")
+	}
+}
+
+// TestAllowListDoesntUninstall: an organization the local allow-list skips
+// is still installed, so it isn't marked uninstalled; one whose installation
+// is gone is.
+func TestAllowListDoesntUninstall(t *testing.T) {
+	gh := newFakeGitHub()
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	active := func(id int64) bool {
+		o, err := st.GetOrg(id)
+		if err != nil || o == nil {
+			t.Fatalf("org %d: %v", id, err)
+		}
+		return o.Active
+	}
+
+	if _, err := b.SyncRepos(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertOrg(600, "gone", "Organization", 20); err != nil { // no longer installed
+		t.Fatal(err)
+	}
+	cfg.GitHub.Accounts = []string{"someone-else"} // skips acme
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.SyncRepos(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !active(500) {
+		t.Error("an installed organization skipped by the allow-list was marked uninstalled")
+	}
+	if active(600) {
+		t.Error("an organization with no installation is still active")
 	}
 }
 

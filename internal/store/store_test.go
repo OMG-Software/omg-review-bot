@@ -296,6 +296,24 @@ func TestLastOwnerGuard(t *testing.T) {
 		t.Fatalf("AddMember for someone new = %v, %v; want true, nil", added, err)
 	}
 
+	// MembershipsByUser groups everyone's organizations in one query.
+	if err := st.UpsertOrg(600, "beta", "Organization", 11); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddMember(600, 41, RoleOwner); err != nil {
+		t.Fatal(err)
+	}
+	byUser, err := st.MembershipsByUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms := byUser[41]; len(ms) != 2 || ms[0].OrgLogin != "acme" || ms[1].OrgLogin != "beta" || ms[1].Role != RoleOwner {
+		t.Errorf("memberships of 41 = %+v; want acme then beta (owner)", ms)
+	}
+	if ms := byUser[42]; len(ms) != 1 || ms[0].OrgLogin != "acme" {
+		t.Errorf("memberships of 42 = %+v; want acme", ms)
+	}
+
 	ms, _ := st.ListMembers(500)
 	last := ms[0].ID
 	if err := st.SetMemberRole(500, last, RoleMember); !errors.Is(err, ErrLastOwner) {
