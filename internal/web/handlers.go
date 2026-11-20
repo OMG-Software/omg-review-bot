@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/bot"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/skill"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
@@ -503,14 +504,22 @@ func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
 
 // apiStatus reports the bot's status, without other organizations' repositories.
 func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.statusFor(me(r)))
+}
+
+// statusFor is the bot's status as v may see it: anyone but an administrator
+// sees neither another organization's repository nor the instance's
+// configuration problems and poll errors (which can name any repository).
+func (s *Server) statusFor(v *viewer) bot.Status {
 	st := s.bot.Status()
-	if v := me(r); !v.Admin && st.CurrentRepo != "" && !s.viewerSeesRepo(v, st.CurrentRepo) {
+	if v != nil && v.Admin {
+		return st
+	}
+	if st.CurrentRepo != "" && (v == nil || !s.viewerSeesRepo(v, st.CurrentRepo)) {
 		st.Current, st.CurrentRepo = "a review for another organization", ""
 	}
-	if !me(r).Admin {
-		st.ConfigIssues, st.LastPollErr = nil, ""
-	}
-	writeJSON(w, http.StatusOK, st)
+	st.ConfigIssues, st.LastPollErr = nil, ""
+	return st
 }
 
 func (s *Server) apiTestGitHub(w http.ResponseWriter, r *http.Request) {

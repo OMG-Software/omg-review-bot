@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -98,6 +99,7 @@ type testSite struct {
 	st  *store.Store
 	b   *bot.Bot
 	srv *Server
+	db  string // the database file
 	gh  *fakeGitHubWeb
 	cl  *http.Client
 	cfg settings.Settings
@@ -139,7 +141,7 @@ func newTestSite(t *testing.T) *testSite {
 	t.Cleanup(ts.Close)
 	jar, _ := cookiejar.New(nil)
 	cl := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &testSite{t: t, ts: ts, st: st, b: b, srv: srv, gh: gh, cl: cl, cfg: cfg}
+	return &testSite{t: t, ts: ts, st: st, b: b, srv: srv, db: filepath.Join(dir, "t.db"), gh: gh, cl: cl, cfg: cfg}
 }
 
 func testPEM(t *testing.T) string {
@@ -808,4 +810,52 @@ func TestEndingSessionsRetried(t *testing.T) {
 		t.Errorf("access changed by a failed sign-in: %+v, was %+v", m, before)
 	}
 	s.srv.syncAccess, s.srv.endSessions = syncAccess, endSessions
+}
+
+// TestFailedOrgWriteAtSignIn: when sign-in can't record a newly installed
+// organization, the person isn't signed in as if they had no access to it;
+// they're told it failed, and the next sign-in that can record it gives them
+// their access.
+func TestFailedOrgWriteAtSignIn(t *testing.T) {
+	s := newTestSite(t) // acme isn't recorded yet
+	db, err := sql.Open("sqlite", s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER fail_orgs BEFORE INSERT ON orgs BEGIN SELECT RAISE(ABORT, 'database is locked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if code, body, _ := s.trySignIn(); code != http.StatusOK || !strings.Contains(body, "Couldn&#39;t update your access") {
+		t.Errorf("sign-in that couldn't record the organization = %d; want it refused with an explanation", code)
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_orgs`); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn()
+	if m, _ := s.st.GetMembership(acmeID, aliceID); m == nil || m.Role != store.RoleOwner {
+		t.Errorf("access after a sign-in that could record the organization = %+v; want owner", m)
+	}
+}
+
+// TestStatusHidesInstanceErrors: the status a member gets, in pages and from
+// /api/status alike, has none of the instance's configuration problems,
+// which an administrator does see.
+func TestStatusHidesInstanceErrors(t *testing.T) {
+	s := newTestSite(t)
+	s.cfg.LLM.Model = "" // a configuration problem
+	if err := settings.Save(s.st, s.cfg); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.b.Run(ctx) // one poll, which records the configuration problems
+	if got := s.srv.statusFor(&viewer{ID: aliceID, Admin: true}); len(got.ConfigIssues) == 0 {
+		t.Fatal("an administrator's status shows no configuration problem; the test needs one")
+	}
+	for _, v := range []*viewer{{ID: aliceID}, nil} {
+		if got := s.srv.statusFor(v); got.LastPollErr != "" || got.ConfigIssues != nil {
+			t.Errorf("status for %+v = %+v; want no poll error or configuration problems", v, got)
+		}
+	}
 }

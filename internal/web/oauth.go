@@ -188,19 +188,21 @@ func (s *Server) syncMemberships(ctx context.Context, uc *github.UserClient, u *
 		// derived access to it is still kept up to date (and removed when
 		// GitHub withdraws it), but nobody gains new access to it.
 		excluded := len(st.GitHub.Accounts) > 0 && !containsFold(st.GitHub.Accounts, acct.Login)
-		org, _ := s.store.GetOrg(acct.ID)
+		org, err := s.store.GetOrg(acct.ID)
+		if err != nil {
+			return notes, fmt.Errorf("read organization %s: %w", acct.Login, err)
+		}
 		if org == nil && excluded {
 			continue // never added, so nobody has access to keep
 		}
 		if org == nil {
 			// Installed since the last repository sync: record it now.
 			if err := s.store.UpsertOrg(acct.ID, acct.Login, acct.Type, in.ID); err != nil {
-				continue
+				return notes, fmt.Errorf("record organization %s: %w", acct.Login, err)
 			}
 			s.bot.Wake()
-			org, _ = s.store.GetOrg(acct.ID)
-			if org == nil {
-				continue
+			if org, err = s.store.GetOrg(acct.ID); err != nil || org == nil {
+				return notes, fmt.Errorf("read organization %s after recording it: %w", acct.Login, err)
 			}
 		}
 		seen[org.ID] = true

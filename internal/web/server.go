@@ -239,13 +239,9 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, p p
 	}
 	p.V = me(r)
 	p.Auth = p.V != nil
-	p.Status = s.bot.Status()
+	p.Status = s.statusFor(p.V)
 	if p.Org != nil && p.Role == "" {
 		p.Role = p.V.Role(p.Org.ID)
-	}
-	if p.V != nil && !p.V.Admin && p.Status.CurrentRepo != "" && !s.viewerSeesRepo(p.V, p.Status.CurrentRepo) {
-		// Don't reveal another organization's repositories.
-		p.Status.Current, p.Status.CurrentRepo = "a review for another organization", ""
 	}
 	t := s.pages[name]
 	if t == nil {

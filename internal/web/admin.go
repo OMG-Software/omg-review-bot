@@ -98,11 +98,11 @@ func (s *Server) webhooksPage(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
-// webhook receives GitHub's deliveries. It answers quickly: the bot only
-// records state and queues work, and GitHub gives up after 10 seconds.
 // maxWebhookBody is the largest webhook payload the bot accepts.
 const maxWebhookBody = 5 << 20
 
+// webhook receives GitHub's deliveries. It answers quickly: the bot only
+// records state and queues work, and GitHub gives up after 10 seconds.
 func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
