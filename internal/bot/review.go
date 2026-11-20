@@ -129,9 +129,13 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.PR, n reviewNotice) int64 {
 	if cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number); err == nil {
 		if id := findNotice(cs, b.BotLogin(), n.head); id != 0 {
-			if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err == nil {
-				return id
+			// Even if it can't be edited now, it's this commit's notice: a
+			// second one would leave this one behind, never updated again.
+			// The edit when the review ends tries again.
+			if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err != nil {
+				b.logf("warn", pr.Repo, pr.Number, "could not update the review-started comment: %v", err)
 			}
+			return id
 		}
 	}
 	c, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, n.startedBody())

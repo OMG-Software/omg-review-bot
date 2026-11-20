@@ -53,6 +53,7 @@ type fakeGitHub struct {
 	docRefs       []string         // refs project docs were read at
 	posted        []string         // PR conversation comments the bot posted
 	edited        map[int64]string // the latest text of each comment the bot edited
+	failEdits     bool             // editing issue comments fails (a 502)
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -170,6 +171,8 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 				out = append(out, map[string]any{"id": id, "user": bot, "body": body})
 			}
 			send(out)
+		case strings.HasPrefix(p, "/repos/acme/web/issues/comments/") && r.Method == http.MethodPatch && f.failEdits:
+			w.WriteHeader(http.StatusBadGateway)
 		case strings.HasPrefix(p, "/repos/acme/web/issues/comments/") && r.Method == http.MethodPatch:
 			id, _ := strconv.ParseInt(strings.TrimPrefix(p, "/repos/acme/web/issues/comments/"), 10, 64)
 			var body map[string]string
@@ -1060,6 +1063,17 @@ func TestInterruptedReviewReusesNotice(t *testing.T) {
 	defer gh.mu.Unlock()
 	if again != first || len(gh.posted) != 1 {
 		t.Errorf("notice after an interrupted review = %d (first %d), %d posted; want the first reused", again, first, len(gh.posted))
+	}
+	// Nor when the existing notice can't be edited just now.
+	gh.failEdits = true
+	gh.mu.Unlock()
+	if id := b.announceReview(ctx, cl, pr, n); id != first {
+		t.Errorf("notice when it can't be edited = %d, want the first (%d) kept", id, first)
+	}
+	gh.mu.Lock()
+	gh.failEdits = false
+	if len(gh.posted) != 1 {
+		t.Errorf("%d notices posted when the first couldn't be edited; want it kept, not a second", len(gh.posted))
 	}
 	// A new commit gets a notice of its own.
 	gh.mu.Unlock()
