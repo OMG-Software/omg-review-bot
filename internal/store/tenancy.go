@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -604,7 +605,7 @@ FROM reviews GROUP BY account_id`, since, since)
 	return out, nil
 }
 
-// countsByAccount runs a query whose rows are an account ID followed by two or
+// countsByAccount runs a query whose rows are an account ID followed by one to
 // three numbers, and indexes them by the ID.
 func (s *Store) countsByAccount(query string, args ...any) (map[int64][3]int64, error) {
 	rows, err := s.db.Query(query, args...)
@@ -615,6 +616,9 @@ func (s *Store) countsByAccount(query string, args ...any) (map[int64][3]int64, 
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, err
+	}
+	if len(cols) < 2 || len(cols) > 4 {
+		return nil, fmt.Errorf("countsByAccount: query returns %d columns, want an ID and 1 to 3 numbers", len(cols))
 	}
 	out := map[int64][3]int64{}
 	for rows.Next() {

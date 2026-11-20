@@ -453,4 +453,7 @@ func TestOrgSummaries(t *testing.T) {
 	if only, _ := st.OrgSummaries([]int64{600}); len(only) != 1 || only[0].ID != 600 {
 		t.Errorf("OrgSummaries([600]) = %+v", only)
 	}
+	if _, err := st.countsByAccount(`SELECT 1, 2, 3, 4, 5`); err == nil {
+		t.Error("countsByAccount accepted a query with too many columns")
+	}
 }
