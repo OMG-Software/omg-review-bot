@@ -40,7 +40,7 @@
     <tr>
       <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}#{{.Number}}</span>{{else}}<a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a>{{end}}</td>
       <td><code>{{short .HeadSHA}}</code></td>
-      <td><a href="/reviews/{{.ID}}"><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span></a>{{if eq .Event "APPROVE"}} <span class="pill s-reviewed">approved</span>{{end}}</td>
+      <td><a href="/reviews/{{.ID}}"><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span></a>{{template "review-event" .Event}}</td>
       <td>{{.Comments}}{{if .Notes}} + {{.Notes}} notes{{end}}</td>
       {{if .Detailed}}<td>{{$s := index .Sev 0}}{{$m := index .Sev 1}}{{if or $s $m}}<b>{{add $s $m}}</b>{{else}}<span class="muted">0</span>{{end}}</td>
       <td>{{if .Fixed}}{{.Fixed}}{{else}}<span class="muted">0</span>{{end}}</td>{{else}}<td class="muted" title="Not recorded for reviews from before the upgrade">—</td><td class="muted">—</td>{{end}}
@@ -92,6 +92,8 @@
   <label>Wait after push (s) <input name="rv_debounce" type="number" min="0" value="{{$p.Review.DebounceSeconds}}"></label>
   <label>Max comments per review <input name="rv_max_comments" type="number" min="1" max="100" value="{{$p.Review.MaxComments}}"></label>
   <label>Max files per PR <input name="rv_max_files" type="number" min="1" value="{{$p.Review.MaxFiles}}"></label>
+  <label>Most reviews per PR <input name="rv_max_rounds" type="number" min="5" max="30" value="{{$p.Review.MaxRounds}}">
+    <small>5 to 30. After that many, new pushes aren't reviewed and the PR gets a comment saying so. <b>Review now</b> still works.</small></label>
 </div>
 <div class="row">
   <label>Post comments at
@@ -100,6 +102,9 @@
   <label>Approve when nothing is unresolved at
     <select name="rv_approval_level"><option value="off" {{if eq "off" $p.Review.ApprovalLevel}}selected{{end}}>Never approve</option>{{range .Severities}}<option value="{{.ID}}" {{if eq .ID $p.Review.ApprovalLevel}}selected{{end}}>{{.Label}} and above</option>{{end}}</select>
     <small>Can't be broader than the comment level. The bot withdraws its approval if a new push brings back a finding at this level.</small></label>
+  <label>Request changes while anything is unresolved at
+    <select name="rv_request_changes_level"><option value="off" {{if eq "off" $p.Review.RequestChangesLevel}}selected{{end}}>Never request changes</option>{{range .Severities}}<option value="{{.ID}}" {{if eq .ID $p.Review.RequestChangesLevel}}selected{{end}}>{{.Label}} and above</option>{{end}}</select>
+    <small>Can't be broader than the approval level. The bot withdraws the request once those findings are fixed or resolved.</small></label>
 </div>
 <p class="hint">Levels: {{range $i, $v := .Severities}}{{if $i}} · {{end}}<b>{{$v.Label}}</b> {{$v.Meaning}}{{end}}.
   When a later push fixes a finding, the bot replies in its thread to confirm and then resolves it.</p>
@@ -120,3 +125,6 @@
 <label class="check"><input type="checkbox" name="rp_mentions" {{if $p.Replies.Mentions}}checked{{end}}> Answer when the bot is @mentioned in a PR conversation</label>
 <label>Max bot replies per thread <input name="rp_max" type="number" min="1" value="{{$p.Replies.MaxPerThread}}"></label>
 {{end}}
+
+{{/* A posted review's event as a pill (with a leading space); nothing for a comment. Dot: the event. */}}
+{{define "review-event"}}{{if eq . "APPROVE"}} <span class="pill s-reviewed">approved</span>{{else if eq . "REQUEST_CHANGES"}} <span class="pill s-error">changes requested</span>{{end}}{{end}}

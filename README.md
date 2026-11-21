@@ -19,8 +19,13 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
   with a summary on top. You choose the lowest level that gets posted.
 - **Closes the loop.** When a later push fixes a finding, the bot replies in its thread to confirm
   the fix, then resolves the thread.
-- **Optional approval.** Pick an approval level and the bot approves once nothing at that level
-  or above is unresolved, and withdraws its approval if a later push brings one back.
+- **Approves and requests changes.** The bot requests changes while a finding at the
+  request-changes level (P3 by default) or above is unresolved. It approves once nothing at the
+  approval level (P3 by default) or above is. It withdraws either one when it no longer holds.
+  Each org can set its own levels, or turn either off.
+- **Knows when to stop.** Each review says its number on the PR ("Bot review number 3 of 10").
+  After the last one (10 by default, 5 to 30 per org), new pushes aren't reviewed and the PR gets
+  a comment saying the limit is reached. **Review now** still works.
 - **Follows your project's rules.** It reads the repository's own docs (`CLAUDE.md`, `AGENTS.md`,
   `CONTRIBUTING.md`, style guides) from the base branch and reviews against them, citing the rule.
 - **Conversations.** It replies when someone answers one of its comments, and answers when
@@ -215,9 +220,9 @@ of reviews per day and a breakdown by repository. Hover a bar for its numbers, o
 table**. The administrator's dashboard shows the same totals for every org.
 
 **Per-org review settings.** An org uses the instance's review settings until an owner saves its
-**Review settings** page. From then on it has its own: wait after push, comment and approval
-levels, comment cap, drafts, skip labels, guideline and ignore files, and replies. **Use instance
-defaults instead** removes them. The model, the skill and the review queue stay shared, so every
+**Review settings** page. From then on it has its own: wait after push, comment, approval and
+request-changes levels, comment cap, most reviews per PR, drafts, skip labels, guideline and
+ignore files, and replies. **Use instance defaults instead** removes them. The model, the skill and the review queue stay shared, so every
 org's reviews take turns on the same GPU.
 
 ### Adding more organizations
@@ -423,15 +428,27 @@ event checks it for replies, so polling only catches anything missed.
 5. It posts **one** GitHub review: inline comments plus a summary. Findings that can't be placed
    on a changed line go in the summary. If GitHub rejects an inline position, the review is
    reposted with every finding in the summary, so nothing is lost.
-6. With an *approval level* set, the review is an **approval** when no finding at that level or
-   above is open: no unresolved earlier thread and no new finding. Otherwise it's a comment that
-   says how many are open, and any earlier approval by the bot is dismissed (a later comment
-   doesn't cancel an approval on GitHub). Approval is re-checked between pushes too, so resolving
-   the last open thread, by fix or by hand, gets the PR approved. A reply in the PR triggers the
+6. With a *request-changes level* set, the review **requests changes** while a finding at that
+   level or above is open: an unresolved earlier thread or a new finding. Otherwise, with an
+   *approval level* set, the review is an **approval** when no finding at that level or above is
+   open. Anything in between is a comment that says how many findings hold back approval. A later
+   comment cancels neither an approval nor a change request on GitHub, so the bot dismisses its
+   own: an approval once a finding at the approval level is open again, and a change request once
+   nothing at the request-changes level is. Both are re-checked between pushes too. Resolving the
+   last open thread, by fix or by hand, gets the PR approved, or lifts the change request. The bot
+   doesn't request changes between pushes, though: reopening a thread by hand only withdraws the
+   approval, and the next review requests changes again. A reply in the PR triggers the
    check within a poll; a thread resolved by hand with no new comment isn't visible in the PR list,
    so it's picked up by the 15-minute re-check instead.
 7. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
    until the next push or **Review now**.
+8. Each posted review counts as one round on the PR, and its body says which ("Bot review number
+   3 of 10"). Once the bot has posted *Most reviews per PR* reviews, the next push isn't reviewed:
+   the PR shows `limit` and gets one comment saying the limit is reached. Later pushes aren't
+   reviewed either, and the comment isn't repeated. Raising the limit gets the latest push reviewed
+   as soon as the new limit is saved. **Review now** goes past the limit, and that review counts
+   as a round too. Failed reviews, reviews with nothing to review and approvals between pushes
+   don't count.
 
 **PR statuses** on the Pull requests page:
 
@@ -444,6 +461,7 @@ event checks it for replies, so polling only catches anything missed.
 | `draft` | Draft PR; reviewed once it's marked ready (if *Skip drafts* is on) |
 | `skipped` | Has a skip label, or automatic reviews were stopped on its page |
 | `error` | Review failed 3 times; see the PR page for the error |
+| `limit` | The bot has posted as many reviews as *Most reviews per PR* allows; new pushes aren't reviewed until the limit is raised or someone clicks **Review now** |
 | `closed` | Closed or merged |
 
 **Conversations.** When someone replies in a thread the bot started, the bot answers in that
@@ -474,8 +492,10 @@ defaults; an org owner can override them for their org (see
 | Wait after push | 60 s | Delay before reviewing, so several quick pushes trigger one review |
 | Max comments per review | 20 | The most severe findings are kept |
 | Post comments at | `[P5] NIT` and above | Lower levels are counted in the summary, not posted. Replaces *Minimum severity*: a saved `nit`/`minor`/`major`/`critical` becomes P5/P4/P2/P1. |
-| Approve when nothing is unresolved at | Never approve | A level from P1 to P5. Can't be broader than the comment level. For example, comments at P4 with approval at P3: the bot approves when no P1–P3 finding is open, even with open P4 comments. |
+| Approve when nothing is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never approve*. Can't be broader than the comment level. For example, comments at P4 with approval at P3: the bot approves when no P1–P3 finding is open, even with open P4 comments. An instance that saved *Never approve* before P3 became the default keeps it. |
+| Request changes while anything is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never request changes*. Can't be broader than the approval level, since a finding that requests changes must also hold back approval. With the defaults (both P3), an open P1–P3 finding requests changes and the bot approves when none is open. Make the request-changes level more severe than the approval level, for example P2 with approval at P3, and an open P3 only holds back approval. Saved settings and org policies from before this setting existed get P3 (an org gets the instance's level). |
 | Max files per PR | 150 | Remaining files are listed as not reviewed |
+| Most reviews per PR | 10 | 5 to 30. How many reviews the bot posts on one PR automatically. After that, new pushes aren't reviewed and the PR gets a comment saying the limit is reached; **Review now** still works. An org policy saved before this setting existed gets the instance's limit. |
 | Skip drafts | on | |
 | Skip labels | `no-bot-review`, `skip-review` | |
 | Project guideline files | `CLAUDE.md`, `AGENTS.md`, root `CONTRIBUTING.md`, style guides … | See [Project guidelines](#project-guidelines). Empty = off. |
@@ -608,7 +628,7 @@ Notes:
 | An open PR is never reviewed | It's probably `baseline` (it was open before the repo was watched). Push to it or click **Review now**. |
 | Reviews post with zero findings | Open the review's **Raw model output**. An empty `"comments": []` means the model found nothing, which small models often do, so try a larger code model. If the raw output has comments that weren't posted, they were filtered as duplicates or below the comment level. |
 | Fixed findings aren't resolved, or the bot never approves | Thread states come from GitHub's GraphQL API. Check the activity log for "could not read review thread states". While they can't be read, every finding counts as open, so the bot doesn't approve. The model's fix checks are in the review's raw output under `fix check:`. |
-| "could not withdraw approval" | The base branch's protection limits who can dismiss reviews. Allow the App to dismiss reviews, or dismiss the approval by hand. |
+| "could not withdraw approval" or "could not withdraw change request" | The base branch's protection limits who can dismiss reviews. Allow the App to dismiss reviews, or dismiss the review by hand. |
 | "used all its output tokens on reasoning" | Reasoning model; raise **Max output tokens** or switch model. |
 | "model context … is too small" | Raise **Context tokens** (and the model's loaded context), or shorten the skill. |
 | "did not return valid JSON" | Turn on **Enforce JSON schema output**. If your server rejects it, use a stronger model. |

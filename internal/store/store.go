@@ -719,6 +719,11 @@ func (s *Store) NextDue(after int64) int64 {
 }
 
 // ReviewedOpenPRs returns open PRs the bot has reviewed (candidates for the reply sweep).
+// LimitedPRs returns the open PRs held at their review limit.
+func (s *Store) LimitedPRs() ([]PR, error) {
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='limit' AND open=1`)
+}
+
 func (s *Store) ReviewedOpenPRs() ([]PR, error) {
 	return s.queryPRs(`SELECT * FROM pulls_v WHERE open=1 AND status IN ('reviewed','pending')`)
 }
@@ -770,7 +775,7 @@ type Review struct {
 	StartedAt        int64
 	FinishedAt       int64
 	AccountID        int64
-	Event            string // APPROVE or COMMENT once posted
+	Event            string // APPROVE, REQUEST_CHANGES or COMMENT once posted
 	Fixed            int    // earlier findings this review confirmed fixed and resolved
 	Sev              [5]int // findings posted (inline and notes) at P1..P5
 	Detailed         bool   // Sev and Fixed were recorded; false for reviews from before they were
@@ -833,6 +838,15 @@ func (s *Store) queryReviews(q string, args ...any) ([]Review, error) {
 func (s *Store) ListReviews(accountID int64, repo string, number, limit int) ([]Review, error) {
 	return s.queryReviews(`SELECT * FROM reviews_v WHERE account_id=? AND repo=? AND number=? ORDER BY id DESC LIMIT ?`,
 		accountID, repo, number, limit)
+}
+
+// PostedReviews counts the reviews the bot posted on a PR of accountID's:
+// its review rounds. Failed runs and runs with nothing to review don't count.
+func (s *Store) PostedReviews(accountID int64, repo string, number int) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM reviews WHERE account_id=? AND repo=? AND number=? AND status='posted'`,
+		accountID, repo, number).Scan(&n)
+	return n, err
 }
 
 // ReviewFilter selects reviews for the review history pages.

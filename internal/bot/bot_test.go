@@ -56,6 +56,7 @@ type fakeGitHub struct {
 	edited        map[int64]string // the latest text of each comment the bot edited
 	failEdits     bool             // editing issue comments fails (a 502)
 	failList      bool             // listing the PR's conversation comments fails (a 502)
+	mainStatus    string           // main.go's status in the PR's files; "" = modified
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -112,8 +113,12 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 		case p == "/repos/acme/web/pulls/7":
 			send(pr)
 		case p == "/repos/acme/web/pulls/7/files":
+			mainStatus := f.mainStatus
+			if mainStatus == "" {
+				mainStatus = "modified"
+			}
 			send([]any{
-				map[string]any{"filename": "main.go", "status": "modified", "additions": 2, "deletions": 0, "patch": f.patch},
+				map[string]any{"filename": "main.go", "status": mainStatus, "additions": 2, "deletions": 0, "patch": f.patch},
 				map[string]any{"filename": "go.sum", "status": "modified", "patch": "@@ -1 +1 @@\n-x\n+y"},
 			})
 		case p == "/repos/acme/web/pulls/7/comments" && r.Method == http.MethodGet:
@@ -309,23 +314,35 @@ func drain(ctx context.Context, b *Bot) {
 	}
 }
 
-func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
+// reviewEnv is a bot wired to a fake GitHub and a fake model, for the
+// end-to-end review tests.
+type reviewEnv struct {
+	gh  *fakeGitHub
+	lm  *fakeLLM
+	st  *store.Store
+	cfg settings.Settings // the saved instance settings
+	b   *Bot
+	ctx context.Context
+}
+
+// newReviewEnv starts the fakes and a bot that reviews open PRs at once.
+// review is the model's first code review; tune adjusts the instance
+// settings before they're saved.
+func newReviewEnv(t *testing.T, review string, tune func(*settings.Settings)) *reviewEnv {
+	t.Helper()
 	gh := newFakeGitHub()
 	ghSrv := httptest.NewServer(gh.handler(t))
-	defer ghSrv.Close()
-	lm := &fakeLLM{review: `{"summary":"Adds a division.","comments":[` +
-		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."},` +
-		`{"path":"b/main.go","line":999,"severity":"P3","title":"Out of range","body":"Model picked a bad line."},` +
-		`{"path":"main.go","line":12,"severity":"P5","title":"Use log","body":"Prefer a logger."}]}`}
+	t.Cleanup(ghSrv.Close)
+	lm := &fakeLLM{review: review}
 	llmSrv := httptest.NewServer(lm.handler(t))
-	defer llmSrv.Close()
+	t.Cleanup(llmSrv.Close)
 
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { _ = st.Close() })
 	cfg := settings.Defaults()
 	cfg.GitHub.AppID = 1
 	cfg.GitHub.PrivateKey = testKey(t)
@@ -334,22 +351,35 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	cfg.LLM.Model = "test-model"
 	cfg.Review.ReviewExisting = true
 	cfg.Review.DebounceSeconds = 0
-	cfg.Review.CommentLevel = "P4"  // drops the P5 nit
-	cfg.Review.ApprovalLevel = "P3" // approve once nothing at P1-P3 is open
+	tune(&cfg)
 	if err := settings.Save(st, cfg); err != nil {
 		t.Fatal(err)
 	}
-
 	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx := context.Background()
-	push := func(sha, patch, content, review, updatedAt string) {
-		gh.mu.Lock()
-		gh.head, gh.patch, gh.content, gh.updatedAt = sha, patch, content, updatedAt
-		gh.mu.Unlock()
-		lm.mu.Lock()
-		lm.review = review
-		lm.mu.Unlock()
-	}
+	return &reviewEnv{gh: gh, lm: lm, st: st, cfg: cfg, b: b, ctx: context.Background()}
+}
+
+// push moves the PR to a new head, with the model's review of it.
+func (e *reviewEnv) push(sha, patch, content, review, updatedAt string) {
+	e.gh.mu.Lock()
+	e.gh.head, e.gh.patch, e.gh.content, e.gh.updatedAt = sha, patch, content, updatedAt
+	e.gh.mu.Unlock()
+	e.lm.mu.Lock()
+	e.lm.review = review
+	e.lm.mu.Unlock()
+}
+
+func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"Adds a division.","comments":[`+
+		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."},`+
+		`{"path":"b/main.go","line":999,"severity":"P3","title":"Out of range","body":"Model picked a bad line."},`+
+		`{"path":"main.go","line":12,"severity":"P5","title":"Use log","body":"Prefer a logger."}]}`,
+		func(cfg *settings.Settings) {
+			cfg.Review.CommentLevel = "P4"                     // drops the P5 nit
+			cfg.Review.ApprovalLevel = "P3"                    // approve once nothing at P1-P3 is open
+			cfg.Review.RequestChangesLevel = settings.LevelOff // TestRequestChangesEndToEnd covers it
+		})
+	gh, lm, st, b, ctx, push := e.gh, e.lm, e.st, e.b, e.ctx, e.push
 
 	// 1) First poll discovers the PR and reviews it. A P1 is open, so no approval.
 	b.pollOnce(ctx)
@@ -525,6 +555,314 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	// (replies): later lookups come from the cache.
 	if gh.treeCalls != 2 {
 		t.Errorf("repository tree listed %d times, want 2 (cached)", gh.treeCalls)
+	}
+}
+
+// TestRequestChangesEndToEnd: an organization's own levels (request changes
+// at P2, approve at P3) apply over an instance that does neither. The bot
+// requests changes while a P1-P2 finding is open, comments while only a P3 is,
+// approves once nothing is, and dismisses its change request or approval
+// once it no longer holds.
+func TestRequestChangesEndToEnd(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"Adds a division.","comments":[`+
+		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."}]}`,
+		func(cfg *settings.Settings) {
+			cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+		})
+	gh, lm, st, b, ctx, push := e.gh, e.lm, e.st, e.b, e.ctx, e.push
+	// acme (account 500 in the fake) sets its own levels.
+	pol := e.cfg.Policy()
+	pol.Review.ApprovalLevel, pol.Review.RequestChangesLevel = "P3", "P2"
+	raw, err := settings.EncodePolicy(e.cfg, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetOrgPolicy(500, raw); err != nil {
+		t.Fatal(err)
+	}
+	// rootID finds the bot's finding comment with the given title.
+	rootID := func(title string) int64 {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		for _, c := range gh.comments {
+			if c["in_reply_to_id"] == nil && strings.Contains(c["body"].(string), title) {
+				return c["id"].(int64)
+			}
+		}
+		t.Fatalf("no finding comment titled %q", title)
+		return 0
+	}
+	resolveByHand := func(title string) {
+		id := rootID(title)
+		gh.mu.Lock()
+		gh.resolved[id] = true
+		gh.mu.Unlock()
+		b.CheckReplies("acme/web", 7, 500)
+		drain(ctx, b)
+	}
+	lastReview := func() github.ReviewRequest { return gh.reviews[len(gh.reviews)-1] }
+	wantDismissed := func(step string, want ...int64) {
+		t.Helper()
+		if fmt.Sprint(gh.dismissed) != fmt.Sprint(want) {
+			t.Fatalf("%s: dismissed = %v, want %v", step, gh.dismissed, want)
+		}
+	}
+
+	// 1) A P1 is open: the review requests changes (review 501).
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 1 || lastReview().Event != "REQUEST_CHANGES" ||
+		!strings.Contains(lastReview().Body, "Changes requested:** 1 unresolved finding(s) at [P2] MAJOR or above") {
+		t.Fatalf("first review = %+v", lastReview())
+	}
+	if rec, _ := st.ListReviews(500, "acme/web", 7, 1); len(rec) != 1 || rec[0].Event != "REQUEST_CHANGES" {
+		t.Errorf("stored review event = %+v", rec)
+	}
+	wantDismissed("first review")
+
+	// 2) A push fixes the P1 but brings a P3: that holds back approval without
+	// requesting changes, so the review is a comment (502) and the change
+	// request is withdrawn.
+	lm.mu.Lock()
+	lm.verify = fmt.Sprintf(`{"results":[{"id":%d,"fixed":true,"reason":"Guarded."}]}`, rootID("Division by zero"))
+	lm.mu.Unlock()
+	push("ccc333", "@@ -10,3 +10,6 @@ func main() {\n \ta := 1\n+\tif a == 0 {\n+\t\treturn\n+\t}\n \treturn",
+		"package main\n\nfunc main() {\n\ta := 1\n\tif a == 0 {\n\t\treturn\n\t}\n}\n",
+		`{"summary":"Guards the division.","comments":[{"path":"main.go","line":11,"severity":"P3","title":"Silent return","body":"Log why."}]}`,
+		"2026-01-01T00:10:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 2 || lastReview().Event != "COMMENT" || !strings.Contains(lastReview().Body, "Not approved:** 1 unresolved finding(s) at [P3]") {
+		t.Fatalf("second review = %+v", lastReview())
+	}
+	wantDismissed("after the P1 was fixed", 501)
+
+	// 3) Resolving the P3 by hand gets the PR approved (503). The approval
+	// replaces the (already dismissed) change request; nothing else is dismissed.
+	resolveByHand("Silent return")
+	if len(gh.reviews) != 3 || lastReview().Event != "APPROVE" || lastReview().CommitID != "ccc333" {
+		t.Fatalf("approval after resolution = %+v (%d reviews)", lastReview(), len(gh.reviews))
+	}
+	wantDismissed("after approving", 501)
+
+	// 4) The next push brings a P2 and a P3: changes are requested again (504)
+	// and the approval is withdrawn.
+	push("ddd444", "@@ -10,3 +10,5 @@ func main() {\n \ta := 1\n+\tvar m map[string]int; m[\"x\"] = a\n+\tfmt.Println(m)\n \treturn",
+		"package main\n",
+		`{"summary":"Adds a map.","comments":[`+
+			`{"path":"main.go","line":11,"severity":"P2","title":"Write to nil map","body":"Panics."},`+
+			`{"path":"main.go","line":12,"severity":"P3","title":"Unlabelled output","body":"Say what is printed."}]}`,
+		"2026-01-01T00:15:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 4 || lastReview().Event != "REQUEST_CHANGES" {
+		t.Fatalf("fourth review = %+v", lastReview())
+	}
+	wantDismissed("after the P2", 501, 503)
+
+	// 5) Resolving the P2 by hand lifts the change request, but the open P3
+	// still holds back approval: no new review.
+	resolveByHand("Write to nil map")
+	if len(gh.reviews) != 4 {
+		t.Fatalf("posted a review although the P3 is open: %+v", lastReview())
+	}
+	wantDismissed("after resolving the P2", 501, 503, 504)
+
+	// 6) Resolving the P3 too gets the PR approved.
+	resolveByHand("Unlabelled output")
+	if len(gh.reviews) != 5 || lastReview().Event != "APPROVE" || lastReview().CommitID != "ddd444" {
+		t.Fatalf("final approval = %+v (%d reviews)", lastReview(), len(gh.reviews))
+	}
+	wantDismissed("after the final approval", 501, 503, 504)
+
+	// 7) A P1 requests changes (506, withdrawing the approval 505); the push that fixes it is approved
+	// (507), which replaces the change request on GitHub. Later conversation
+	// checks must leave it alone, though its own state still reads
+	// CHANGES_REQUESTED.
+	push("eee555", "@@ -10,3 +10,4 @@ func main() {\n \ta := 1\n+\tp := (*int)(nil); _ = *p\n \treturn", "package main\n",
+		`{"summary":"Adds a pointer.","comments":[{"path":"main.go","line":11,"severity":"P1","title":"Nil dereference","body":"Panics."}]}`,
+		"2026-01-01T00:20:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 6 || lastReview().Event != "REQUEST_CHANGES" {
+		t.Fatalf("sixth review = %+v", lastReview())
+	}
+	lm.mu.Lock()
+	lm.verify = fmt.Sprintf(`{"results":[{"id":%d,"fixed":true,"reason":"Removed."}]}`, rootID("Nil dereference"))
+	lm.mu.Unlock()
+	push("fff666", "@@ -10,3 +10,4 @@ func main() {\n \ta := 1\n+\t_ = a\n \treturn", "package main\n",
+		`{"summary":"Drops the pointer.","comments":[]}`, "2026-01-01T00:25:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 7 || lastReview().Event != "APPROVE" {
+		t.Fatalf("seventh review = %+v", lastReview())
+	}
+	b.CheckReplies("acme/web", 7, 500)
+	drain(ctx, b)
+	if len(gh.reviews) != 7 {
+		t.Errorf("posted again after approving: %+v", lastReview())
+	}
+	wantDismissed("after an approval replaced the change request", 501, 503, 504, 505) // 505: withdrawn when 506 requested changes
+}
+
+// TestReviewRoundLimit: an organization's own review limit (5) stops
+// automatic reviews of a PR. Each review says its number; the push that would
+// go past the limit isn't reviewed and the PR gets one comment saying so.
+// Raising the limit lets reviews resume, and Review now goes past it.
+func TestReviewRoundLimit(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+	})
+	gh, st, b, ctx := e.gh, e.st, e.b, e.ctx
+	setLimit := func(n int) {
+		t.Helper()
+		pol := e.cfg.Policy()
+		pol.Review.MaxRounds = n
+		raw, err := settings.EncodePolicy(e.cfg, pol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetOrgPolicy(500, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	setLimit(5)
+	patch, content := gh.patch, gh.content
+	pushes := 0
+	push := func() {
+		pushes++
+		e.push(fmt.Sprintf("head%03d", pushes), patch, content, clean, fmt.Sprintf("2026-01-01T01:%02d:00Z", pushes))
+		b.pollOnce(ctx)
+		drain(ctx, b)
+	}
+	limitNotices := func() []string {
+		var out []string
+		for _, c := range gh.posted {
+			if strings.Contains(c, "prbot:review-limit") {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	wantReview := func(n int, line string) {
+		t.Helper()
+		if len(gh.reviews) != n {
+			t.Fatalf("%d reviews posted, want %d", len(gh.reviews), n)
+		}
+		if body := gh.reviews[n-1].Body; !strings.Contains(body, "_"+line+"_") {
+			t.Errorf("review %d doesn't say %q:\n%s", n, line, body)
+		}
+	}
+	status := func() string {
+		pr, _ := st.GetPR("acme/web", 7)
+		return pr.Status
+	}
+
+	// 1) The first review and four re-reviews, each numbered; the fifth is the last.
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	wantReview(1, "Bot review number 1 of 5.")
+	for i := 2; i <= 4; i++ {
+		push()
+		wantReview(i, fmt.Sprintf("Bot review number %d of 5.", i))
+	}
+	push()
+	wantReview(5, "Bot review number 5 of 5: the last automatic review of this pull request.")
+	if n := len(limitNotices()); n != 0 {
+		t.Fatalf("limit notice posted before the limit stopped a review: %d", n)
+	}
+
+	// 2) The next push isn't reviewed: the PR says the limit is reached.
+	push()
+	if len(gh.reviews) != 5 || status() != "limit" {
+		t.Fatalf("after the limit: %d reviews, status %q", len(gh.reviews), status())
+	}
+	if ns := limitNotices(); len(ns) != 1 || !strings.Contains(ns[0], "Review limit reached") ||
+		!strings.Contains(ns[0], "reviewed this pull request 5 times") || !strings.Contains(ns[0], "max=5") {
+		t.Fatalf("limit notices = %q", ns)
+	}
+
+	// 3) Later pushes aren't reviewed either, and the notice isn't repeated.
+	push()
+	if len(gh.reviews) != 5 || len(limitNotices()) != 1 || status() != "limit" {
+		t.Fatalf("second push past the limit: %d reviews, %d notices, status %q", len(gh.reviews), len(limitNotices()), status())
+	}
+
+	// 4) Raising the limit to 6 gets the push the bot held back reviewed, as
+	// the last one, at the next wake-up: no poll, so no change in the PR list
+	// (which pollRepo would skip on an unchanged ETag) is needed.
+	setLimit(6)
+	b.enqueueDue(b.Settings())
+	drain(ctx, b)
+	wantReview(6, "Bot review number 6 of 6: the last automatic review of this pull request.")
+	if got := gh.reviews[5].CommitID; got != fmt.Sprintf("head%03d", pushes) {
+		t.Errorf("review 6 is of %s, want the head pushed while held back (head%03d)", got, pushes)
+	}
+
+	// 5) Review now goes past the limit.
+	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
+		t.Fatal(err)
+	}
+	drain(ctx, b)
+	wantReview(7, "Bot review number 7, asked for by hand (automatic reviews stop at 6).")
+
+	// 6) The next push stops at the new limit, with a notice of its own.
+	push()
+	if ns := limitNotices(); len(gh.reviews) != 7 || len(ns) != 2 || !strings.Contains(ns[1], "max=6") ||
+		!strings.Contains(ns[1], "reviewed this pull request 7 times") {
+		t.Fatalf("at the raised limit: %d reviews, notices %q", len(gh.reviews), ns)
+	}
+
+	// 7) Another review by hand, then a push: still at the same limit, which
+	// the PR was already told about, so no third notice.
+	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
+		t.Fatal(err)
+	}
+	drain(ctx, b)
+	wantReview(8, "Bot review number 8, asked for by hand (automatic reviews stop at 6).")
+	push()
+	if len(gh.reviews) != 8 || len(limitNotices()) != 2 || status() != "limit" {
+		t.Fatalf("push after a second review by hand: %d reviews, %d notices, status %q", len(gh.reviews), len(limitNotices()), status())
+	}
+}
+
+// TestChangeRequestLiftedWhenNothingToReview: a push that deletes the file
+// the bot requested changes on leaves nothing to review, so no review is
+// posted, but the finding is resolved and the change request withdrawn.
+func TestChangeRequestLiftedWhenNothingToReview(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"Adds a division.","comments":[`+
+		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."}]}`,
+		func(cfg *settings.Settings) {
+			cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = "P3", "P3"
+		})
+	gh, b, ctx := e.gh, e.b, e.ctx
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 1 || gh.reviews[0].Event != "REQUEST_CHANGES" {
+		t.Fatalf("first review = %+v", gh.reviews)
+	}
+
+	gh.mu.Lock()
+	gh.mainStatus = "removed"
+	gh.mu.Unlock()
+	e.push("bbb222", gh.patch, gh.content, `{"summary":"x","comments":[]}`, "2026-01-01T00:10:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 1 {
+		t.Fatalf("posted a review with nothing to review: %+v", gh.reviews[len(gh.reviews)-1])
+	}
+	if len(gh.resolves) != 1 || len(gh.replies) != 1 || !strings.Contains(gh.replies[0], "deletes this file") {
+		t.Fatalf("finding not resolved as deleted: resolves %v, replies %q", gh.resolves, gh.replies)
+	}
+	if fmt.Sprint(gh.dismissed) != "[501]" {
+		t.Fatalf("dismissed = %v, want the change request 501", gh.dismissed)
 	}
 }
 

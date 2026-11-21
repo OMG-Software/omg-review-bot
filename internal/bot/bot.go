@@ -215,7 +215,7 @@ func (b *Bot) settingsFor(st settings.Settings, accountID int64) settings.Settin
 	out, err := b.policySettings(st, accountID)
 	if err != nil {
 		b.log.Warn("read organization policy; skipping its automatic work", "account", accountID, "err", err)
-		out.Review.Enabled, out.Review.ApprovalLevel = false, ""
+		out.Review.Enabled, out.Review.ApprovalLevel, out.Review.RequestChangesLevel = false, "", ""
 		out.Replies.Enabled, out.Replies.Mentions = false, false
 	}
 	return out

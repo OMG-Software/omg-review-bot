@@ -354,12 +354,46 @@ func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 		}
 	case pr.Status == "error" && pr.AttemptSHA == pr.HeadSHA:
 		// failed for this commit; waits for a new push or a manual retry
+	case pr.Status == "limit" && b.stillOverLimit(pr, st):
+		// reviewed as often as the bot may: later pushes wait for the limit
+		// to be raised or a review asked for by hand
 	default:
 		pr.Status = "pending"
 	}
 }
 
+// stillOverLimit reports whether a PR that reached its review limit is still
+// at it. Only PRs in that state are counted, so recompute stays cheap. If the
+// reviews can't be counted, it stays put: handleReview would only find out
+// the same way.
+func (b *Bot) stillOverLimit(pr *store.PR, st settings.Settings) bool {
+	n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number)
+	return err != nil || n >= st.Review.MaxRounds
+}
+
+// releaseLimited re-checks the PRs held at their review limit, so raising
+// the limit lets them be reviewed at once. recompute does this too, but only
+// runs when the PR list changes: pollRepo stops at an unchanged ETag.
+func (b *Bot) releaseLimited(st settings.Settings) {
+	prs, err := b.store.LimitedPRs()
+	if err != nil {
+		b.log.Warn("PRs at their review limit", "err", err)
+		return
+	}
+	for _, p := range prs {
+		b.prMu.Lock()
+		if cur, err := b.store.GetPR(p.Repo, p.Number); err == nil && cur != nil && cur.Status == "limit" {
+			b.recompute(cur, b.settingsFor(st, cur.AccountID))
+			if cur.Status != "limit" {
+				_ = b.store.SavePR(cur)
+			}
+		}
+		b.prMu.Unlock()
+	}
+}
+
 func (b *Bot) enqueueDue(st settings.Settings) {
+	b.releaseLimited(st) // first, so a PR it frees is queued now
 	prs, err := b.store.DuePRs(time.Now().Unix())
 	if err != nil {
 		b.log.Warn("due PRs", "err", err)
