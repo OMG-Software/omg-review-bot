@@ -163,6 +163,23 @@ func newTestSite(t *testing.T) *testSite {
 // them; the address and the browser's cookies stay.
 func (s *testSite) restart(srv *Server) { s.serving.Store(srv) }
 
+// access describes someone's organization access: each organization with
+// its role, where the role came from, and since when. Unlike their
+// memberships, it leaves out their sign-in record, which a failed sign-in
+// still updates.
+func (s *testSite) access(userID int64) string {
+	s.t.Helper()
+	ms, err := s.st.UserMemberships(userID)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, m := range ms {
+		fmt.Fprintf(&b, "%s:%s/%s@%d ", m.OrgLogin, m.Role, m.Source, m.MemberAt)
+	}
+	return b.String()
+}
+
 // cleanStop records that the server stopped cleanly, as Close does when no
 // sessions are left to end, without waiting for retries to notice they're
 // done.
@@ -1564,7 +1581,7 @@ func TestUnreadableNoteAddThenRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.signIn() // the session that must end
-	before, _ := s.st.UserMemberships(aliceID)
+	before := s.access(aliceID)
 	const unreadable = "[99," // cut short: it may list others
 	if err := os.WriteFile(s.srv.pending.path, []byte(unreadable), 0o600); err != nil {
 		t.Fatal(err)
@@ -1593,7 +1610,7 @@ func TestUnreadableNoteAddThenRestart(t *testing.T) {
 	if b, _ := os.ReadFile(s.srv.pending.path + ".unreadable"); string(b) != unreadable {
 		t.Errorf("note set aside = %q, want the unreadable one", b)
 	}
-	if after, _ := s.st.UserMemberships(aliceID); fmt.Sprint(after) != fmt.Sprint(before) {
+	if after := s.access(aliceID); after != before {
 		t.Errorf("access changed: %v, was %v", after, before)
 	}
 	if m, _ := s.st.GetMembership(otherID, aliceID); m == nil || m.Source != store.SourceManual || m.Role != store.RoleMember {
@@ -1653,7 +1670,7 @@ func TestUncleanStopEndsSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.signIn()
-	before, _ := s.st.UserMemberships(aliceID)
+	before := s.access(aliceID)
 	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil))) // the first never stopped
 	if err != nil {
 		t.Fatal(err)
@@ -1662,7 +1679,7 @@ func TestUncleanStopEndsSessions(t *testing.T) {
 	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
 		t.Errorf("a session survived a run that didn't stop cleanly: %d %s", code, hdr.Get("Location"))
 	}
-	if after, _ := s.st.UserMemberships(aliceID); fmt.Sprint(after) != fmt.Sprint(before) {
+	if after := s.access(aliceID); after != before {
 		t.Errorf("access changed: %v, was %v", after, before)
 	}
 	s.signIn()
@@ -1700,7 +1717,7 @@ func TestStopWithUnrecordedEndsSignsOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.signIn()
-	before, _ := s.st.UserMemberships(aliceID)
+	before := s.access(aliceID)
 	s.srv.retryWait = time.Hour
 	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
 		return nil, errors.New("database is locked")
@@ -1726,7 +1743,7 @@ func TestStopWithUnrecordedEndsSignsOut(t *testing.T) {
 	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
 		t.Errorf("a session that had to end survived the restart: %d %s", code, hdr.Get("Location"))
 	}
-	if after, _ := s.st.UserMemberships(aliceID); fmt.Sprint(after) != fmt.Sprint(before) {
+	if after := s.access(aliceID); after != before {
 		t.Errorf("access changed: %v, was %v", after, before)
 	}
 	s.srv.unreconciled.Delete(int64(aliceID)) // let the old retry stop
