@@ -20,7 +20,7 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
 - **Closes the loop.** When a later push fixes a finding, the bot replies in its thread to confirm
   the fix, then resolves the thread.
 - **Approves and requests changes.** The bot requests changes while a finding at the
-  request-changes level (P2 by default) or above is unresolved. It approves once nothing at the
+  request-changes level (P3 by default) or above is unresolved. It approves once nothing at the
   approval level (P3 by default) or above is. It withdraws either one when it no longer holds.
   Each org can set its own levels, or turn either off.
 - **Follows your project's rules.** It reads the repository's own docs (`CLAUDE.md`, `AGENTS.md`,
@@ -482,7 +482,7 @@ defaults; an org owner can override them for their org (see
 | Max comments per review | 20 | The most severe findings are kept |
 | Post comments at | `[P5] NIT` and above | Lower levels are counted in the summary, not posted. Replaces *Minimum severity*: a saved `nit`/`minor`/`major`/`critical` becomes P5/P4/P2/P1. |
 | Approve when nothing is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never approve*. Can't be broader than the comment level. For example, comments at P4 with approval at P3: the bot approves when no P1–P3 finding is open, even with open P4 comments. An instance that saved *Never approve* before P3 became the default keeps it. |
-| Request changes while anything is unresolved at | `[P2] MAJOR` and above | A level from P1 to P5, or *Never request changes*. Can't be broader than the approval level, since a finding that requests changes must also hold back approval. With the defaults, an open P1 or P2 requests changes, an open P3 only holds back approval, and the bot approves when neither is open. Saved settings and org policies from before this setting existed get P2 (an org gets the instance's level). |
+| Request changes while anything is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never request changes*. Can't be broader than the approval level, since a finding that requests changes must also hold back approval. With the defaults (both P3), an open P1–P3 finding requests changes and the bot approves when none is open. Make the request-changes level more severe than the approval level, for example P2 with approval at P3, and an open P3 only holds back approval. Saved settings and org policies from before this setting existed get P3 (an org gets the instance's level). |
 | Max files per PR | 150 | Remaining files are listed as not reviewed |
 | Skip drafts | on | |
 | Skip labels | `no-bot-review`, `skip-review` | |

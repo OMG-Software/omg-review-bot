@@ -9,7 +9,7 @@ import (
 func TestLevelsNormalize(t *testing.T) {
 	s := Defaults()
 	s.Normalize()
-	if s.Review.CommentLevel != "P5" || s.Review.ApprovalLevel != "P3" || s.Review.RequestChangesLevel != "P2" ||
+	if s.Review.CommentLevel != "P5" || s.Review.ApprovalLevel != "P3" || s.Review.RequestChangesLevel != "P3" ||
 		!s.Review.ApprovalOn() || !s.Review.RequestChangesOn() {
 		t.Errorf("defaults = %q / %q / %q", s.Review.CommentLevel, s.Review.ApprovalLevel, s.Review.RequestChangesLevel)
 	}

@@ -243,7 +243,7 @@ func Defaults() Settings {
 			MaxComments:         20,
 			CommentLevel:        "P5",
 			ApprovalLevel:       "P3",
-			RequestChangesLevel: "P2",
+			RequestChangesLevel: "P3",
 			MaxFiles:            150,
 			GuidelineFiles:      DefaultGuidelineFiles(),
 		},

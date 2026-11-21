@@ -165,7 +165,7 @@ func TestBlockingCounts(t *testing.T) {
 }
 
 func TestReviewEvent(t *testing.T) {
-	st := settings.Defaults() // request changes at P2, approve at P3
+	st := settings.Defaults() // each case sets both levels
 	for _, c := range []struct {
 		name                 string
 		apLevel, rcLevel     string

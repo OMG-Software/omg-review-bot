@@ -389,7 +389,7 @@ func TestGitHubSignInAndOrgAccess(t *testing.T) {
 		got.Review.RequestChangesOn() || got.LLM.Model != "m" {
 		t.Errorf("org policy not applied: %+v", got.Review)
 	}
-	if o := s.b.SettingsFor(otherID).Review; o.CommentLevel != "P5" || o.ApprovalLevel != "P3" || o.RequestChangesLevel != "P2" {
+	if o := s.b.SettingsFor(otherID).Review; o.CommentLevel != "P5" || o.ApprovalLevel != "P3" || o.RequestChangesLevel != "P3" {
 		t.Errorf("one org's policy leaked into another: %+v", o)
 	}
 	if _, body, _ := s.get("/orgs/acme/settings"); !strings.Contains(body, `<option value="off" selected>Never request changes</option>`) {
