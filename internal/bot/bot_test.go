@@ -602,7 +602,22 @@ func TestStaleSnapshotIgnored(t *testing.T) {
 // is gone is.
 func TestAllowListDoesntUninstall(t *testing.T) {
 	gh := newFakeGitHub()
-	b, st, cfg := newAppBot(t, gh)
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 	active := func(id int64) bool {
 		o, err := st.GetOrg(id)
@@ -661,7 +676,22 @@ func TestAllowListDoesntUninstall(t *testing.T) {
 // every wake.
 func TestRepoSyncThrottled(t *testing.T) {
 	gh := newFakeGitHub()
-	b, _, _ := newAppBot(t, gh)
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 	syncs := func() int {
 		gh.mu.Lock()
@@ -1000,7 +1030,22 @@ func TestPausedOrgNotReviewedOrRepliedIn(t *testing.T) {
 // rather than posting a second one and leaving the first "under way".
 func TestInterruptedReviewReusesNotice(t *testing.T) {
 	gh := newFakeGitHub()
-	b, _, _ := newAppBot(t, gh)
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 	app, err := b.getApp(ctx, b.Settings())
 	if err != nil {
@@ -1069,7 +1114,22 @@ func TestUnreadablePolicyFailsClosed(t *testing.T) {
 // commit's earlier notice, it posts none, rather than a second one.
 func TestNoticeLookupFailureSkipsNotice(t *testing.T) {
 	gh := newFakeGitHub()
-	b, _, _ := newAppBot(t, gh)
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 	app, err := b.getApp(ctx, b.Settings())
 	if err != nil {
@@ -1125,7 +1185,22 @@ func TestExcludedInstallationKeepsLegacyRepos(t *testing.T) {
 // is stored under the same name.
 func TestRepoActivityUsesRepoAccount(t *testing.T) {
 	gh := newFakeGitHub()
-	b, st, _ := newAppBot(t, gh)
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 	if _, err := b.SyncRepos(ctx); err != nil {
 		t.Fatal(err)
@@ -1186,28 +1261,6 @@ func TestManualActionsBoundToAccount(t *testing.T) {
 	if p, _ := st.GetPR("acme/web", 7); p == nil || p.Skip || p.Status != "pending" || p.Attempts != 0 || p.LastError != "" {
 		t.Errorf("acme's PR after another account's manual actions = %+v", p)
 	}
-}
-
-// newAppBot returns a bot, and its store and settings, whose GitHub App
-// talks to gh. Both are closed when the test ends.
-func newAppBot(t *testing.T, gh *fakeGitHub) (*Bot, *store.Store, settings.Settings) {
-	t.Helper()
-	ghSrv := httptest.NewServer(gh.handler(t))
-	t.Cleanup(ghSrv.Close)
-	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "t.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	cfg := settings.Defaults()
-	cfg.GitHub.AppID = 1
-	cfg.GitHub.PrivateKey = testKey(t)
-	cfg.GitHub.APIBaseURL = ghSrv.URL
-	if err := settings.Save(st, cfg); err != nil {
-		t.Fatal(err)
-	}
-	return New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil))), st, cfg
 }
 
 // TestForcedReviewRetriedAfterPolicyError: a manual review postponed
@@ -1354,7 +1407,22 @@ func TestReviewThreadWebhookHasPR(t *testing.T) {
 // filed under another repository that has had the name.
 func TestUnknownRepoAccountActivityUnassigned(t *testing.T) {
 	gh := newFakeGitHub()
-	b, st, _ := newAppBot(t, gh)
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 	if err := st.UpsertRepo(999, 30, 900, "acme/web", true); err != nil { // another account's, under the name
 		t.Fatal(err)
