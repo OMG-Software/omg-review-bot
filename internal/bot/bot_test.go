@@ -309,23 +309,35 @@ func drain(ctx context.Context, b *Bot) {
 	}
 }
 
-func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
+// reviewEnv is a bot wired to a fake GitHub and a fake model, for the
+// end-to-end review tests.
+type reviewEnv struct {
+	gh  *fakeGitHub
+	lm  *fakeLLM
+	st  *store.Store
+	cfg settings.Settings // the saved instance settings
+	b   *Bot
+	ctx context.Context
+}
+
+// newReviewEnv starts the fakes and a bot that reviews open PRs at once.
+// review is the model's first code review; tune adjusts the instance
+// settings before they're saved.
+func newReviewEnv(t *testing.T, review string, tune func(*settings.Settings)) *reviewEnv {
+	t.Helper()
 	gh := newFakeGitHub()
 	ghSrv := httptest.NewServer(gh.handler(t))
-	defer ghSrv.Close()
-	lm := &fakeLLM{review: `{"summary":"Adds a division.","comments":[` +
-		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."},` +
-		`{"path":"b/main.go","line":999,"severity":"P3","title":"Out of range","body":"Model picked a bad line."},` +
-		`{"path":"main.go","line":12,"severity":"P5","title":"Use log","body":"Prefer a logger."}]}`}
+	t.Cleanup(ghSrv.Close)
+	lm := &fakeLLM{review: review}
 	llmSrv := httptest.NewServer(lm.handler(t))
-	defer llmSrv.Close()
+	t.Cleanup(llmSrv.Close)
 
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { _ = st.Close() })
 	cfg := settings.Defaults()
 	cfg.GitHub.AppID = 1
 	cfg.GitHub.PrivateKey = testKey(t)
@@ -334,23 +346,35 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	cfg.LLM.Model = "test-model"
 	cfg.Review.ReviewExisting = true
 	cfg.Review.DebounceSeconds = 0
-	cfg.Review.CommentLevel = "P4"                     // drops the P5 nit
-	cfg.Review.ApprovalLevel = "P3"                    // approve once nothing at P1-P3 is open
-	cfg.Review.RequestChangesLevel = settings.LevelOff // TestRequestChangesEndToEnd covers it
+	tune(&cfg)
 	if err := settings.Save(st, cfg); err != nil {
 		t.Fatal(err)
 	}
-
 	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx := context.Background()
-	push := func(sha, patch, content, review, updatedAt string) {
-		gh.mu.Lock()
-		gh.head, gh.patch, gh.content, gh.updatedAt = sha, patch, content, updatedAt
-		gh.mu.Unlock()
-		lm.mu.Lock()
-		lm.review = review
-		lm.mu.Unlock()
-	}
+	return &reviewEnv{gh: gh, lm: lm, st: st, cfg: cfg, b: b, ctx: context.Background()}
+}
+
+// push moves the PR to a new head, with the model's review of it.
+func (e *reviewEnv) push(sha, patch, content, review, updatedAt string) {
+	e.gh.mu.Lock()
+	e.gh.head, e.gh.patch, e.gh.content, e.gh.updatedAt = sha, patch, content, updatedAt
+	e.gh.mu.Unlock()
+	e.lm.mu.Lock()
+	e.lm.review = review
+	e.lm.mu.Unlock()
+}
+
+func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"Adds a division.","comments":[`+
+		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."},`+
+		`{"path":"b/main.go","line":999,"severity":"P3","title":"Out of range","body":"Model picked a bad line."},`+
+		`{"path":"main.go","line":12,"severity":"P5","title":"Use log","body":"Prefer a logger."}]}`,
+		func(cfg *settings.Settings) {
+			cfg.Review.CommentLevel = "P4"                     // drops the P5 nit
+			cfg.Review.ApprovalLevel = "P3"                    // approve once nothing at P1-P3 is open
+			cfg.Review.RequestChangesLevel = settings.LevelOff // TestRequestChangesEndToEnd covers it
+		})
+	gh, lm, st, b, ctx, push := e.gh, e.lm, e.st, e.b, e.ctx, e.push
 
 	// 1) First poll discovers the PR and reviews it. A P1 is open, so no approval.
 	b.pollOnce(ctx)
@@ -535,36 +559,16 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 // approves once nothing is, and dismisses its change request or approval
 // once it no longer holds.
 func TestRequestChangesEndToEnd(t *testing.T) {
-	gh := newFakeGitHub()
-	ghSrv := httptest.NewServer(gh.handler(t))
-	defer ghSrv.Close()
-	lm := &fakeLLM{review: `{"summary":"Adds a division.","comments":[` +
-		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."}]}`}
-	llmSrv := httptest.NewServer(lm.handler(t))
-	defer llmSrv.Close()
-
-	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	cfg := settings.Defaults()
-	cfg.GitHub.AppID = 1
-	cfg.GitHub.PrivateKey = testKey(t)
-	cfg.GitHub.APIBaseURL = ghSrv.URL
-	cfg.LLM.BaseURL = llmSrv.URL + "/v1"
-	cfg.LLM.Model = "test-model"
-	cfg.Review.ReviewExisting = true
-	cfg.Review.DebounceSeconds = 0
-	cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
-	if err := settings.Save(st, cfg); err != nil {
-		t.Fatal(err)
-	}
+	e := newReviewEnv(t, `{"summary":"Adds a division.","comments":[`+
+		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."}]}`,
+		func(cfg *settings.Settings) {
+			cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+		})
+	gh, lm, st, b, ctx, push := e.gh, e.lm, e.st, e.b, e.ctx, e.push
 	// acme (account 500 in the fake) sets its own levels.
-	pol := cfg.Policy()
+	pol := e.cfg.Policy()
 	pol.Review.ApprovalLevel, pol.Review.RequestChangesLevel = "P3", "P2"
-	raw, err := settings.EncodePolicy(cfg, pol)
+	raw, err := settings.EncodePolicy(e.cfg, pol)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,17 +577,6 @@ func TestRequestChangesEndToEnd(t *testing.T) {
 	}
 	if err := st.SetOrgPolicy(500, raw); err != nil {
 		t.Fatal(err)
-	}
-
-	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx := context.Background()
-	push := func(sha, patch, content, review, updatedAt string) {
-		gh.mu.Lock()
-		gh.head, gh.patch, gh.content, gh.updatedAt = sha, patch, content, updatedAt
-		gh.mu.Unlock()
-		lm.mu.Lock()
-		lm.review = review
-		lm.mu.Unlock()
 	}
 	// rootID finds the bot's finding comment with the given title.
 	rootID := func(title string) int64 {
