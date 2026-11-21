@@ -877,3 +877,40 @@ func TestUpdateGitHubMembership(t *testing.T) {
 		t.Error("update changed access added by hand")
 	}
 }
+
+// TestBackfillKeepsGivenActivity: an entry recorded as unassigned on purpose
+// (LogAs with 0) stays unassigned after a restart's backfill, and an older
+// unassigned entry is only matched to a PR a stored repository of the same
+// installation backs.
+func TestBackfillKeepsGivenActivity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertRepo(999, 30, 900, "acme/web", true); err != nil { // another account's, under the name
+		t.Fatal(err)
+	}
+	if err := st.SavePR(&PR{Repo: "acme/web", Number: 1, Open: true, AccountID: 900, InstallationID: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePR(&PR{Repo: "acme/api", Number: 2, Open: true, AccountID: 900, InstallationID: 31}); err != nil { // no repository backs it
+		t.Fatal(err)
+	}
+	st.LogAs(0, "info", "acme/web", 0, "given: account not known")
+	if _, err := st.db.Exec(`INSERT INTO activity(ts, level, repo, number, message, account_id) VALUES(?,?,?,?,?,0)`,
+		time.Now().Unix()+1, "info", "acme/api", 0, "legacy: no backing repository"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BackfillAccounts(); err != nil {
+		t.Fatal(err)
+	}
+	acts, _ := st.RecentActivity(900, 50, "", 0)
+	for _, a := range acts {
+		t.Errorf("filed under account 900 by the backfill: %q", a.Message)
+	}
+	if acts, _ := st.RecentActivity(0, 50, "", 0); len(acts) != 2 {
+		t.Errorf("unassigned entries after the backfill = %d, want 2", len(acts))
+	}
+}
