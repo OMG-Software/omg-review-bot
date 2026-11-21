@@ -98,13 +98,14 @@ func TestPagesRender(t *testing.T) {
 		"llm_max_output": {"2048"}, "rv_enabled": {"on"}, "rv_ignore": {"*.lock\nvendor/"},
 		"rv_comment_level": {"P4"}, "rv_approval_level": {"P5"}, // approval broader than comments: clamped to P4
 		"rv_request_changes_level": {"P5"}, // broader than the approval level: clamped to P4 too
+		"rv_max_rounds":            {"50"}, // above the 30 allowed
 		"rv_guidelines":            {"CLAUDE.md\n/CONTRIBUTING.md"},
 	}
 	post("/settings", form, ts.URL)
 	got, _ := settings.Load(st)
 	if got.GitHub.AppID != 42 || got.LLM.Provider != "ollama" || got.LLM.ContextTokens != 16384 ||
 		len(got.Review.IgnorePatterns) != 2 || got.Replies.Enabled || got.Review.CommentLevel != "P4" || got.Review.ApprovalLevel != "P4" ||
-		got.Review.RequestChangesLevel != "P4" || len(got.Review.GuidelineFiles) != 2 || got.Review.GuidelineFiles[1] != "/CONTRIBUTING.md" {
+		got.Review.RequestChangesLevel != "P4" || got.Review.MaxRounds != 30 || len(got.Review.GuidelineFiles) != 2 || got.Review.GuidelineFiles[1] != "/CONTRIBUTING.md" {
 		t.Errorf("settings not saved as submitted: %+v", got)
 	}
 	_, body := get("/settings")

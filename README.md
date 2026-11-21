@@ -23,6 +23,9 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
   request-changes level (P3 by default) or above is unresolved. It approves once nothing at the
   approval level (P3 by default) or above is. It withdraws either one when it no longer holds.
   Each org can set its own levels, or turn either off.
+- **Knows when to stop.** Each review says its number on the PR ("Bot review number 3 of 10").
+  After the last one (10 by default, 5 to 30 per org), new pushes aren't reviewed and the PR gets
+  a comment saying the limit is reached. **Review now** still works.
 - **Follows your project's rules.** It reads the repository's own docs (`CLAUDE.md`, `AGENTS.md`,
   `CONTRIBUTING.md`, style guides) from the base branch and reviews against them, citing the rule.
 - **Conversations.** It replies when someone answers one of its comments, and answers when
@@ -218,8 +221,8 @@ table**. The administrator's dashboard shows the same totals for every org.
 
 **Per-org review settings.** An org uses the instance's review settings until an owner saves its
 **Review settings** page. From then on it has its own: wait after push, comment, approval and
-request-changes levels, comment cap, drafts, skip labels, guideline and ignore files, and replies. **Use instance
-defaults instead** removes them. The model, the skill and the review queue stay shared, so every
+request-changes levels, comment cap, most reviews per PR, drafts, skip labels, guideline and
+ignore files, and replies. **Use instance defaults instead** removes them. The model, the skill and the review queue stay shared, so every
 org's reviews take turns on the same GPU.
 
 ### Adding more organizations
@@ -439,6 +442,12 @@ event checks it for replies, so polling only catches anything missed.
    so it's picked up by the 15-minute re-check instead.
 7. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
    until the next push or **Review now**.
+8. Each posted review counts as one round on the PR, and its body says which ("Bot review number
+   3 of 10"). Once the bot has posted *Most reviews per PR* reviews, the next push isn't reviewed:
+   the PR shows `limit` and gets one comment saying the limit is reached. Later pushes aren't
+   reviewed either, and the comment isn't repeated. Raising the limit lets the next push be
+   reviewed. **Review now** goes past the limit, and that review counts as a round too. Failed
+   reviews, reviews with nothing to review and approvals between pushes don't count.
 
 **PR statuses** on the Pull requests page:
 
@@ -451,6 +460,7 @@ event checks it for replies, so polling only catches anything missed.
 | `draft` | Draft PR; reviewed once it's marked ready (if *Skip drafts* is on) |
 | `skipped` | Has a skip label, or automatic reviews were stopped on its page |
 | `error` | Review failed 3 times; see the PR page for the error |
+| `limit` | The bot has posted as many reviews as *Most reviews per PR* allows; new pushes aren't reviewed until the limit is raised or someone clicks **Review now** |
 | `closed` | Closed or merged |
 
 **Conversations.** When someone replies in a thread the bot started, the bot answers in that
@@ -484,6 +494,7 @@ defaults; an org owner can override them for their org (see
 | Approve when nothing is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never approve*. Can't be broader than the comment level. For example, comments at P4 with approval at P3: the bot approves when no P1–P3 finding is open, even with open P4 comments. An instance that saved *Never approve* before P3 became the default keeps it. |
 | Request changes while anything is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never request changes*. Can't be broader than the approval level, since a finding that requests changes must also hold back approval. With the defaults (both P3), an open P1–P3 finding requests changes and the bot approves when none is open. Make the request-changes level more severe than the approval level, for example P2 with approval at P3, and an open P3 only holds back approval. Saved settings and org policies from before this setting existed get P3 (an org gets the instance's level). |
 | Max files per PR | 150 | Remaining files are listed as not reviewed |
+| Most reviews per PR | 10 | 5 to 30. How many reviews the bot posts on one PR automatically. After that, new pushes aren't reviewed and the PR gets a comment saying the limit is reached; **Review now** still works. An org policy saved before this setting existed gets the instance's limit. |
 | Skip drafts | on | |
 | Skip labels | `no-bot-review`, `skip-review` | |
 | Project guideline files | `CLAUDE.md`, `AGENTS.md`, root `CONTRIBUTING.md`, style guides … | See [Project guidelines](#project-guidelines). Empty = off. |

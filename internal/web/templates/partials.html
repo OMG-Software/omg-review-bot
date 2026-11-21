@@ -92,6 +92,8 @@
   <label>Wait after push (s) <input name="rv_debounce" type="number" min="0" value="{{$p.Review.DebounceSeconds}}"></label>
   <label>Max comments per review <input name="rv_max_comments" type="number" min="1" max="100" value="{{$p.Review.MaxComments}}"></label>
   <label>Max files per PR <input name="rv_max_files" type="number" min="1" value="{{$p.Review.MaxFiles}}"></label>
+  <label>Most reviews per PR <input name="rv_max_rounds" type="number" min="5" max="30" value="{{$p.Review.MaxRounds}}">
+    <small>5 to 30. After that many, new pushes aren't reviewed and the PR gets a comment saying so. <b>Review now</b> still works.</small></label>
 </div>
 <div class="row">
   <label>Post comments at

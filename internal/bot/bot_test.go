@@ -703,6 +703,125 @@ func TestRequestChangesEndToEnd(t *testing.T) {
 	wantDismissed("after an approval replaced the change request", 501, 503, 504, 505) // 505: withdrawn when 506 requested changes
 }
 
+// TestReviewRoundLimit: an organization's own review limit (5) stops
+// automatic reviews of a PR. Each review says its number; the push that would
+// go past the limit isn't reviewed and the PR gets one comment saying so.
+// Raising the limit lets reviews resume, and Review now goes past it.
+func TestReviewRoundLimit(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+	})
+	gh, st, b, ctx := e.gh, e.st, e.b, e.ctx
+	setLimit := func(n int) {
+		t.Helper()
+		pol := e.cfg.Policy()
+		pol.Review.MaxRounds = n
+		raw, err := settings.EncodePolicy(e.cfg, pol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetOrgPolicy(500, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	setLimit(5)
+	patch, content := gh.patch, gh.content
+	pushes := 0
+	push := func() {
+		pushes++
+		e.push(fmt.Sprintf("head%03d", pushes), patch, content, clean, fmt.Sprintf("2026-01-01T01:%02d:00Z", pushes))
+		b.pollOnce(ctx)
+		drain(ctx, b)
+	}
+	limitNotices := func() []string {
+		var out []string
+		for _, c := range gh.posted {
+			if strings.Contains(c, "prbot:review-limit") {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	wantReview := func(n int, line string) {
+		t.Helper()
+		if len(gh.reviews) != n {
+			t.Fatalf("%d reviews posted, want %d", len(gh.reviews), n)
+		}
+		if body := gh.reviews[n-1].Body; !strings.Contains(body, "_"+line+"_") {
+			t.Errorf("review %d doesn't say %q:\n%s", n, line, body)
+		}
+	}
+	status := func() string {
+		pr, _ := st.GetPR("acme/web", 7)
+		return pr.Status
+	}
+
+	// 1) The first review and four re-reviews, each numbered; the fifth is the last.
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	wantReview(1, "Bot review number 1 of 5.")
+	for i := 2; i <= 4; i++ {
+		push()
+		wantReview(i, fmt.Sprintf("Bot review number %d of 5.", i))
+	}
+	push()
+	wantReview(5, "Bot review number 5 of 5: the last automatic review of this pull request.")
+	if n := len(limitNotices()); n != 0 {
+		t.Fatalf("limit notice posted before the limit stopped a review: %d", n)
+	}
+
+	// 2) The next push isn't reviewed: the PR says the limit is reached.
+	push()
+	if len(gh.reviews) != 5 || status() != "limit" {
+		t.Fatalf("after the limit: %d reviews, status %q", len(gh.reviews), status())
+	}
+	if ns := limitNotices(); len(ns) != 1 || !strings.Contains(ns[0], "Review limit reached") ||
+		!strings.Contains(ns[0], "reviewed this pull request 5 times") || !strings.Contains(ns[0], "max=5") {
+		t.Fatalf("limit notices = %q", ns)
+	}
+
+	// 3) Later pushes aren't reviewed either, and the notice isn't repeated.
+	push()
+	if len(gh.reviews) != 5 || len(limitNotices()) != 1 || status() != "limit" {
+		t.Fatalf("second push past the limit: %d reviews, %d notices, status %q", len(gh.reviews), len(limitNotices()), status())
+	}
+
+	// 4) Raising the limit to 6 lets the next push be reviewed, as the last one.
+	setLimit(6)
+	push()
+	wantReview(6, "Bot review number 6 of 6: the last automatic review of this pull request.")
+
+	// 5) Review now goes past the limit.
+	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
+		t.Fatal(err)
+	}
+	drain(ctx, b)
+	wantReview(7, "Bot review number 7, asked for by hand (automatic reviews stop at 6).")
+
+	// 6) The next push stops at the new limit, with a notice of its own.
+	push()
+	if ns := limitNotices(); len(gh.reviews) != 7 || len(ns) != 2 || !strings.Contains(ns[1], "max=6") ||
+		!strings.Contains(ns[1], "reviewed this pull request 7 times") {
+		t.Fatalf("at the raised limit: %d reviews, notices %q", len(gh.reviews), ns)
+	}
+
+	// 7) Another review by hand, then a push: still at the same limit, which
+	// the PR was already told about, so no third notice.
+	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
+		t.Fatal(err)
+	}
+	drain(ctx, b)
+	wantReview(8, "Bot review number 8, asked for by hand (automatic reviews stop at 6).")
+	push()
+	if len(gh.reviews) != 8 || len(limitNotices()) != 2 || status() != "limit" {
+		t.Fatalf("push after a second review by hand: %d reviews, %d notices, status %q", len(gh.reviews), len(limitNotices()), status())
+	}
+}
+
 // TestStaleSnapshotIgnored: a PR state older than the one recorded (a poll
 // that started before a webhook arrived) doesn't overwrite it.
 func TestStaleSnapshotIgnored(t *testing.T) {

@@ -215,6 +215,33 @@ type reviewInfo struct {
 	rereview      bool
 	fixed         int    // earlier findings confirmed fixed and resolved during this review
 	verdict       string // approval or change-request line; "" when there's nothing to say
+	round         int    // this review's number on the PR; 0 when it couldn't be counted
+	maxRounds     int    // how many reviews the bot posts automatically
+}
+
+// roundLine numbers the review on the PR, against the automatic limit.
+func roundLine(round, maxRounds int) string {
+	switch {
+	case round <= 0:
+		return ""
+	case round < maxRounds:
+		return fmt.Sprintf("Bot review number %d of %d.", round, maxRounds)
+	case round == maxRounds:
+		return fmt.Sprintf("Bot review number %d of %d: the last automatic review of this pull request.", round, maxRounds)
+	}
+	return fmt.Sprintf("Bot review number %d, asked for by hand (automatic reviews stop at %d).", round, maxRounds)
+}
+
+// limitMarker tags the review-limit notice for a limit, so it's posted once.
+func limitMarker(maxRounds int) string {
+	return fmt.Sprintf("<!-- prbot:review-limit max=%d -->", maxRounds)
+}
+
+// limitBody is the PR comment posted when the review limit stops a review.
+func limitBody(rounds, maxRounds int) string {
+	return fmt.Sprintf("🛑 **Review limit reached.** I've reviewed this pull request %d times, the most I review one pull request automatically, "+
+		"so I won't review further pushes. To get another review, use **Review now** on this pull request's page in the bot, "+
+		"or raise *Most reviews per PR* in the review settings.\n%s", rounds, limitMarker(maxRounds))
 }
 
 var notesMarkerRE = regexp.MustCompile(`<!-- prbot:review notes=([P1-5,]*) -->`)
@@ -238,7 +265,11 @@ func reviewBody(ri reviewInfo) string {
 	if ri.rereview {
 		title = "Automated re-review"
 	}
-	fmt.Fprintf(&sb, "### 🤖 %s of `%s`\n\n%s\n\n", title, short(ri.head), strings.TrimSpace(ri.summary))
+	fmt.Fprintf(&sb, "### 🤖 %s of `%s`\n\n", title, short(ri.head))
+	if l := roundLine(ri.round, ri.maxRounds); l != "" {
+		fmt.Fprintf(&sb, "_%s_\n\n", l)
+	}
+	fmt.Fprintf(&sb, "%s\n\n", strings.TrimSpace(ri.summary))
 
 	counts := map[string]int{}
 	for _, f := range ri.inline {

@@ -101,3 +101,34 @@ func TestLegacyMinSeverityMigrates(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxRounds(t *testing.T) {
+	if d := Defaults(); d.Review.MaxRounds != 10 {
+		t.Errorf("default review rounds = %d, want 10", d.Review.MaxRounds)
+	}
+	for in, want := range map[int]int{0: 5, 3: 5, 5: 5, 12: 12, 30: 30, 31: 30, 500: 30} {
+		s := Defaults()
+		s.Review.MaxRounds = in
+		s.Normalize()
+		if s.Review.MaxRounds != want {
+			t.Errorf("review rounds %d -> %d, want %d", in, s.Review.MaxRounds, want)
+		}
+	}
+
+	// An organization sets its own; a policy saved before the setting
+	// existed inherits the instance's.
+	base := Defaults()
+	base.Review.MaxRounds = 20
+	base.Normalize()
+	raw, err := EncodePolicy(base, Policy{Review: Review{MaxRounds: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := ParsePolicy(raw); !ok || base.WithPolicy(p).Review.MaxRounds != 7 {
+		t.Errorf("org review rounds from %s = %d, want 7", raw, base.WithPolicy(p).Review.MaxRounds)
+	}
+	old, _ := ParsePolicy(`{"review":{"comment_level":"P5"}}`)
+	if got := base.WithPolicy(old).Review.MaxRounds; got != 20 {
+		t.Errorf("old policy's review rounds = %d, want the instance's 20", got)
+	}
+}

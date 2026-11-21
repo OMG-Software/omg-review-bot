@@ -446,6 +446,7 @@ func parsePolicy(r *http.Request, cur settings.Policy) settings.Policy {
 		v.Review.RequestChangesLevel = l
 	}
 	v.Review.MaxFiles = num("rv_max_files", v.Review.MaxFiles)
+	v.Review.MaxRounds = num("rv_max_rounds", v.Review.MaxRounds)
 	v.Review.ReviewExisting = on("rv_existing")
 
 	v.Replies.Enabled = on("rp_enabled")

@@ -81,6 +81,16 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		b.prMu.Unlock()
 		return
 	}
+	if !j.force { // a review asked for by hand goes past the limit
+		if rounds, over := b.overRoundLimit(pr, st); over {
+			pr.Status = "limit"
+			_ = b.store.SavePR(pr)
+			b.prMu.Unlock()
+			b.logf("info", pr.Repo, pr.Number, "not reviewing %s: the bot has reviewed this PR %d times, its limit", short(pr.HeadSHA), rounds)
+			b.announceLimit(ctx, st, pr, rounds)
+			return
+		}
+	}
 	pr.Status = "reviewing"
 	pr.LastError = ""
 	_ = b.store.SavePR(pr)
@@ -177,6 +187,44 @@ func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.P
 		return 0
 	}
 	return c.ID
+}
+
+// overRoundLimit reports how many reviews the bot has posted on the PR, and
+// whether that's as many as it may post automatically. If they can't be
+// counted, it isn't over: a review too many beats a PR never reviewed.
+func (b *Bot) overRoundLimit(pr *store.PR, st settings.Settings) (rounds int, over bool) {
+	rounds, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number)
+	if err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not count the bot's reviews of this PR: %v", err)
+		return 0, false
+	}
+	return rounds, rounds >= st.Review.MaxRounds
+}
+
+// announceLimit posts the review-limit notice, once per limit: a limit that
+// is raised and reached again gets a notice of its own.
+func (b *Bot) announceLimit(ctx context.Context, st settings.Settings, pr *store.PR, rounds int) {
+	app, err := b.getApp(ctx, st)
+	if err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not post the review-limit comment: %v", err)
+		return
+	}
+	cl := app.Installation(pr.InstallationID)
+	cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number)
+	if err != nil {
+		// Without the list, a second notice could be posted; leave it out.
+		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier review-limit comment, so none is posted: %v", err)
+		return
+	}
+	marker := limitMarker(st.Review.MaxRounds)
+	for _, c := range cs {
+		if strings.EqualFold(c.User.Login, b.BotLogin()) && strings.Contains(c.Body, marker) {
+			return
+		}
+	}
+	if _, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, limitBody(rounds, st.Review.MaxRounds)); err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not post the review-limit comment: %v", err)
+	}
 }
 
 // updateNotice edits the review notice, even if the review was cancelled.
@@ -452,7 +500,11 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	blocking, requesting := open(st.Review.ApprovalLevel), open(st.Review.RequestChangesLevel)
 	event := reviewEvent(st, blocking, requesting)
 	ri := reviewInfo{summary: summary, head: head, inline: inline, notes: notes, plan: p, dropped: dropped,
-		model: st.LLM.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed}
+		model: st.LLM.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed,
+		maxRounds: st.Review.MaxRounds}
+	if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err == nil {
+		ri.round = n + 1 // this one isn't "posted" yet
+	}
 	post := func(ri reviewInfo, event string) (*github.Review, []github.DraftComment, error) {
 		ri.verdict = verdictLine(st, event, blocking, requesting)
 		drafts := make([]github.DraftComment, 0, len(ri.inline))

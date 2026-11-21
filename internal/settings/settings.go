@@ -63,8 +63,11 @@ type Review struct {
 	// be broader than the approval level: a finding that requests changes
 	// must also hold back approval.
 	RequestChangesLevel string `json:"request_changes_level"`
-	MaxFiles            int    `json:"max_files"`
-	ReviewExisting      bool   `json:"review_existing"`
+	// MaxRounds is how many reviews the bot posts on one PR automatically
+	// (MinRounds..MaxRoundsLimit). A review asked for by hand goes past it.
+	MaxRounds      int  `json:"max_rounds"`
+	MaxFiles       int  `json:"max_files"`
+	ReviewExisting bool `json:"review_existing"`
 	// GuidelineFiles are gitignore-style patterns for the repository's own
 	// rules and conventions docs, read from the PR's base branch. Empty = off.
 	GuidelineFiles []string `json:"guideline_files"`
@@ -118,6 +121,9 @@ func (s Settings) WithPolicy(p Policy) Settings {
 		// Saved before the setting existed: inherit the instance's level.
 		// Turning it off is saved as LevelOff, never "".
 		p.Review.RequestChangesLevel = s.Review.RequestChangesLevel
+	}
+	if p.Review.MaxRounds == 0 {
+		p.Review.MaxRounds = s.Review.MaxRounds // likewise; 0 is never a saved limit
 	}
 	s.Review, s.Replies = p.Review, p.Replies
 	s.Normalize()
@@ -178,6 +184,13 @@ var Severities = []Severity{
 	{"P4", "[P4] MINOR (Quality)", "🔵", "not a bug: maintainability, duplication, missing tests, clarity"},
 	{"P5", "[P5] NIT", "⚪", "style or taste with no behavioural effect"},
 }
+
+// The range and default of Review.MaxRounds.
+const (
+	MinRounds      = 5
+	MaxRoundsLimit = 30
+	DefaultRounds  = 10
+)
 
 // LevelOff is the ApprovalLevel or RequestChangesLevel that turns it off.
 const LevelOff = "off"
@@ -244,6 +257,7 @@ func Defaults() Settings {
 			CommentLevel:        "P5",
 			ApprovalLevel:       "P3",
 			RequestChangesLevel: "P3",
+			MaxRounds:           DefaultRounds,
 			MaxFiles:            150,
 			GuidelineFiles:      DefaultGuidelineFiles(),
 		},
@@ -284,6 +298,7 @@ func (s *Settings) Normalize() {
 	s.Review.DebounceSeconds = clamp(s.Review.DebounceSeconds, 0, 3600)
 	s.Review.MaxComments = clamp(s.Review.MaxComments, 1, 100)
 	s.Review.MaxFiles = clamp(s.Review.MaxFiles, 1, 3000)
+	s.Review.MaxRounds = clamp(s.Review.MaxRounds, MinRounds, MaxRoundsLimit)
 	if p, ok := legacySeverity[s.Review.LegacyMinSeverity]; ok {
 		s.Review.CommentLevel = p // old "minor" covered quality issues too, hence P4
 	}

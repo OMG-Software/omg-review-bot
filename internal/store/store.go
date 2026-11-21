@@ -835,6 +835,15 @@ func (s *Store) ListReviews(accountID int64, repo string, number, limit int) ([]
 		accountID, repo, number, limit)
 }
 
+// PostedReviews counts the reviews the bot posted on a PR of accountID's:
+// its review rounds. Failed runs and runs with nothing to review don't count.
+func (s *Store) PostedReviews(accountID int64, repo string, number int) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM reviews WHERE account_id=? AND repo=? AND number=? AND status='posted'`,
+		accountID, repo, number).Scan(&n)
+	return n, err
+}
+
 // ReviewFilter selects reviews for the review history pages.
 type ReviewFilter struct {
 	AccountID int64  // AllAccounts for every organization

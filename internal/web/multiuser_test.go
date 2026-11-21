@@ -382,14 +382,14 @@ func TestGitHubSignInAndOrgAccess(t *testing.T) {
 
 	// As owner she sets the org's own policy and adds a member.
 	if code, _ := s.post("/orgs/acme/settings", url.Values{"rv_enabled": {"on"}, "rv_comment_level": {"P2"}, "rv_approval_level": {"P1"},
-		"rv_request_changes_level": {"off"}}); code != http.StatusSeeOther {
+		"rv_request_changes_level": {"off"}, "rv_max_rounds": {"7"}}); code != http.StatusSeeOther {
 		t.Fatalf("org settings = %d", code)
 	}
 	if got := s.b.SettingsFor(acmeID); got.Review.CommentLevel != "P2" || got.Review.ApprovalLevel != "P1" ||
-		got.Review.RequestChangesOn() || got.LLM.Model != "m" {
+		got.Review.RequestChangesOn() || got.Review.MaxRounds != 7 || got.LLM.Model != "m" {
 		t.Errorf("org policy not applied: %+v", got.Review)
 	}
-	if o := s.b.SettingsFor(otherID).Review; o.CommentLevel != "P5" || o.ApprovalLevel != "P3" || o.RequestChangesLevel != "P3" {
+	if o := s.b.SettingsFor(otherID).Review; o.CommentLevel != "P5" || o.ApprovalLevel != "P3" || o.RequestChangesLevel != "P3" || o.MaxRounds != 10 {
 		t.Errorf("one org's policy leaked into another: %+v", o)
 	}
 	if _, body, _ := s.get("/orgs/acme/settings"); !strings.Contains(body, `<option value="off" selected>Never request changes</option>`) {
