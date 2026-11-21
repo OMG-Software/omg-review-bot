@@ -49,9 +49,10 @@ func (b *Bot) handleReplies(ctx context.Context, j job) {
 }
 
 // conversationsOn reports whether reviewed PRs need watching between pushes:
-// for replies, mentions, or approving once threads are resolved.
+// for replies, mentions, or approving (or lifting a change request) once
+// threads are resolved.
 func conversationsOn(st settings.Settings) bool {
-	return st.Replies.Enabled || st.Replies.Mentions || st.Review.ApprovalOn()
+	return st.Replies.Enabled || st.Replies.Mentions || st.Review.ApprovalOn() || st.Review.RequestChangesOn()
 }
 
 func isBotUser(u github.User) bool {

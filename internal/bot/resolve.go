@@ -61,26 +61,42 @@ func (b *Bot) loadBotThreads(ctx context.Context, cl *github.Client, pr *store.P
 	return threads, true
 }
 
-// blocks reports whether a finding at sev holds back approval. A level the
-// bot can't read counts, so an unreadable finding never lets a PR through.
-func blocks(st settings.Settings, sev string) bool {
-	return settings.SeverityRank(sev) <= settings.SeverityRank(st.Review.ApprovalLevel)
+// atOrAbove reports whether a finding at sev reaches level (the approval or
+// request-changes level). A level the bot can't read on the finding counts,
+// so an unreadable finding never lets a PR through. A level that is off
+// (rank 0) is reached by nothing.
+func atOrAbove(sev, level string) bool {
+	lr := settings.SeverityRank(level)
+	return lr > 0 && settings.SeverityRank(sev) <= lr
 }
 
-func countBlocking(st settings.Settings, threads []botThread) int {
+// countOpen counts the unresolved threads at level or above.
+func countOpen(level string, threads []botThread) int {
 	n := 0
 	for _, t := range threads {
-		if !t.resolved && blocks(st, t.severity()) {
+		if !t.resolved && atOrAbove(t.severity(), level) {
 			n++
 		}
 	}
 	return n
 }
 
-func countBlockingFindings(st settings.Settings, fs []finding) int {
+// countFindings counts the findings at level or above.
+func countFindings(level string, fs []finding) int {
 	n := 0
 	for _, f := range fs {
-		if blocks(st, f.Severity) {
+		if atOrAbove(f.Severity, level) {
+			n++
+		}
+	}
+	return n
+}
+
+// countLevels counts the severities (e.g. a review's notes) at level or above.
+func countLevels(level string, sevs []string) int {
+	n := 0
+	for _, s := range sevs {
+		if atOrAbove(s, level) {
 			n++
 		}
 	}
@@ -298,33 +314,89 @@ func sortedUnique(xs []int) []int {
 
 // ---------- approval ----------
 
-// withdrawApproval dismisses the bot's standing approvals: a later COMMENT
-// review doesn't replace an approval on GitHub, so it has to be dismissed.
-func (b *Bot) withdrawApproval(ctx context.Context, st settings.Settings, cl *github.Client, pr *store.PR, login string, blocking int) {
-	reviews, err := cl.Reviews(ctx, pr.Repo, pr.Number)
-	if err != nil {
-		b.logf("warn", pr.Repo, pr.Number, "could not list reviews to withdraw approval: %v", err)
+// standing says which of the bot's earlier reviews to dismiss: a later
+// COMMENT review replaces neither an approval nor a change request on
+// GitHub, so each has to be dismissed once it no longer holds.
+type standing struct {
+	withdrawApproval bool // something at the approval level is open
+	blocking         int  // how many, for the dismissal message
+	liftRequest      bool // nothing at the request-changes level is open
+}
+
+// dismissStanding dismisses the bot's approvals and/or change requests, as s
+// says. reviews is the PR's review list (oldest first) when the caller
+// already has it; nil fetches it.
+//
+// GitHub keeps each review's own state, so a change request the bot later
+// replaced with an approval still reads CHANGES_REQUESTED. Change requests
+// are only dismissed when one is in force: the bot's latest approval or
+// change request is one, or the approvals that replaced it are being
+// withdrawn now.
+func (b *Bot) dismissStanding(ctx context.Context, st settings.Settings, cl *github.Client, pr *store.PR, login string, s standing, reviews []github.Review) {
+	if !s.withdrawApproval && !s.liftRequest {
 		return
 	}
-	msg := fmt.Sprintf("%d unresolved finding(s) at %s or above.", blocking, settings.SeverityInfo(st.Review.ApprovalLevel).Label)
+	if reviews == nil {
+		var err error
+		if reviews, err = cl.Reviews(ctx, pr.Repo, pr.Number); err != nil {
+			b.logf("warn", pr.Repo, pr.Number, "could not list reviews to update the bot's approval or change request: %v", err)
+			return
+		}
+	}
+	latest, approvals, requests := "", 0, 0
 	for _, r := range reviews {
-		if r.User.Login != login || r.State != "APPROVED" {
+		if r.User.Login != login {
+			continue
+		}
+		switch r.State {
+		case "APPROVED":
+			latest = r.State
+			approvals++
+		case "CHANGES_REQUESTED":
+			latest = r.State
+			requests++
+		}
+	}
+	withdrawing := s.withdrawApproval && approvals > 0
+	lifting := s.liftRequest && requests > 0 && (latest == "CHANGES_REQUESTED" || withdrawing)
+	if !withdrawing && !lifting {
+		return
+	}
+	withdraw := fmt.Sprintf("%d unresolved finding(s) at %s or above.", s.blocking, settings.SeverityInfo(st.Review.ApprovalLevel).Label)
+	lift := "Changes are no longer requested by this bot."
+	if st.Review.RequestChangesOn() {
+		lift = fmt.Sprintf("No unresolved findings at %s or above.", settings.SeverityInfo(st.Review.RequestChangesLevel).Label)
+	}
+	for _, r := range reviews {
+		if r.User.Login != login {
+			continue
+		}
+		var msg, what string
+		switch {
+		case r.State == "APPROVED" && withdrawing:
+			msg, what = withdraw, "approval"
+		case r.State == "CHANGES_REQUESTED" && lifting:
+			msg, what = lift, "change request"
+		default:
 			continue
 		}
 		if err := cl.DismissReview(ctx, pr.Repo, pr.Number, r.ID, msg); err != nil {
-			b.logf("warn", pr.Repo, pr.Number, "could not withdraw approval %d: %v", r.ID, err)
+			b.logf("warn", pr.Repo, pr.Number, "could not withdraw %s %d: %v", what, r.ID, err)
 			continue
 		}
-		b.logf("info", pr.Repo, pr.Number, "withdrew approval: %s", msg)
+		b.logf("info", pr.Repo, pr.Number, "withdrew %s: %s", what, msg)
 	}
 }
 
-// syncApproval keeps the approval in line with the findings between pushes,
-// e.g. after a thread is resolved in conversation: it approves the reviewed
-// head once nothing at or above the approval level is open, and withdraws an
-// approval when something is.
+// syncApproval keeps the approval and change request in line with the
+// findings between pushes, e.g. after a thread is resolved in conversation:
+// it approves the reviewed head once nothing at or above the approval level
+// is open, withdraws an approval when something is, and lifts a change
+// request once nothing at or above the request-changes level is open. It
+// doesn't request changes between pushes: a thread reopened by hand only
+// withdraws the approval, and the next review requests changes again.
 func (b *Bot) syncApproval(ctx context.Context, st settings.Settings, cl *github.Client, pr *store.PR, login string) error {
-	if !st.Review.ApprovalOn() || pr.HeadSHA == "" || pr.ReviewedSHA != pr.HeadSHA || !pr.Open {
+	if (!st.Review.ApprovalOn() && !st.Review.RequestChangesOn()) || pr.HeadSHA == "" || pr.ReviewedSHA != pr.HeadSHA || !pr.Open {
 		return nil
 	}
 	comments, err := cl.ReviewComments(ctx, pr.Repo, pr.Number)
@@ -340,7 +412,7 @@ func (b *Bot) syncApproval(ctx context.Context, st settings.Settings, cl *github
 		return err
 	}
 	var notes []string
-	reviewedHead, approvedHead, approved := false, false, false
+	reviewedHead, approvedHead := false, false
 	for _, r := range reviews { // oldest first
 		if r.User.Login != login {
 			continue
@@ -348,30 +420,29 @@ func (b *Bot) syncApproval(ctx context.Context, st settings.Settings, cl *github
 		if ns, ok := noteSeverities(r.Body); ok && r.CommitID == pr.HeadSHA {
 			notes, reviewedHead = ns, true
 		}
-		if r.State == "APPROVED" {
-			approved = true
-			approvedHead = approvedHead || r.CommitID == pr.HeadSHA
+		if r.State == "APPROVED" && r.CommitID == pr.HeadSHA {
+			approvedHead = true
 		}
 	}
 	if !reviewedHead {
 		return nil // no review was posted for this commit (e.g. nothing reviewable)
 	}
-	blocking := countBlocking(st, threads)
-	for _, s := range notes {
-		if blocks(st, s) {
-			blocking++
-		}
-	}
-	level := settings.SeverityInfo(st.Review.ApprovalLevel).Label
-	switch {
-	case blocking == 0 && !approvedHead:
+	apOn := st.Review.ApprovalOn()
+	blocking := countOpen(st.Review.ApprovalLevel, threads) + countLevels(st.Review.ApprovalLevel, notes)
+	requesting := countOpen(st.Review.RequestChangesLevel, threads) + countLevels(st.Review.RequestChangesLevel, notes)
+	if apOn && blocking == 0 && !approvedHead {
+		// An approval replaces the bot's change request too, so nothing to lift.
+		level := settings.SeverityInfo(st.Review.ApprovalLevel).Label
 		body := fmt.Sprintf("✅ **Approved:** every finding at %s or above is now resolved.\n<!-- prbot:approval -->", level)
 		if _, err := cl.CreateReview(ctx, pr.Repo, pr.Number, github.ReviewRequest{CommitID: pr.HeadSHA, Body: body, Event: "APPROVE"}); err != nil {
 			return fmt.Errorf("approve: %w", err)
 		}
 		b.logf("info", pr.Repo, pr.Number, "approved %s: no unresolved findings at %s or above", short(pr.HeadSHA), level)
-	case blocking > 0 && approved:
-		b.withdrawApproval(ctx, st, cl, pr, login, blocking)
+		return nil
 	}
+	b.dismissStanding(ctx, st, cl, pr, login, standing{
+		withdrawApproval: apOn && blocking > 0, blocking: blocking,
+		liftRequest: requesting == 0,
+	}, reviews)
 	return nil
 }

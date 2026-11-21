@@ -23,7 +23,7 @@
       {{if not $.Org}}<td>{{with index $.D.OrgNames .AccountID}}<a href="{{orgPath .}}">{{.}}</a>{{else}}<span class="muted">—</span>{{end}}</td>{{end}}
       <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}#{{.Number}}</span>{{else}}<a href="/prs/{{.Repo}}/{{.Number}}">{{.Repo}}#{{.Number}}</a>{{end}}</td>
       <td><code>{{short .HeadSHA}}</code></td>
-      <td><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span>{{if eq .Event "APPROVE"}} <span class="pill s-reviewed">approved</span>{{end}}{{if .URL}} <a href="{{.URL}}" target="_blank" rel="noopener" title="Open on GitHub">↗</a>{{end}}</td>
+      <td><span class="pill s-{{.Status}}" {{if .Error}}title="{{.Error}}"{{end}}>{{.Status}}</span>{{template "review-event" .Event}}{{if .URL}} <a href="{{.URL}}" target="_blank" rel="noopener" title="Open on GitHub">↗</a>{{end}}</td>
       <td>{{.Comments}}{{if .Notes}} + {{.Notes}}{{end}}</td>
       {{if .Detailed}}{{range .Sev}}<td>{{if .}}{{.}}{{else}}<span class="muted">·</span>{{end}}</td>{{end}}
       <td>{{if .Fixed}}{{.Fixed}}{{else}}<span class="muted">·</span>{{end}}</td>{{else}}<td class="muted" colspan="6" title="Not recorded for reviews from before the upgrade">—</td>{{end}}

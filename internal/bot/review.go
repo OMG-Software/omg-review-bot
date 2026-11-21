@@ -81,6 +81,16 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		b.prMu.Unlock()
 		return
 	}
+	if !j.force { // a review asked for by hand goes past the limit
+		if rounds, over := b.overRoundLimit(pr, st); over {
+			pr.Status = "limit"
+			_ = b.store.SavePR(pr)
+			b.prMu.Unlock()
+			b.logf("info", pr.Repo, pr.Number, "not reviewing %s: the bot has reviewed this PR %d times, its limit", short(pr.HeadSHA), rounds)
+			b.announceLimit(ctx, st, pr, rounds)
+			return
+		}
+	}
 	pr.Status = "reviewing"
 	pr.LastError = ""
 	_ = b.store.SavePR(pr)
@@ -177,6 +187,44 @@ func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.P
 		return 0
 	}
 	return c.ID
+}
+
+// overRoundLimit reports how many reviews the bot has posted on the PR, and
+// whether that's as many as it may post automatically. If they can't be
+// counted, it isn't over: a review too many beats a PR never reviewed.
+func (b *Bot) overRoundLimit(pr *store.PR, st settings.Settings) (rounds int, over bool) {
+	rounds, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number)
+	if err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not count the bot's reviews of this PR: %v", err)
+		return 0, false
+	}
+	return rounds, rounds >= st.Review.MaxRounds
+}
+
+// announceLimit posts the review-limit notice, once per limit: a limit that
+// is raised and reached again gets a notice of its own.
+func (b *Bot) announceLimit(ctx context.Context, st settings.Settings, pr *store.PR, rounds int) {
+	app, err := b.getApp(ctx, st)
+	if err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not post the review-limit comment: %v", err)
+		return
+	}
+	cl := app.Installation(pr.InstallationID)
+	cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number)
+	if err != nil {
+		// Without the list, a second notice could be posted; leave it out.
+		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier review-limit comment, so none is posted: %v", err)
+		return
+	}
+	marker := limitMarker(st.Review.MaxRounds)
+	for _, c := range cs {
+		if strings.EqualFold(c.User.Login, b.BotLogin()) && strings.Contains(c.Body, marker) {
+			return
+		}
+	}
+	if _, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, limitBody(rounds, st.Review.MaxRounds)); err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not post the review-limit comment: %v", err)
+	}
 }
 
 // updateNotice edits the review notice, even if the review was cancelled.
@@ -408,6 +456,15 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		rec.Status = "nothing to review"
 		rec.Summary = "No reviewable changes (all files were deleted, binary or ignored)."
 		b.logf("info", pr.Repo, pr.Number, "nothing to review at %s", short(head))
+		if threadsKnown {
+			// No review is posted, but the fix check may have resolved what
+			// the bot's change request was about (say, by the PR deleting the
+			// file), and nothing else would lift it: syncApproval only acts
+			// on a commit the bot posted a review for.
+			b.dismissStanding(ctx, st, cl, pr, login, standing{
+				liftRequest: countOpen(st.Review.RequestChangesLevel, threads) == 0 && pr.ReviewedSHA != "",
+			}, nil)
+		}
 		return head, nil
 	}
 
@@ -443,20 +500,22 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		summary = b.synthesizeSummary(ctx, lc, st, gp, summaries, append(append([]finding{}, inline...), notes...))
 	}
 
-	// Approve when nothing at or above the approval level is left open: no
-	// unresolved earlier thread and no new finding.
-	blocking := 0
-	if st.Review.ApprovalOn() {
-		blocking = countBlocking(st, threads) + countBlockingFindings(st, inline) + countBlockingFindings(st, notes)
+	// Request changes while anything at or above the request-changes level is
+	// open; otherwise approve when nothing at or above the approval level is:
+	// no unresolved earlier thread and no new finding.
+	open := func(level string) int {
+		return countOpen(level, threads) + countFindings(level, inline) + countFindings(level, notes)
 	}
-	event := "COMMENT"
-	if st.Review.ApprovalOn() && blocking == 0 {
-		event = "APPROVE"
-	}
+	blocking, requesting := open(st.Review.ApprovalLevel), open(st.Review.RequestChangesLevel)
+	event := reviewEvent(st, blocking, requesting)
 	ri := reviewInfo{summary: summary, head: head, inline: inline, notes: notes, plan: p, dropped: dropped,
-		model: st.LLM.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed}
+		model: st.LLM.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed,
+		maxRounds: st.Review.MaxRounds}
+	if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err == nil {
+		ri.round = n + 1 // this one isn't "posted" yet
+	}
 	post := func(ri reviewInfo, event string) (*github.Review, []github.DraftComment, error) {
-		ri.verdict = verdictLine(st, event, blocking)
+		ri.verdict = verdictLine(st, event, blocking, requesting)
 		drafts := make([]github.DraftComment, 0, len(ri.inline))
 		for _, f := range ri.inline {
 			drafts = append(drafts, github.DraftComment{Path: f.Path, Line: f.Line, Side: "RIGHT", Body: commentBody(f)})
@@ -473,17 +532,22 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		ri.inline = nil
 		rv, drafts, err = post(ri, event)
 	}
-	if err != nil && event == "APPROVE" && (github.IsStatus(err, 422) || github.IsStatus(err, 403)) {
-		b.logf("warn", pr.Repo, pr.Number, "GitHub refused the approval (%v); posting the review as a comment", err)
+	if err != nil && event != "COMMENT" && (github.IsStatus(err, 422) || github.IsStatus(err, 403)) {
+		// e.g. GitHub doesn't let an account approve or request changes on its own PR.
+		what := map[string]string{"APPROVE": "the approval", "REQUEST_CHANGES": "the change request"}[event]
+		b.logf("warn", pr.Repo, pr.Number, "GitHub refused %s (%v); posting the review as a comment", what, err)
 		event = "COMMENT"
 		rv, drafts, err = post(ri, event)
 	}
 	if err != nil {
 		return "", fmt.Errorf("post review: %w", err)
 	}
-	if st.Review.ApprovalOn() && blocking > 0 {
-		b.withdrawApproval(ctx, st, cl, pr, login, blocking)
-	}
+	// A change request can only be standing if the bot reviewed the PR before,
+	// so a first review skips listing the reviews just to find none.
+	b.dismissStanding(ctx, st, cl, pr, login, standing{
+		withdrawApproval: st.Review.ApprovalOn() && blocking > 0, blocking: blocking,
+		liftRequest: requesting == 0 && event != "APPROVE" && pr.ReviewedSHA != "",
+	}, nil)
 	rec.GHReviewID, rec.URL = rv.ID, rv.HTMLURL
 	rec.Summary, rec.Comments, rec.Notes, rec.Status = summary, len(drafts), len(ri.notes), "posted"
 	rec.Event = event
@@ -497,19 +561,32 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	return head, nil
 }
 
-// verdictLine explains the approval decision in the review body.
-func verdictLine(st settings.Settings, event string, blocking int) string {
-	if !st.Review.ApprovalOn() {
-		return ""
+// reviewEvent picks the review's event from the open findings: blocking at
+// the approval level, requesting at the request-changes level.
+func reviewEvent(st settings.Settings, blocking, requesting int) string {
+	switch {
+	case st.Review.RequestChangesOn() && requesting > 0:
+		return "REQUEST_CHANGES"
+	case st.Review.ApprovalOn() && blocking == 0:
+		return "APPROVE"
 	}
-	level := settings.SeverityInfo(st.Review.ApprovalLevel).Label
-	if event == "APPROVE" {
-		return fmt.Sprintf("✅ **Approved:** no unresolved findings at %s or above.", level)
+	return "COMMENT"
+}
+
+// verdictLine explains the approval or change-request decision in the review
+// body; "" when there's nothing to say.
+func verdictLine(st settings.Settings, event string, blocking, requesting int) string {
+	switch {
+	case event == "REQUEST_CHANGES":
+		return fmt.Sprintf("🛑 **Changes requested:** %d unresolved finding(s) at %s or above. I'll withdraw this once they're fixed or resolved.",
+			requesting, settings.SeverityInfo(st.Review.RequestChangesLevel).Label)
+	case event == "APPROVE":
+		return fmt.Sprintf("✅ **Approved:** no unresolved findings at %s or above.", settings.SeverityInfo(st.Review.ApprovalLevel).Label)
+	case st.Review.ApprovalOn() && blocking > 0:
+		return fmt.Sprintf("⛔ **Not approved:** %d unresolved finding(s) at %s or above. I'll approve once they're fixed or resolved.",
+			blocking, settings.SeverityInfo(st.Review.ApprovalLevel).Label)
 	}
-	if blocking == 0 {
-		return "" // approval was refused by GitHub; the log says why
-	}
-	return fmt.Sprintf("⛔ **Not approved:** %d unresolved finding(s) at %s or above. I'll approve once they're fixed or resolved.", blocking, level)
+	return "" // nothing blocks, or GitHub refused the approval or change request (the log says why)
 }
 
 // chatJSON asks for structured output, retrying once with a nudge if the
