@@ -96,7 +96,10 @@ type Bot struct {
 	lastSweep   time.Time
 	lastPoll    time.Time
 	lastWebhook time.Time
-	queued      map[string]bool
+	queued      map[string]bool // key → whether the queued job is a manual review
+	// upgrades holds a manual review asked for while an automatic one for
+	// the same PR was queued: that queue entry is run as the manual review.
+	upgrades map[string]job
 
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
@@ -112,6 +115,7 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		dataDir:     dataDir,
 		log:         log,
 		queued:      map[string]bool{},
+		upgrades:    map[string]job{},
 		jobs:        make(chan job, 4096),
 		wake:        make(chan struct{}, 1),
 		kick:        make(chan struct{}, 1),
@@ -296,20 +300,49 @@ func (b *Bot) processLog(level, repo string, number int, msg string) {
 	}
 }
 
-func (b *Bot) enqueue(j job) bool {
+func (b *Bot) enqueue(j job) bool { return b.push(j) == pushed }
+
+type pushResult int
+
+const (
+	pushed        pushResult = iota // queued (or folded into the PR's queued job)
+	alreadyQueued                   // an equivalent job is queued already
+	queueFull
+)
+
+func (b *Bot) push(j job) pushResult {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.queued[j.key()] {
-		return false
+	if manual, ok := b.queued[j.key()]; ok {
+		if j.force && !manual {
+			// An automatic review of this PR is queued: it runs as this
+			// manual one instead, so the request isn't lost to it.
+			b.upgrades[j.key()] = j
+			b.queued[j.key()] = true
+			return pushed
+		}
+		return alreadyQueued
 	}
 	select {
 	case b.jobs <- j:
-		b.queued[j.key()] = true
-		return true
+		b.queued[j.key()] = j.force
+		return pushed
 	default:
 		b.log.Warn("job queue full, dropping", "job", j.key())
-		return false
+		return queueFull
 	}
+}
+
+// dequeued is a job the worker has taken off the queue, as it is to run.
+func (b *Bot) dequeued(j job) job {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.queued, j.key())
+	if u, ok := b.upgrades[j.key()]; ok {
+		delete(b.upgrades, j.key())
+		return u
+	}
+	return j
 }
 
 func (b *Bot) worker(ctx context.Context) {
@@ -318,10 +351,7 @@ func (b *Bot) worker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case j := <-b.jobs:
-			b.mu.Lock()
-			delete(b.queued, j.key())
-			b.mu.Unlock()
-			b.runJob(ctx, j)
+			b.runJob(ctx, b.dequeued(j))
 			b.mu.Lock()
 			b.status.Current, b.status.CurrentRepo, b.status.CurrentAccount = "", "", 0
 			b.mu.Unlock()

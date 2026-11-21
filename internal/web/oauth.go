@@ -138,12 +138,10 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 			// Noted on disk too, so a restart before a retry gets through
 			// still keeps them out. If that fails as well, the retry tries
 			// both until one is stored.
-			noted := true
 			if err := s.pending.add(u.ID); err != nil {
 				s.log.Error("note sessions to end after a restart; will retry", "user", u.Login, "err", err)
-				noted = false
 			}
-			s.startRetry(u.ID, u.Login, noted)
+			s.startRetry(u.ID, u.Login)
 		}
 		fail("Couldn't update your access, so you weren't signed in. Try again; if it keeps happening, tell an administrator.")
 		return
@@ -171,11 +169,10 @@ func (s *Server) userLock(id int64) *sync.Mutex {
 }
 
 // startRetry starts retryEndSessions for id unless it's already running.
-// noted says whether the pending file already lists them. Callers hold the
-// person's lock, as retryEndSessions does when it stops.
-func (s *Server) startRetry(id int64, login string, noted bool) {
+// Callers hold the person's lock, as retryEndSessions does when it stops.
+func (s *Server) startRetry(id int64, login string) {
 	if _, already := s.retrying.LoadOrStore(id, true); !already {
-		go s.retryEndSessions(id, login, noted)
+		go s.retryEndSessions(id, login)
 	}
 }
 
@@ -238,7 +235,7 @@ func (s *Server) resumePendingEnds() error {
 		s.unreconciled.Store(id, true)
 		if err := s.endSessions(id); err != nil {
 			s.log.Error("end sessions noted by an earlier run; will retry", "user", id, "err", err)
-			s.startRetry(id, fmt.Sprint(id), true)
+			s.startRetry(id, fmt.Sprint(id))
 			continue
 		}
 		s.log.Info("ended sessions noted by an earlier run", "user", id)
@@ -253,11 +250,11 @@ func (s *Server) resumePendingEnds() error {
 // backing off to every five minutes, until it works or a sign-in has updated
 // their access. Until then only the in-memory block stops their sessions, and
 // that wouldn't last a restart.
-func (s *Server) retryEndSessions(id int64, login string, noted bool) {
+func (s *Server) retryEndSessions(id int64, login string) {
 	wait := s.retryWait
 	for {
 		time.Sleep(wait)
-		if s.retryEndOnce(id, login, &noted) {
+		if s.retryEndOnce(id, login) {
 			return
 		}
 		wait = min(wait*2, 5*time.Minute)
@@ -268,7 +265,12 @@ func (s *Server) retryEndSessions(id int64, login string, noted bool) {
 // It holds the person's lock throughout, so no sign-in comes between ending
 // the sessions and clearing the note: a failure recorded after it is left for
 // a retry of its own, which can start once this one has stopped.
-func (s *Server) retryEndOnce(id int64, login string, noted *bool) bool {
+//
+// Each try notes them on disk first (if they're listed already, that's
+// cheap). A sign-in that got through may have cleared the note since this
+// retry started, and a later failure that couldn't write its own leaves it
+// to this retry, which it doesn't start again.
+func (s *Server) retryEndOnce(id int64, login string) bool {
 	mu := s.userLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -276,12 +278,8 @@ func (s *Server) retryEndOnce(id int64, login string, noted *bool) bool {
 		s.retrying.Delete(id)
 		return true
 	}
-	if !*noted {
-		if err := s.pending.add(id); err == nil {
-			*noted = true
-		} else {
-			s.log.Error("note sessions to end after a restart; will retry", "user", login, "err", err)
-		}
+	if err := s.pending.add(id); err != nil {
+		s.log.Error("note sessions to end after a restart; will retry", "user", login, "err", err)
 	}
 	if err := s.endSessions(id); err != nil {
 		s.log.Error("end sessions after a failed access update; will retry", "user", login, "err", err)

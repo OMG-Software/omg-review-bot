@@ -302,10 +302,7 @@ func drain(ctx context.Context, b *Bot) {
 	for {
 		select {
 		case j := <-b.jobs:
-			b.mu.Lock()
-			delete(b.queued, j.key())
-			b.mu.Unlock()
-			b.runJob(ctx, j)
+			b.runJob(ctx, b.dequeued(j))
 		default:
 			return
 		}
@@ -1217,13 +1214,69 @@ func TestManualActionsBoundToAccount(t *testing.T) {
 // because the organization's policy couldn't be read is queued again, even
 // with automatic reviews off (so enqueueDue won't).
 func TestForcedReviewRetriedAfterPolicyError(t *testing.T) {
+	b, take, postpone := forcedRetryBot(t, 4096)
+	postpone()
+	if p, _ := b.store.GetPR("acme/web", 7); p == nil || p.Status != "pending" || p.Attempts != 0 {
+		t.Fatalf("PR after a postponed review = %+v", p)
+	}
+	again, ok := take()
+	if !ok || !again.force || again.account != 500 {
+		t.Errorf("manual review after the policy read failed = %+v, %v; want it queued again", again, ok)
+	}
+}
+
+// TestForcedRetryWaitsForQueueRoom: a manual review postponed by a policy
+// read error is queued again once there's room, not dropped because the
+// queue was full when its retry came round.
+func TestForcedRetryWaitsForQueueRoom(t *testing.T) {
+	b, take, postpone := forcedRetryBot(t, 1)
+	filler := job{kind: jobReplies, repo: "acme/other", number: 1}
+	if !b.enqueue(filler) {
+		t.Fatal("couldn't fill the queue")
+	}
+	postpone()
+	time.Sleep(100 * time.Millisecond) // several retries find the queue full
+	if j, ok := take(); !ok || j.key() != filler.key() {
+		t.Fatalf("first job = %+v, %v; want the one filling the queue", j, ok)
+	}
+	again, ok := take()
+	if !ok || !again.force || again.account != 500 {
+		t.Errorf("manual review after the queue had room = %+v, %v; want it queued again", again, ok)
+	}
+}
+
+// TestForcedRetryNotLostToQueuedReview: when an automatic review of the PR
+// is already queued as a postponed manual one comes round again, that queue
+// entry runs as the manual review, rather than the manual one being dropped.
+func TestForcedRetryNotLostToQueuedReview(t *testing.T) {
+	b, take, postpone := forcedRetryBot(t, 4096)
+	if !b.enqueue(job{kind: jobReview, repo: "acme/web", number: 7}) {
+		t.Fatal("couldn't queue the automatic review")
+	}
+	postpone()
+	time.Sleep(100 * time.Millisecond) // the retry has come round
+	j, ok := take()
+	if !ok || !j.force || j.account != 500 {
+		t.Errorf("queued review = %+v, %v; want the manual review", j, ok)
+	}
+	if extra, ok := take(); ok {
+		t.Errorf("a second review was queued: %+v", extra)
+	}
+}
+
+// forcedRetryBot returns a bot (with a queue of queueLen) that has taken a
+// manual review of acme/web#7 off its queue, a take that does what the
+// worker does, and postpone, which runs that review while the
+// organization's policy can't be read.
+func forcedRetryBot(t *testing.T, queueLen int) (*Bot, func() (job, bool), func()) {
+	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "t.db")
 	st, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { st.Close() })
 	cfg := settings.Defaults()
 	cfg.Review.Enabled = false
 	if err := settings.Save(st, cfg); err != nil {
@@ -1233,42 +1286,39 @@ func TestForcedReviewRetriedAfterPolicyError(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b.jobs = make(chan job, queueLen)
 	b.policyRetry = 10 * time.Millisecond
 	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
 		t.Fatal(err)
 	}
-	take := func() (job, bool) { // as the worker does
+	take := func() (job, bool) {
 		select {
 		case j := <-b.jobs:
-			b.mu.Lock()
-			delete(b.queued, j.key())
-			b.mu.Unlock()
-			return j, true
-		case <-time.After(2 * time.Second):
+			return b.dequeued(j), true
+		case <-time.After(time.Second):
 			return job{}, false
 		}
 	}
-	j, _ := take()
-	// The policy can't be read for now: its table is out of the way.
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
+	j, ok := take()
+	if !ok {
+		t.Fatal("the manual review wasn't queued")
 	}
-	defer db.Close()
-	if _, err := db.Exec(`ALTER TABLE orgs RENAME TO orgs_away`); err != nil {
-		t.Fatal(err)
+	postpone := func() {
+		// The policy can't be read for now: its table is out of the way.
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(`ALTER TABLE orgs RENAME TO orgs_away`); err != nil {
+			t.Fatal(err)
+		}
+		b.handleReview(context.Background(), j)
+		if _, err := db.Exec(`ALTER TABLE orgs_away RENAME TO orgs`); err != nil {
+			t.Fatal(err)
+		}
 	}
-	b.handleReview(context.Background(), j)
-	if _, err := db.Exec(`ALTER TABLE orgs_away RENAME TO orgs`); err != nil {
-		t.Fatal(err)
-	}
-	if p, _ := st.GetPR("acme/web", 7); p == nil || p.Status != "pending" || p.Attempts != 0 {
-		t.Fatalf("PR after a postponed review = %+v", p)
-	}
-	again, ok := take()
-	if !ok || !again.force || again.account != 500 {
-		t.Errorf("manual review after the policy read failed = %+v, %v; want it queued again", again, ok)
-	}
+	return b, take, postpone
 }
 
 // TestReviewThreadWebhookHasPR: GitHub's review-thread event carries the PR

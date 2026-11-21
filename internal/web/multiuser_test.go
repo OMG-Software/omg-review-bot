@@ -163,6 +163,23 @@ func newTestSite(t *testing.T) *testSite {
 // them; the address and the browser's cookies stay.
 func (s *testSite) restart(srv *Server) { s.serving.Store(srv) }
 
+// access describes someone's organization access: each organization with
+// its role, where the role came from, and since when. Unlike their
+// memberships, it leaves out their sign-in record, which a failed sign-in
+// still updates.
+func (s *testSite) access(userID int64) string {
+	s.t.Helper()
+	ms, err := s.st.UserMemberships(userID)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, m := range ms {
+		fmt.Fprintf(&b, "%s:%s/%s@%d ", m.OrgLogin, m.Role, m.Source, m.MemberAt)
+	}
+	return b.String()
+}
+
 // cleanStop records that the server stopped cleanly, as Close does when no
 // sessions are left to end, without waiting for retries to notice they're
 // done.
@@ -1080,6 +1097,63 @@ func TestPendingNoteRetried(t *testing.T) {
 	}
 }
 
+// TestRetryNotesLaterFailure: a retry started by an earlier failure, whose
+// note a sign-in that got through has since cleared, writes the note of a
+// later failure that couldn't write its own, once the disk recovers. That
+// later failure doesn't start a retry of its own: this one is still running.
+func TestRetryNotesLaterFailure(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	s.srv.retryWait = 300 * time.Millisecond // the sign-ins below come first
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	real := s.srv.syncAccess
+	var failSync atomic.Bool
+	s.srv.syncAccess = func(ctx context.Context, uc *github.UserClient, u *store.User) ([]string, error) {
+		if failSync.Load() {
+			return nil, errors.New("database is locked")
+		}
+		return real(ctx, uc, u)
+	}
+	failSync.Store(true)
+	if code, _, _ := s.trySignIn(); code != http.StatusOK { // noted; a retry starts
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	if ids, _ := s.srv.pending.load(); len(ids) != 1 {
+		t.Fatalf("first failure noted %v", ids)
+	}
+	failSync.Store(false)
+	s.signIn() // gets through: the note is cleared
+	if ids, _ := s.srv.pending.load(); len(ids) != 0 {
+		t.Fatalf("note after a sign-in got through = %v", ids)
+	}
+	// The next failure can't write its note: a directory is in the way.
+	if err := os.MkdirAll(s.srv.pending.path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failSync.Store(true)
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("second sign-in with a failed access update = %d", code)
+	}
+	if err := os.Remove(s.srv.pending.path); err != nil { // the disk recovers
+		t.Fatal(err)
+	}
+	if _, busy := s.srv.retrying.Load(int64(aliceID)); !busy {
+		t.Fatal("the first failure's retry stopped before the second failure; the test needs it running")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if ids, _ := s.srv.pending.load(); len(ids) == 1 && ids[0] == aliceID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the later failure was never noted on disk")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.srv.unreconciled.Delete(int64(aliceID)) // let the retry stop
+}
+
 // TestUnreadablePendingNoteEndsEverySession: if the note of sessions to end
 // can't be read at startup, nobody knows whose they are, so every session
 // ends; the file is set aside, and access is left as it was.
@@ -1496,6 +1570,78 @@ func TestUnreadablePendingNoteKept(t *testing.T) {
 	}
 }
 
+// TestUnreadableNoteAddThenRestart: a failed sign-in whose note can't be
+// added to (the file is unreadable) leaves the file as it was, and at the
+// restart that follows every existing session ends, while access, including
+// a membership added by hand, stays as it was.
+func TestUnreadableNoteAddThenRestart(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	if _, err := s.st.AddMember(otherID, aliceID, store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	s.signIn() // the session that must end
+	before := s.access(aliceID)
+	const unreadable = "[99," // cut short: it may list others
+	if err := os.WriteFile(s.srv.pending.path, []byte(unreadable), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.srv.retryWait = time.Hour // no retry gets through before the restart
+	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
+		return nil, errors.New("database is locked")
+	}
+	s.srv.endSessions = func(int64) error { return errors.New("database is locked") }
+	if code, _, _ := s.trySignIn(); code != http.StatusOK {
+		t.Fatalf("sign-in with a failed access update = %d", code)
+	}
+	if b, _ := os.ReadFile(s.srv.pending.path); string(b) != unreadable {
+		t.Fatalf("the unreadable note was replaced with %q", b)
+	}
+	s.srv.unreconciled.Delete(int64(aliceID)) // restart; the old retry stops
+	s.cleanStop()                             // only the note keeps them out, not an unclean stop
+	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("restart with an unreadable note: %v", err)
+	}
+	s.restart(srv2)
+	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
+		t.Errorf("a session survived a restart with an unreadable note: %d %s", code, hdr.Get("Location"))
+	}
+	if b, _ := os.ReadFile(s.srv.pending.path + ".unreadable"); string(b) != unreadable {
+		t.Errorf("note set aside = %q, want the unreadable one", b)
+	}
+	if after := s.access(aliceID); after != before {
+		t.Errorf("access changed: %v, was %v", after, before)
+	}
+	if m, _ := s.st.GetMembership(otherID, aliceID); m == nil || m.Source != store.SourceManual || m.Role != store.RoleMember {
+		t.Errorf("membership added by hand = %+v", m)
+	}
+}
+
+// TestPendingNoteSyncRetried: when the directory sync after the rename
+// fails, the add reports it, and its retry syncs again before reporting
+// success, rather than taking the listed ID as already on disk.
+func TestPendingNoteSyncRetried(t *testing.T) {
+	p := &pendingEnds{path: filepath.Join(t.TempDir(), "pending-session-ends.json")}
+	orig := syncDir
+	t.Cleanup(func() { syncDir = orig })
+	syncDir = func(string) error { return errors.New("disk on fire") }
+	if err := p.add(42); err == nil {
+		t.Fatal("an add whose rename wasn't synced reported success")
+	}
+	synced := 0
+	syncDir = func(string) error { synced++; return nil }
+	if err := p.add(42); err != nil {
+		t.Fatal(err)
+	}
+	if synced == 0 {
+		t.Error("the retry reported success without syncing the directory")
+	}
+	if ids, err := p.load(); err != nil || len(ids) != 1 || ids[0] != 42 {
+		t.Errorf("note = %v, %v", ids, err)
+	}
+}
+
 // TestShortRangeChartDated: the 7-day chart dates every bar, not just the
 // last; the 30-day one, every week.
 func TestShortRangeChartDated(t *testing.T) {
@@ -1524,7 +1670,7 @@ func TestUncleanStopEndsSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.signIn()
-	before, _ := s.st.UserMemberships(aliceID)
+	before := s.access(aliceID)
 	srv2, err := New(s.st, s.b, slog.New(slog.NewTextHandler(io.Discard, nil))) // the first never stopped
 	if err != nil {
 		t.Fatal(err)
@@ -1533,7 +1679,7 @@ func TestUncleanStopEndsSessions(t *testing.T) {
 	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
 		t.Errorf("a session survived a run that didn't stop cleanly: %d %s", code, hdr.Get("Location"))
 	}
-	if after, _ := s.st.UserMemberships(aliceID); fmt.Sprint(after) != fmt.Sprint(before) {
+	if after := s.access(aliceID); after != before {
 		t.Errorf("access changed: %v, was %v", after, before)
 	}
 	s.signIn()
@@ -1571,7 +1717,7 @@ func TestStopWithUnrecordedEndsSignsOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.signIn()
-	before, _ := s.st.UserMemberships(aliceID)
+	before := s.access(aliceID)
 	s.srv.retryWait = time.Hour
 	s.srv.syncAccess = func(context.Context, *github.UserClient, *store.User) ([]string, error) {
 		return nil, errors.New("database is locked")
@@ -1597,7 +1743,7 @@ func TestStopWithUnrecordedEndsSignsOut(t *testing.T) {
 	if code, _, hdr := s.get("/orgs"); code != http.StatusSeeOther || !strings.HasPrefix(hdr.Get("Location"), "/login") {
 		t.Errorf("a session that had to end survived the restart: %d %s", code, hdr.Get("Location"))
 	}
-	if after, _ := s.st.UserMemberships(aliceID); fmt.Sprint(after) != fmt.Sprint(before) {
+	if after := s.access(aliceID); after != before {
 		t.Errorf("access changed: %v, was %v", after, before)
 	}
 	s.srv.unreconciled.Delete(int64(aliceID)) // let the old retry stop

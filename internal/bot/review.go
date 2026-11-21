@@ -136,7 +136,17 @@ func (b *Bot) retryForced(j job) {
 	for i := 1; i < j.tries && wait < 30*time.Minute; i++ {
 		wait *= 2
 	}
-	time.AfterFunc(min(wait, 30*time.Minute), func() { b.enqueue(j) })
+	b.requeueForced(j, min(wait, 30*time.Minute))
+}
+
+// requeueForced queues manual review j after wait, and keeps trying while
+// the queue is full, so the request isn't dropped.
+func (b *Bot) requeueForced(j job, wait time.Duration) {
+	time.AfterFunc(wait, func() {
+		if b.push(j) == queueFull {
+			b.requeueForced(j, wait)
+		}
+	})
 }
 
 // announceReview posts the review-started notice, or, when this commit

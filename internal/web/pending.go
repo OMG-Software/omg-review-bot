@@ -83,10 +83,16 @@ func writeDurably(path string, b []byte) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir syncs directory dir, so a rename in it is on disk. It's a variable
+// so tests can make it fail.
+var syncDir = func(dir string) error {
 	if runtime.GOOS == "windows" {
 		return nil // a directory can't be opened to sync it there
 	}
-	d, err := os.Open(filepath.Dir(path))
+	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
@@ -105,7 +111,10 @@ func (p *pendingEnds) add(id int64) error {
 		return err
 	}
 	if slices.Contains(ids, id) {
-		return nil
+		// Listed already, but maybe by an add whose rename wasn't synced
+		// (it reported an error, so this is its retry): sync it now, so
+		// success means the note is on disk.
+		return syncDir(filepath.Dir(p.path))
 	}
 	if err := os.MkdirAll(filepath.Dir(p.path), 0o700); err != nil {
 		return err
