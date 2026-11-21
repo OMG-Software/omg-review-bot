@@ -719,6 +719,11 @@ func (s *Store) NextDue(after int64) int64 {
 }
 
 // ReviewedOpenPRs returns open PRs the bot has reviewed (candidates for the reply sweep).
+// LimitedPRs returns the open PRs held at their review limit.
+func (s *Store) LimitedPRs() ([]PR, error) {
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='limit' AND open=1`)
+}
+
 func (s *Store) ReviewedOpenPRs() ([]PR, error) {
 	return s.queryPRs(`SELECT * FROM pulls_v WHERE open=1 AND status IN ('reviewed','pending')`)
 }

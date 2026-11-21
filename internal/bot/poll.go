@@ -371,7 +371,29 @@ func (b *Bot) stillOverLimit(pr *store.PR, st settings.Settings) bool {
 	return err != nil || n >= st.Review.MaxRounds
 }
 
+// releaseLimited re-checks the PRs held at their review limit, so raising
+// the limit lets them be reviewed at once. recompute does this too, but only
+// runs when the PR list changes: pollRepo stops at an unchanged ETag.
+func (b *Bot) releaseLimited(st settings.Settings) {
+	prs, err := b.store.LimitedPRs()
+	if err != nil {
+		b.log.Warn("PRs at their review limit", "err", err)
+		return
+	}
+	for _, p := range prs {
+		b.prMu.Lock()
+		if cur, err := b.store.GetPR(p.Repo, p.Number); err == nil && cur != nil && cur.Status == "limit" {
+			b.recompute(cur, b.settingsFor(st, cur.AccountID))
+			if cur.Status != "limit" {
+				_ = b.store.SavePR(cur)
+			}
+		}
+		b.prMu.Unlock()
+	}
+}
+
 func (b *Bot) enqueueDue(st settings.Settings) {
+	b.releaseLimited(st) // first, so a PR it frees is queued now
 	prs, err := b.store.DuePRs(time.Now().Unix())
 	if err != nil {
 		b.log.Warn("due PRs", "err", err)

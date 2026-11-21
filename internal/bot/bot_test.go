@@ -56,6 +56,7 @@ type fakeGitHub struct {
 	edited        map[int64]string // the latest text of each comment the bot edited
 	failEdits     bool             // editing issue comments fails (a 502)
 	failList      bool             // listing the PR's conversation comments fails (a 502)
+	mainStatus    string           // main.go's status in the PR's files; "" = modified
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -112,8 +113,12 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 		case p == "/repos/acme/web/pulls/7":
 			send(pr)
 		case p == "/repos/acme/web/pulls/7/files":
+			mainStatus := f.mainStatus
+			if mainStatus == "" {
+				mainStatus = "modified"
+			}
 			send([]any{
-				map[string]any{"filename": "main.go", "status": "modified", "additions": 2, "deletions": 0, "patch": f.patch},
+				map[string]any{"filename": "main.go", "status": mainStatus, "additions": 2, "deletions": 0, "patch": f.patch},
 				map[string]any{"filename": "go.sum", "status": "modified", "patch": "@@ -1 +1 @@\n-x\n+y"},
 			})
 		case p == "/repos/acme/web/pulls/7/comments" && r.Method == http.MethodGet:
@@ -790,10 +795,16 @@ func TestReviewRoundLimit(t *testing.T) {
 		t.Fatalf("second push past the limit: %d reviews, %d notices, status %q", len(gh.reviews), len(limitNotices()), status())
 	}
 
-	// 4) Raising the limit to 6 lets the next push be reviewed, as the last one.
+	// 4) Raising the limit to 6 gets the push the bot held back reviewed, as
+	// the last one, at the next wake-up: no poll, so no change in the PR list
+	// (which pollRepo would skip on an unchanged ETag) is needed.
 	setLimit(6)
-	push()
+	b.enqueueDue(b.Settings())
+	drain(ctx, b)
 	wantReview(6, "Bot review number 6 of 6: the last automatic review of this pull request.")
+	if got := gh.reviews[5].CommitID; got != fmt.Sprintf("head%03d", pushes) {
+		t.Errorf("review 6 is of %s, want the head pushed while held back (head%03d)", got, pushes)
+	}
 
 	// 5) Review now goes past the limit.
 	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
@@ -819,6 +830,39 @@ func TestReviewRoundLimit(t *testing.T) {
 	push()
 	if len(gh.reviews) != 8 || len(limitNotices()) != 2 || status() != "limit" {
 		t.Fatalf("push after a second review by hand: %d reviews, %d notices, status %q", len(gh.reviews), len(limitNotices()), status())
+	}
+}
+
+// TestChangeRequestLiftedWhenNothingToReview: a push that deletes the file
+// the bot requested changes on leaves nothing to review, so no review is
+// posted, but the finding is resolved and the change request withdrawn.
+func TestChangeRequestLiftedWhenNothingToReview(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"Adds a division.","comments":[`+
+		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."}]}`,
+		func(cfg *settings.Settings) {
+			cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = "P3", "P3"
+		})
+	gh, b, ctx := e.gh, e.b, e.ctx
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 1 || gh.reviews[0].Event != "REQUEST_CHANGES" {
+		t.Fatalf("first review = %+v", gh.reviews)
+	}
+
+	gh.mu.Lock()
+	gh.mainStatus = "removed"
+	gh.mu.Unlock()
+	e.push("bbb222", gh.patch, gh.content, `{"summary":"x","comments":[]}`, "2026-01-01T00:10:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 1 {
+		t.Fatalf("posted a review with nothing to review: %+v", gh.reviews[len(gh.reviews)-1])
+	}
+	if len(gh.resolves) != 1 || len(gh.replies) != 1 || !strings.Contains(gh.replies[0], "deletes this file") {
+		t.Fatalf("finding not resolved as deleted: resolves %v, replies %q", gh.resolves, gh.replies)
+	}
+	if fmt.Sprint(gh.dismissed) != "[501]" {
+		t.Fatalf("dismissed = %v, want the change request 501", gh.dismissed)
 	}
 }
 

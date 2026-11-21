@@ -445,9 +445,10 @@ event checks it for replies, so polling only catches anything missed.
 8. Each posted review counts as one round on the PR, and its body says which ("Bot review number
    3 of 10"). Once the bot has posted *Most reviews per PR* reviews, the next push isn't reviewed:
    the PR shows `limit` and gets one comment saying the limit is reached. Later pushes aren't
-   reviewed either, and the comment isn't repeated. Raising the limit lets the next push be
-   reviewed. **Review now** goes past the limit, and that review counts as a round too. Failed
-   reviews, reviews with nothing to review and approvals between pushes don't count.
+   reviewed either, and the comment isn't repeated. Raising the limit gets the latest push reviewed
+   as soon as the new limit is saved. **Review now** goes past the limit, and that review counts
+   as a round too. Failed reviews, reviews with nothing to review and approvals between pushes
+   don't count.
 
 **PR statuses** on the Pull requests page:
 

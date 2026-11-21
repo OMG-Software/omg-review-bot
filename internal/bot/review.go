@@ -456,6 +456,15 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		rec.Status = "nothing to review"
 		rec.Summary = "No reviewable changes (all files were deleted, binary or ignored)."
 		b.logf("info", pr.Repo, pr.Number, "nothing to review at %s", short(head))
+		if threadsKnown {
+			// No review is posted, but the fix check may have resolved what
+			// the bot's change request was about (say, by the PR deleting the
+			// file), and nothing else would lift it: syncApproval only acts
+			// on a commit the bot posted a review for.
+			b.dismissStanding(ctx, st, cl, pr, login, standing{
+				liftRequest: countOpen(st.Review.RequestChangesLevel, threads) == 0 && pr.ReviewedSHA != "",
+			}, nil)
+		}
 		return head, nil
 	}
 
