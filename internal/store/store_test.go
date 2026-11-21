@@ -880,8 +880,8 @@ func TestUpdateGitHubMembership(t *testing.T) {
 
 // TestBackfillKeepsGivenActivity: an entry recorded as unassigned on purpose
 // (LogAs with 0) stays unassigned after a restart's backfill, and an older
-// unassigned entry is only matched to a PR a stored repository of the same
-// installation backs.
+// unassigned entry is matched to a PR only when a stored repository of the
+// same installation backs it, and then it is.
 func TestBackfillKeepsGivenActivity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.db")
 	st, err := Open(path)
@@ -903,12 +903,20 @@ func TestBackfillKeepsGivenActivity(t *testing.T) {
 		time.Now().Unix()+1, "info", "acme/api", 0, "legacy: no backing repository"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.db.Exec(`INSERT INTO activity(ts, level, repo, number, message, account_id) VALUES(?,?,?,?,?,0)`,
+		time.Now().Unix()+1, "info", "acme/web", 1, "legacy: backed PR"); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.BackfillAccounts(); err != nil {
 		t.Fatal(err)
 	}
 	acts, _ := st.RecentActivity(900, 50, "", 0)
-	for _, a := range acts {
-		t.Errorf("filed under account 900 by the backfill: %q", a.Message)
+	if len(acts) != 1 || acts[0].Message != "legacy: backed PR" {
+		var got []string
+		for _, a := range acts {
+			got = append(got, a.Message)
+		}
+		t.Errorf("filed under account 900 by the backfill = %q, want only the entry of the PR its repository backs", got)
 	}
 	if acts, _ := st.RecentActivity(0, 50, "", 0); len(acts) != 2 {
 		t.Errorf("unassigned entries after the backfill = %d, want 2", len(acts))
