@@ -214,7 +214,7 @@ type reviewInfo struct {
 	model, skill  string
 	rereview      bool
 	fixed         int    // earlier findings confirmed fixed and resolved during this review
-	verdict       string // approval line; "" when approvals are off
+	verdict       string // approval or change-request line; "" when there's nothing to say
 }
 
 var notesMarkerRE = regexp.MustCompile(`<!-- prbot:review notes=([P1-5,]*) -->`)

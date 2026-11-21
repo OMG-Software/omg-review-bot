@@ -142,11 +142,18 @@ func TestBlockingCounts(t *testing.T) {
 	}
 	threads := []botThread{mk("P1", true), mk("P2", false), mk("P3", false), mk("P4", false),
 		{root: &github.ReviewComment{Body: "no severity at all"}}} // unreadable: counts, to be safe
-	if n := countBlocking(st, threads); n != 3 {
+	if n := countOpen(st.Review.ApprovalLevel, threads); n != 3 {
 		t.Errorf("blocking threads = %d, want 3", n)
 	}
-	if n := countBlockingFindings(st, []finding{{Severity: "P3"}, {Severity: "P5"}}); n != 1 {
+	if n := countFindings(st.Review.ApprovalLevel, []finding{{Severity: "P3"}, {Severity: "P5"}}); n != 1 {
 		t.Errorf("blocking findings = %d, want 1", n)
+	}
+	// A level that's off is reached by nothing, not even an unreadable finding.
+	if n := countOpen(settings.LevelOff, threads); n != 0 {
+		t.Errorf("threads open at an off level = %d, want 0", n)
+	}
+	if n := countLevels("P2", []string{"P1", "P2", "P3", "?"}); n != 3 {
+		t.Errorf("levels at P2 or above = %d, want 3 (the unreadable one counts)", n)
 	}
 	sevs, ok := noteSeverities(reviewBody(reviewInfo{notes: []finding{{Severity: "P2"}, {Severity: "P5"}}}))
 	if !ok || strings.Join(sevs, ",") != "P2,P5" {
@@ -154,6 +161,33 @@ func TestBlockingCounts(t *testing.T) {
 	}
 	if _, ok := noteSeverities("<!-- prbot:approval -->"); ok {
 		t.Error("approval body read as a review")
+	}
+}
+
+func TestReviewEvent(t *testing.T) {
+	st := settings.Defaults() // request changes at P2, approve at P3
+	for _, c := range []struct {
+		name                 string
+		apLevel, rcLevel     string
+		blocking, requesting int
+		want, verdict        string
+	}{
+		{"P2 open", "P3", "P2", 1, 1, "REQUEST_CHANGES", "Changes requested:** 1 unresolved finding(s) at [P2] MAJOR"},
+		{"only P3 open", "P3", "P2", 1, 0, "COMMENT", "Not approved:** 1 unresolved finding(s) at [P3] MINOR (Defect)"},
+		{"nothing open", "P3", "P2", 0, 0, "APPROVE", "Approved:** no unresolved findings at [P3]"},
+		{"approval off", "off", "P2", 0, 0, "COMMENT", ""},
+		{"approval off, P1 open", "off", "P2", 0, 2, "REQUEST_CHANGES", "Changes requested:** 2 unresolved"},
+		{"request changes off", "P3", "off", 1, 0, "COMMENT", "Not approved:** 1"},
+	} {
+		st.Review.ApprovalLevel, st.Review.RequestChangesLevel = c.apLevel, c.rcLevel
+		got := reviewEvent(st, c.blocking, c.requesting)
+		if got != c.want {
+			t.Errorf("%s: event = %s, want %s", c.name, got, c.want)
+		}
+		v := verdictLine(st, got, c.blocking, c.requesting)
+		if (c.verdict == "") != (v == "") || !strings.Contains(v, c.verdict) {
+			t.Errorf("%s: verdict = %q, want it to contain %q", c.name, v, c.verdict)
+		}
 	}
 }
 

@@ -334,8 +334,9 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	cfg.LLM.Model = "test-model"
 	cfg.Review.ReviewExisting = true
 	cfg.Review.DebounceSeconds = 0
-	cfg.Review.CommentLevel = "P4"  // drops the P5 nit
-	cfg.Review.ApprovalLevel = "P3" // approve once nothing at P1-P3 is open
+	cfg.Review.CommentLevel = "P4"                     // drops the P5 nit
+	cfg.Review.ApprovalLevel = "P3"                    // approve once nothing at P1-P3 is open
+	cfg.Review.RequestChangesLevel = settings.LevelOff // TestRequestChangesEndToEnd covers it
 	if err := settings.Save(st, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -526,6 +527,187 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	if gh.treeCalls != 2 {
 		t.Errorf("repository tree listed %d times, want 2 (cached)", gh.treeCalls)
 	}
+}
+
+// TestRequestChangesEndToEnd: an organization's own levels (request changes
+// at P2, approve at P3) apply over an instance that does neither. The bot
+// requests changes while a P1-P2 finding is open, comments while only a P3 is,
+// approves once nothing is, and dismisses its change request or approval
+// once it no longer holds.
+func TestRequestChangesEndToEnd(t *testing.T) {
+	gh := newFakeGitHub()
+	ghSrv := httptest.NewServer(gh.handler(t))
+	defer ghSrv.Close()
+	lm := &fakeLLM{review: `{"summary":"Adds a division.","comments":[` +
+		`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."}]}`}
+	llmSrv := httptest.NewServer(lm.handler(t))
+	defer llmSrv.Close()
+
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Defaults()
+	cfg.GitHub.AppID = 1
+	cfg.GitHub.PrivateKey = testKey(t)
+	cfg.GitHub.APIBaseURL = ghSrv.URL
+	cfg.LLM.BaseURL = llmSrv.URL + "/v1"
+	cfg.LLM.Model = "test-model"
+	cfg.Review.ReviewExisting = true
+	cfg.Review.DebounceSeconds = 0
+	cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+	if err := settings.Save(st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	// acme (account 500 in the fake) sets its own levels.
+	pol := cfg.Policy()
+	pol.Review.ApprovalLevel, pol.Review.RequestChangesLevel = "P3", "P2"
+	raw, err := settings.EncodePolicy(cfg, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetOrgPolicy(500, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	push := func(sha, patch, content, review, updatedAt string) {
+		gh.mu.Lock()
+		gh.head, gh.patch, gh.content, gh.updatedAt = sha, patch, content, updatedAt
+		gh.mu.Unlock()
+		lm.mu.Lock()
+		lm.review = review
+		lm.mu.Unlock()
+	}
+	// rootID finds the bot's finding comment with the given title.
+	rootID := func(title string) int64 {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		for _, c := range gh.comments {
+			if c["in_reply_to_id"] == nil && strings.Contains(c["body"].(string), title) {
+				return c["id"].(int64)
+			}
+		}
+		t.Fatalf("no finding comment titled %q", title)
+		return 0
+	}
+	resolveByHand := func(title string) {
+		id := rootID(title)
+		gh.mu.Lock()
+		gh.resolved[id] = true
+		gh.mu.Unlock()
+		b.CheckReplies("acme/web", 7, 500)
+		drain(ctx, b)
+	}
+	lastReview := func() github.ReviewRequest { return gh.reviews[len(gh.reviews)-1] }
+	wantDismissed := func(step string, want ...int64) {
+		t.Helper()
+		if fmt.Sprint(gh.dismissed) != fmt.Sprint(want) {
+			t.Fatalf("%s: dismissed = %v, want %v", step, gh.dismissed, want)
+		}
+	}
+
+	// 1) A P1 is open: the review requests changes (review 501).
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 1 || lastReview().Event != "REQUEST_CHANGES" ||
+		!strings.Contains(lastReview().Body, "Changes requested:** 1 unresolved finding(s) at [P2] MAJOR or above") {
+		t.Fatalf("first review = %+v", lastReview())
+	}
+	if rec, _ := st.ListReviews(500, "acme/web", 7, 1); len(rec) != 1 || rec[0].Event != "REQUEST_CHANGES" {
+		t.Errorf("stored review event = %+v", rec)
+	}
+	wantDismissed("first review")
+
+	// 2) A push fixes the P1 but brings a P3: that holds back approval without
+	// requesting changes, so the review is a comment (502) and the change
+	// request is withdrawn.
+	lm.mu.Lock()
+	lm.verify = fmt.Sprintf(`{"results":[{"id":%d,"fixed":true,"reason":"Guarded."}]}`, rootID("Division by zero"))
+	lm.mu.Unlock()
+	push("ccc333", "@@ -10,3 +10,6 @@ func main() {\n \ta := 1\n+\tif a == 0 {\n+\t\treturn\n+\t}\n \treturn",
+		"package main\n\nfunc main() {\n\ta := 1\n\tif a == 0 {\n\t\treturn\n\t}\n}\n",
+		`{"summary":"Guards the division.","comments":[{"path":"main.go","line":11,"severity":"P3","title":"Silent return","body":"Log why."}]}`,
+		"2026-01-01T00:10:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 2 || lastReview().Event != "COMMENT" || !strings.Contains(lastReview().Body, "Not approved:** 1 unresolved finding(s) at [P3]") {
+		t.Fatalf("second review = %+v", lastReview())
+	}
+	wantDismissed("after the P1 was fixed", 501)
+
+	// 3) Resolving the P3 by hand gets the PR approved (503). The approval
+	// replaces the (already dismissed) change request; nothing else is dismissed.
+	resolveByHand("Silent return")
+	if len(gh.reviews) != 3 || lastReview().Event != "APPROVE" || lastReview().CommitID != "ccc333" {
+		t.Fatalf("approval after resolution = %+v (%d reviews)", lastReview(), len(gh.reviews))
+	}
+	wantDismissed("after approving", 501)
+
+	// 4) The next push brings a P2 and a P3: changes are requested again (504)
+	// and the approval is withdrawn.
+	push("ddd444", "@@ -10,3 +10,5 @@ func main() {\n \ta := 1\n+\tvar m map[string]int; m[\"x\"] = a\n+\tfmt.Println(m)\n \treturn",
+		"package main\n",
+		`{"summary":"Adds a map.","comments":[`+
+			`{"path":"main.go","line":11,"severity":"P2","title":"Write to nil map","body":"Panics."},`+
+			`{"path":"main.go","line":12,"severity":"P3","title":"Unlabelled output","body":"Say what is printed."}]}`,
+		"2026-01-01T00:15:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 4 || lastReview().Event != "REQUEST_CHANGES" {
+		t.Fatalf("fourth review = %+v", lastReview())
+	}
+	wantDismissed("after the P2", 501, 503)
+
+	// 5) Resolving the P2 by hand lifts the change request, but the open P3
+	// still holds back approval: no new review.
+	resolveByHand("Write to nil map")
+	if len(gh.reviews) != 4 {
+		t.Fatalf("posted a review although the P3 is open: %+v", lastReview())
+	}
+	wantDismissed("after resolving the P2", 501, 503, 504)
+
+	// 6) Resolving the P3 too gets the PR approved.
+	resolveByHand("Unlabelled output")
+	if len(gh.reviews) != 5 || lastReview().Event != "APPROVE" || lastReview().CommitID != "ddd444" {
+		t.Fatalf("final approval = %+v (%d reviews)", lastReview(), len(gh.reviews))
+	}
+	wantDismissed("after the final approval", 501, 503, 504)
+
+	// 7) A P1 requests changes (506, withdrawing the approval 505); the push that fixes it is approved
+	// (507), which replaces the change request on GitHub. Later conversation
+	// checks must leave it alone, though its own state still reads
+	// CHANGES_REQUESTED.
+	push("eee555", "@@ -10,3 +10,4 @@ func main() {\n \ta := 1\n+\tp := (*int)(nil); _ = *p\n \treturn", "package main\n",
+		`{"summary":"Adds a pointer.","comments":[{"path":"main.go","line":11,"severity":"P1","title":"Nil dereference","body":"Panics."}]}`,
+		"2026-01-01T00:20:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 6 || lastReview().Event != "REQUEST_CHANGES" {
+		t.Fatalf("sixth review = %+v", lastReview())
+	}
+	lm.mu.Lock()
+	lm.verify = fmt.Sprintf(`{"results":[{"id":%d,"fixed":true,"reason":"Removed."}]}`, rootID("Nil dereference"))
+	lm.mu.Unlock()
+	push("fff666", "@@ -10,3 +10,4 @@ func main() {\n \ta := 1\n+\t_ = a\n \treturn", "package main\n",
+		`{"summary":"Drops the pointer.","comments":[]}`, "2026-01-01T00:25:00Z")
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 7 || lastReview().Event != "APPROVE" {
+		t.Fatalf("seventh review = %+v", lastReview())
+	}
+	b.CheckReplies("acme/web", 7, 500)
+	drain(ctx, b)
+	if len(gh.reviews) != 7 {
+		t.Errorf("posted again after approving: %+v", lastReview())
+	}
+	wantDismissed("after an approval replaced the change request", 501, 503, 504, 505) // 505: withdrawn when 506 requested changes
 }
 
 // TestStaleSnapshotIgnored: a PR state older than the one recorded (a poll

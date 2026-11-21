@@ -443,20 +443,18 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		summary = b.synthesizeSummary(ctx, lc, st, gp, summaries, append(append([]finding{}, inline...), notes...))
 	}
 
-	// Approve when nothing at or above the approval level is left open: no
-	// unresolved earlier thread and no new finding.
-	blocking := 0
-	if st.Review.ApprovalOn() {
-		blocking = countBlocking(st, threads) + countBlockingFindings(st, inline) + countBlockingFindings(st, notes)
+	// Request changes while anything at or above the request-changes level is
+	// open; otherwise approve when nothing at or above the approval level is:
+	// no unresolved earlier thread and no new finding.
+	open := func(level string) int {
+		return countOpen(level, threads) + countFindings(level, inline) + countFindings(level, notes)
 	}
-	event := "COMMENT"
-	if st.Review.ApprovalOn() && blocking == 0 {
-		event = "APPROVE"
-	}
+	blocking, requesting := open(st.Review.ApprovalLevel), open(st.Review.RequestChangesLevel)
+	event := reviewEvent(st, blocking, requesting)
 	ri := reviewInfo{summary: summary, head: head, inline: inline, notes: notes, plan: p, dropped: dropped,
 		model: st.LLM.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed}
 	post := func(ri reviewInfo, event string) (*github.Review, []github.DraftComment, error) {
-		ri.verdict = verdictLine(st, event, blocking)
+		ri.verdict = verdictLine(st, event, blocking, requesting)
 		drafts := make([]github.DraftComment, 0, len(ri.inline))
 		for _, f := range ri.inline {
 			drafts = append(drafts, github.DraftComment{Path: f.Path, Line: f.Line, Side: "RIGHT", Body: commentBody(f)})
@@ -473,17 +471,22 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 		ri.inline = nil
 		rv, drafts, err = post(ri, event)
 	}
-	if err != nil && event == "APPROVE" && (github.IsStatus(err, 422) || github.IsStatus(err, 403)) {
-		b.logf("warn", pr.Repo, pr.Number, "GitHub refused the approval (%v); posting the review as a comment", err)
+	if err != nil && event != "COMMENT" && (github.IsStatus(err, 422) || github.IsStatus(err, 403)) {
+		// e.g. GitHub doesn't let an account approve or request changes on its own PR.
+		what := map[string]string{"APPROVE": "the approval", "REQUEST_CHANGES": "the change request"}[event]
+		b.logf("warn", pr.Repo, pr.Number, "GitHub refused %s (%v); posting the review as a comment", what, err)
 		event = "COMMENT"
 		rv, drafts, err = post(ri, event)
 	}
 	if err != nil {
 		return "", fmt.Errorf("post review: %w", err)
 	}
-	if st.Review.ApprovalOn() && blocking > 0 {
-		b.withdrawApproval(ctx, st, cl, pr, login, blocking)
-	}
+	// A change request can only be standing if the bot reviewed the PR before,
+	// so a first review skips listing the reviews just to find none.
+	b.dismissStanding(ctx, st, cl, pr, login, standing{
+		withdrawApproval: st.Review.ApprovalOn() && blocking > 0, blocking: blocking,
+		liftRequest: requesting == 0 && event != "APPROVE" && pr.ReviewedSHA != "",
+	}, nil)
 	rec.GHReviewID, rec.URL = rv.ID, rv.HTMLURL
 	rec.Summary, rec.Comments, rec.Notes, rec.Status = summary, len(drafts), len(ri.notes), "posted"
 	rec.Event = event
@@ -497,19 +500,32 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	return head, nil
 }
 
-// verdictLine explains the approval decision in the review body.
-func verdictLine(st settings.Settings, event string, blocking int) string {
-	if !st.Review.ApprovalOn() {
-		return ""
+// reviewEvent picks the review's event from the open findings: blocking at
+// the approval level, requesting at the request-changes level.
+func reviewEvent(st settings.Settings, blocking, requesting int) string {
+	switch {
+	case st.Review.RequestChangesOn() && requesting > 0:
+		return "REQUEST_CHANGES"
+	case st.Review.ApprovalOn() && blocking == 0:
+		return "APPROVE"
 	}
-	level := settings.SeverityInfo(st.Review.ApprovalLevel).Label
-	if event == "APPROVE" {
-		return fmt.Sprintf("✅ **Approved:** no unresolved findings at %s or above.", level)
+	return "COMMENT"
+}
+
+// verdictLine explains the approval or change-request decision in the review
+// body; "" when there's nothing to say.
+func verdictLine(st settings.Settings, event string, blocking, requesting int) string {
+	switch {
+	case event == "REQUEST_CHANGES":
+		return fmt.Sprintf("🛑 **Changes requested:** %d unresolved finding(s) at %s or above. I'll withdraw this once they're fixed or resolved.",
+			requesting, settings.SeverityInfo(st.Review.RequestChangesLevel).Label)
+	case event == "APPROVE":
+		return fmt.Sprintf("✅ **Approved:** no unresolved findings at %s or above.", settings.SeverityInfo(st.Review.ApprovalLevel).Label)
+	case st.Review.ApprovalOn() && blocking > 0:
+		return fmt.Sprintf("⛔ **Not approved:** %d unresolved finding(s) at %s or above. I'll approve once they're fixed or resolved.",
+			blocking, settings.SeverityInfo(st.Review.ApprovalLevel).Label)
 	}
-	if blocking == 0 {
-		return "" // approval was refused by GitHub; the log says why
-	}
-	return fmt.Sprintf("⛔ **Not approved:** %d unresolved finding(s) at %s or above. I'll approve once they're fixed or resolved.", blocking, level)
+	return "" // nothing blocks, or GitHub refused the approval or change request (the log says why)
 }
 
 // chatJSON asks for structured output, retrying once with a nudge if the

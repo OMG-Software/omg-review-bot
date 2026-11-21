@@ -97,24 +97,26 @@ func TestPagesRender(t *testing.T) {
 		"llm_base_url": {"http://localhost:11434"}, "llm_model": {"qwen2.5-coder:14b"}, "llm_context": {"16384"},
 		"llm_max_output": {"2048"}, "rv_enabled": {"on"}, "rv_ignore": {"*.lock\nvendor/"},
 		"rv_comment_level": {"P4"}, "rv_approval_level": {"P5"}, // approval broader than comments: clamped to P4
-		"rv_guidelines": {"CLAUDE.md\n/CONTRIBUTING.md"},
+		"rv_request_changes_level": {"P5"}, // broader than the approval level: clamped to P4 too
+		"rv_guidelines":            {"CLAUDE.md\n/CONTRIBUTING.md"},
 	}
 	post("/settings", form, ts.URL)
 	got, _ := settings.Load(st)
 	if got.GitHub.AppID != 42 || got.LLM.Provider != "ollama" || got.LLM.ContextTokens != 16384 ||
 		len(got.Review.IgnorePatterns) != 2 || got.Replies.Enabled || got.Review.CommentLevel != "P4" || got.Review.ApprovalLevel != "P4" ||
-		len(got.Review.GuidelineFiles) != 2 || got.Review.GuidelineFiles[1] != "/CONTRIBUTING.md" {
+		got.Review.RequestChangesLevel != "P4" || len(got.Review.GuidelineFiles) != 2 || got.Review.GuidelineFiles[1] != "/CONTRIBUTING.md" {
 		t.Errorf("settings not saved as submitted: %+v", got)
 	}
 	_, body := get("/settings")
 	for _, want := range []string{`<option value="P4" selected>[P4] MINOR (Quality) and above</option>`,
-		`<option value="off" >Never approve</option>`, `<b>[P1] CRITICAL</b> security hole`} {
+		`<option value="off" >Never approve</option>`, `<option value="off" >Never request changes</option>`,
+		`<b>[P1] CRITICAL</b> security hole`} {
 		if strings.Count(body, want) < 1 {
 			t.Errorf("settings page missing %q", want)
 		}
 	}
-	if strings.Count(body, " selected>[P4] MINOR (Quality) and above") != 2 {
-		t.Error("comment and approval selects should both show P4")
+	if strings.Count(body, " selected>[P4] MINOR (Quality) and above") != 3 {
+		t.Error("comment, approval and request-changes selects should all show P4")
 	}
 	if _, body := get("/skill"); !strings.Contains(body, "No skill installed yet") || !strings.Contains(body, "github.com/OMG-Software/code-change-review-skill") {
 		t.Error("skill page doesn't point to the recommended skill when none is installed")

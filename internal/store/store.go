@@ -770,7 +770,7 @@ type Review struct {
 	StartedAt        int64
 	FinishedAt       int64
 	AccountID        int64
-	Event            string // APPROVE or COMMENT once posted
+	Event            string // APPROVE, REQUEST_CHANGES or COMMENT once posted
 	Fixed            int    // earlier findings this review confirmed fixed and resolved
 	Sev              [5]int // findings posted (inline and notes) at P1..P5
 	Detailed         bool   // Sev and Fixed were recorded; false for reviews from before they were

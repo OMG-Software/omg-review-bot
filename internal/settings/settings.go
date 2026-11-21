@@ -57,9 +57,14 @@ type Review struct {
 	CommentLevel string `json:"comment_level"`
 	// ApprovalLevel ("P1".."P5", or ApprovalOff): the bot approves once no
 	// finding at this level or above is unresolved.
-	ApprovalLevel  string `json:"approval_level"`
-	MaxFiles       int    `json:"max_files"`
-	ReviewExisting bool   `json:"review_existing"`
+	ApprovalLevel string `json:"approval_level"`
+	// RequestChangesLevel ("P1".."P5", or LevelOff): the review requests
+	// changes while a finding at this level or above is unresolved. It can't
+	// be broader than the approval level: a finding that requests changes
+	// must also hold back approval.
+	RequestChangesLevel string `json:"request_changes_level"`
+	MaxFiles            int    `json:"max_files"`
+	ReviewExisting      bool   `json:"review_existing"`
 	// GuidelineFiles are gitignore-style patterns for the repository's own
 	// rules and conventions docs, read from the PR's base branch. Empty = off.
 	GuidelineFiles []string `json:"guideline_files"`
@@ -70,6 +75,9 @@ type Review struct {
 
 // ApprovalOn reports whether the bot approves pull requests at all.
 func (r Review) ApprovalOn() bool { return SeverityRank(r.ApprovalLevel) > 0 }
+
+// RequestChangesOn reports whether the bot requests changes at all.
+func (r Review) RequestChangesOn() bool { return SeverityRank(r.RequestChangesLevel) > 0 }
 
 type Replies struct {
 	Enabled      bool `json:"enabled"`
@@ -106,6 +114,11 @@ func (s Settings) Policy() Policy { return Policy{Review: s.Review, Replies: s.R
 // WithPolicy returns the settings with an organization's policy applied.
 func (s Settings) WithPolicy(p Policy) Settings {
 	p.Review.SkillDir = s.Review.SkillDir
+	if p.Review.RequestChangesLevel == "" {
+		// Saved before the setting existed: inherit the instance's level.
+		// Turning it off is saved as LevelOff, never "".
+		p.Review.RequestChangesLevel = s.Review.RequestChangesLevel
+	}
 	s.Review, s.Replies = p.Review, p.Replies
 	s.Normalize()
 	return s
@@ -166,8 +179,11 @@ var Severities = []Severity{
 	{"P5", "[P5] NIT", "⚪", "style or taste with no behavioural effect"},
 }
 
+// LevelOff is the ApprovalLevel or RequestChangesLevel that turns it off.
+const LevelOff = "off"
+
 // ApprovalOff is the ApprovalLevel that disables approvals.
-const ApprovalOff = "off"
+const ApprovalOff = LevelOff
 
 // SeverityRank returns 1 (P1) .. 5 (P5), or 0 for an unknown level.
 func SeverityRank(id string) int {
@@ -223,12 +239,13 @@ func Defaults() Settings {
 				"*.lock", "go.sum", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock",
 				"vendor/", "node_modules/", "dist/", "*.min.js", "*.min.css", "*.map", "*.pb.go", "*.snap", "*.svg",
 			},
-			DebounceSeconds: 60,
-			MaxComments:     20,
-			CommentLevel:    "P5",
-			ApprovalLevel:   ApprovalOff,
-			MaxFiles:        150,
-			GuidelineFiles:  DefaultGuidelineFiles(),
+			DebounceSeconds:     60,
+			MaxComments:         20,
+			CommentLevel:        "P5",
+			ApprovalLevel:       "P3",
+			RequestChangesLevel: "P2",
+			MaxFiles:            150,
+			GuidelineFiles:      DefaultGuidelineFiles(),
 		},
 		Replies: Replies{Enabled: true, Mentions: true, MaxPerThread: 5},
 		Poll:    Poll{IntervalSeconds: 60, RepoRefreshMinutes: 15, WebhookIntervalSeconds: 900},
@@ -283,6 +300,17 @@ func (s *Settings) Normalize() {
 		// Findings below the comment level are never posted, so they can't
 		// be "unresolved"; an approval level broader than that means the same.
 		s.Review.ApprovalLevel = s.Review.CommentLevel
+	}
+	s.Review.RequestChangesLevel = strings.ToUpper(strings.TrimSpace(s.Review.RequestChangesLevel))
+	switch r := SeverityRank(s.Review.RequestChangesLevel); {
+	case r == 0:
+		s.Review.RequestChangesLevel = LevelOff
+	case s.Review.ApprovalOn() && r > SeverityRank(s.Review.ApprovalLevel):
+		// A finding that requests changes must hold back approval too, or one
+		// review could ask for changes and approve at once.
+		s.Review.RequestChangesLevel = s.Review.ApprovalLevel
+	case r > SeverityRank(s.Review.CommentLevel):
+		s.Review.RequestChangesLevel = s.Review.CommentLevel // unposted findings can't be acted on
 	}
 	s.Replies.MaxPerThread = clamp(s.Replies.MaxPerThread, 1, 50)
 	s.Poll.IntervalSeconds = clamp(s.Poll.IntervalSeconds, 15, 3600)
