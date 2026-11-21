@@ -156,6 +156,9 @@ var addedColumns = []struct{ table, column, alter string }{
 	// detailed: the review's severity and fixed counts were recorded (0 for
 	// reviews from before they were, whose counts read as zero).
 	{"reviews", "detailed", `ALTER TABLE reviews ADD COLUMN detailed INTEGER NOT NULL DEFAULT 0`},
+	// account_given: the entry's account came from its caller (LogAs), even
+	// 0, so BackfillAccounts leaves it. 0 for earlier entries.
+	{"activity", "account_given", `ALTER TABLE activity ADD COLUMN account_given INTEGER NOT NULL DEFAULT 0`},
 }
 
 // postMigrate indexes the added columns, so it runs after they exist.
@@ -275,10 +278,11 @@ func (s *Store) BackfillAccounts() error {
 		`UPDATE reviews SET account_id=(SELECT p.account_id FROM pulls p WHERE p.repo=reviews.repo AND p.number=reviews.number)
 		 WHERE account_id=0 AND EXISTS(SELECT 1 FROM pulls p WHERE p.repo=reviews.repo AND p.number=reviews.number
 		 AND p.account_id<>0 AND p.tracked_at<=reviews.started_at)`,
-		`UPDATE activity SET account_id=(SELECT p.account_id FROM pulls p WHERE p.repo=activity.repo
-		 AND (activity.number=0 OR p.number=activity.number) AND p.account_id<>0 AND p.tracked_at<=activity.ts LIMIT 1)
-		 WHERE account_id=0 AND repo<>'' AND EXISTS(SELECT 1 FROM pulls p WHERE p.repo=activity.repo
-		 AND (activity.number=0 OR p.number=activity.number) AND p.account_id<>0 AND p.tracked_at<=activity.ts)`,
+		// Activity is matched only to a PR that a stored repository of the
+		// same installation and account backs, as PRs are above, and never
+		// when its caller gave the account (LogAs, even 0: not known then).
+		`UPDATE activity SET account_id=(SELECT p.account_id FROM pulls p WHERE ` + activityPR + ` LIMIT 1)
+		 WHERE account_id=0 AND account_given=0 AND repo<>'' AND EXISTS(SELECT 1 FROM pulls p WHERE ` + activityPR + `)`,
 	} {
 		if _, err := s.db.Exec(q); err != nil {
 			return err
@@ -286,6 +290,12 @@ func (s *Store) BackfillAccounts() error {
 	}
 	return nil
 }
+
+// activityPR matches a PR (p) an activity entry can be filed under: see
+// BackfillAccounts.
+const activityPR = `p.repo=activity.repo AND (activity.number=0 OR p.number=activity.number)
+ AND p.account_id<>0 AND p.tracked_at<=activity.ts
+ AND EXISTS(SELECT 1 FROM repos r WHERE r.full_name=p.repo AND r.installation_id=p.installation_id AND r.account_id=p.account_id)`
 
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -930,6 +940,21 @@ VALUES(?,?,?,?,?,COALESCE(NULLIF(?,0),
   (SELECT account_id FROM repos WHERE full_name=? AND account_id<>0 ORDER BY id DESC LIMIT 1),
   0))`,
 		time.Now().Unix(), level, repo, number, msg, accountID, repo, number, repo)
+	s.trimActivity()
+}
+
+// LogAs records an activity entry under exactly accountID, worked out by the
+// caller: 0 leaves it unassigned (administrators only), with no lookup by
+// name, which could find another repository that has had the name. It stays
+// as given: BackfillAccounts doesn't reassign it at the next start.
+func (s *Store) LogAs(accountID int64, level, repo string, number int, msg string) {
+	_, _ = s.db.Exec(`INSERT INTO activity(ts, level, repo, number, message, account_id, account_given) VALUES(?,?,?,?,?,?,1)`,
+		time.Now().Unix(), level, repo, number, msg, accountID)
+	s.trimActivity()
+}
+
+// trimActivity keeps the newest 20,000 entries, checking every 200 writes.
+func (s *Store) trimActivity() {
 	if s.logs.Add(1)%200 == 0 {
 		_, _ = s.db.Exec(`DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 20000`)
 	}
