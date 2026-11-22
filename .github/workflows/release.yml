@@ -128,7 +128,10 @@ jobs:
           echo "installing $pkg"
           case "$PM" in
             dnf)    dnf install -y --nogpgcheck "./$pkg" ;;
-            zypper) zypper --non-interactive install --allow-unsigned-rpm "./$pkg" ;;
+            # zypper exits 106 when it installed the package but skipped a
+            # repository it couldn't refresh (a mirror mid-sync); the next
+            # step checks the install itself.
+            zypper) zypper --non-interactive install --allow-unsigned-rpm "./$pkg" || [ $? -eq 106 ] ;;
             # The images ship without package lists, which apt and pacman
             # need to install the CA bundle dependency.
             apt)    apt-get update && apt-get install -y "./$pkg" ;;
@@ -153,7 +156,7 @@ jobs:
         run: |
           case "$PM" in
             dnf)    dnf remove -y prbot ;;
-            zypper) zypper --non-interactive remove prbot ;;
+            zypper) zypper --non-interactive remove prbot || [ $? -eq 106 ] ;;
             apt)    apt-get remove -y prbot ;;
             pacman) pacman -R --noconfirm prbot ;;
           esac

@@ -7,13 +7,16 @@
 # GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT that Actions sets.
 #
 # The release never shows a half-updated build:
-#   1. A run older than the published build (such as a re-run of an earlier
-#      run, which keeps its original commit) exits without changing anything.
+#   1. A run older than the published build exits without changing anything:
+#      one with a lower run number (run numbers only grow, and a re-run keeps
+#      its number and commit), or one whose commit is behind the tag.
 #   2. This build's files are uploaded under a staging prefix and checked. A
 #      failure here deletes the staged files and leaves the release as it was.
 #   3. Each live file is renamed aside and its staged replacement renamed into
 #      place, then the tag and notes move. If any step fails, every step
 #      already taken is undone, so the old files, tag and notes all come back.
+#      If an undo step fails too, nothing that might be serving a download is
+#      deleted, and the script lists what is left and exits 2.
 #   4. Only then are the old files, and any this build doesn't have, deleted.
 set -Eeuo pipefail
 
@@ -48,26 +51,22 @@ if gh release view "$tag" --json body,name --jq '.name' >"$work/old-title.txt" 2
     gh release view "$tag" --json body --jq .body >"$work/old-body.md"
 fi
 
+# A higher published run number wins even over a commit that is ahead, which
+# happens when main was reset to an older commit and published from there.
+# The same run number is a re-run of the published build, which may republish.
+run=
+[[ -n $have_release ]] && run=$(published_run)
+if [[ -n $run && $run -gt $GITHUB_RUN_NUMBER ]]; then
+    echo "latest has run $run, newer than run $GITHUB_RUN_NUMBER; not publishing this run"
+    exit 0
+fi
+# Without a recorded run, fall back to the commits.
 if [[ -n $old_sha ]]; then
     status=$(gh api "repos/$GH_REPO/compare/$old_sha...$GITHUB_SHA" --jq .status 2>/dev/null || echo unknown)
-    run=
-    [[ -n $have_release ]] && run=$(published_run)
-    case $status in
-        ahead) ;;
-        behind)
-            echo "latest is at $old_sha, which is newer than $GITHUB_SHA; not publishing this run"
-            exit 0
-            ;;
-        *)
-            # Same commit, a rewritten main, or a commit that's gone: the
-            # higher run number is the newer build. The same run number is a
-            # re-run of the published build, which may republish it.
-            if [[ -n $run && $run -gt $GITHUB_RUN_NUMBER ]]; then
-                echo "latest has run $run, newer than run $GITHUB_RUN_NUMBER; not publishing this run"
-                exit 0
-            fi
-            ;;
-    esac
+    if [[ $status == behind ]]; then
+        echo "latest is at $old_sha, which is newer than $GITHUB_SHA; not publishing this run"
+        exit 0
+    fi
 fi
 
 # A first publish creates the tag and an empty release to upload into.
@@ -145,23 +144,45 @@ restore() {
     set +e
     echo "publishing failed; restoring the previous build" >&2
     local i name
+    local -a incomplete=()
+    local -A keep_staged=() still_live=()
     for ((i = ${#promoted[@]} - 1; i >= 0; i--)); do
         name=${promoted[i]}
-        rename_asset "${staged_id[$name]}" "$stage$name"
+        if ! rename_asset "${staged_id[$name]}" "$stage$name"; then
+            # This build's file still holds the name and serves the download.
+            keep_staged[$name]=1 still_live[$name]=1
+            incomplete+=("$name: this build's file is still live")
+        fi
     done
     for ((i = ${#moved_aside[@]} - 1; i >= 0; i--)); do
         name=${moved_aside[i]}
-        rename_asset "${live_id[$name]}" "$name"
+        if [[ -n ${still_live[$name]-} ]]; then
+            incomplete+=("$name: the previous file is kept as $aside$name")
+        elif ! rename_asset "${live_id[$name]}" "$name"; then
+            keep_staged[$name]=1
+            incomplete+=("$name: no live file; the previous one is kept as $aside$name and this build's as $stage$name")
+        fi
     done
-    if [[ -n $tag_moved ]]; then
-        gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$old_sha" -F force=true >/dev/null
+    if [[ -n $tag_moved ]] &&
+        ! gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$old_sha" -F force=true >/dev/null; then
+        incomplete+=("tag $tag: still at $GITHUB_SHA, was $old_sha")
     fi
-    if [[ -n $notes_changed ]]; then
-        gh release edit "$tag" --title "$(cat "$work/old-title.txt")" --notes-file "$work/old-body.md"
+    if [[ -n $notes_changed ]] &&
+        ! gh release edit "$tag" --title "$(cat "$work/old-title.txt")" --notes-file "$work/old-body.md"; then
+        incomplete+=("release notes: still describe run $GITHUB_RUN_NUMBER")
     fi
     for name in "${!staged_id[@]}"; do
-        delete_asset "${staged_id[$name]}"
+        if [[ -z ${keep_staged[$name]-} ]]; then
+            delete_asset "${staged_id[$name]}" ||
+                echo "warning: couldn't delete staged asset $stage$name" >&2
+        fi
     done
+    if ((${#incomplete[@]})); then
+        echo "::error::restoring the previous build is incomplete; re-run this job or fix these by hand:" >&2
+        printf '  %s\n' "${incomplete[@]}" >&2
+        exit 2
+    fi
+    echo "restored the previous build" >&2
     exit 1
 }
 trap restore ERR

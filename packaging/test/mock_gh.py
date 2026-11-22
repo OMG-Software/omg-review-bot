@@ -76,7 +76,8 @@ if args[0] == "api":
             die("asset not found (HTTP 404)")
         if method == "PATCH":
             n = count("rename")
-            if st["fail"].get("rename") == n:
+            fail = st["fail"].get("rename")
+            if n == fail or (isinstance(fail, list) and n in fail):
                 die("rename failed (HTTP 500)")
             if any(x["name"] == f["name"] for x in rel["assets"]):
                 die("name taken (HTTP 422)")

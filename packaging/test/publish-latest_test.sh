@@ -121,6 +121,45 @@ run $NEW 42; rc=$?
 check "tag move failure exits 1" test $rc -eq 1
 check "tag move failure restores files, tag and notes" unchanged
 
+# 8. main was reset and republished: a lower run on a commit that's ahead is
+#    still skipped.
+published
+set_state "s['compare']['$OLD...$NEW']='ahead'"
+cp "$MOCK_STATE" "$t/before.json"
+run $NEW 40; rc=$?
+check "lower run on a newer commit is skipped" eval "[ $rc -eq 0 ] && unchanged"
+
+# 9. An undo step fails too: nothing serving a download is deleted, every old
+#    file survives, each name keeps a live file or both copies, and it exits 2.
+#    Renames run aside/promote per file, so 4 fails the second promote and
+#    5 or 6 fail the undo of the first promote or the second aside.
+nothing_lost() {
+    python3 - "$t" <<'EOF'
+import json, os, sys
+t = sys.argv[1]
+b = json.load(open(f"{t}/before.json"))["release"]["assets"]
+s = json.load(open(f"{t}/state.json"))["release"]["assets"]
+have = {a["sha"] for a in s}
+names = {a["name"] for a in s}
+lost = [a["name"] for a in b if a["sha"] not in have]
+def kept(prefix, n):
+    return any(x.startswith(prefix) and x.endswith("." + n) for x in names)
+# A name without a live file must keep both the previous and the staged copy.
+gone = [n for n in os.listdir(f"{t}/new")
+        if n not in names and not (kept("previous-", n) and kept("staging-", n))]
+if lost or gone:
+    print("     lost", lost, "gone", gone, sorted(names), file=sys.stderr)
+sys.exit(1 if lost or gone else 0)
+EOF
+}
+for n in 5 6; do
+    published
+    set_state "s['fail']['rename']=[4, $n]"
+    run $NEW 42; rc=$?
+    check "failed undo $n exits 2 and says so" eval "[ $rc -eq 2 ] && grep -q incomplete '$t/out.log'"
+    check "failed undo $n deletes nothing still needed" nothing_lost
+done
+
 rm -rf "$t"
 echo "$fails failed"
 exit $fails
