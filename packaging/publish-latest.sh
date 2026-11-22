@@ -15,8 +15,10 @@
 #   3. Each live file is renamed aside and its staged replacement renamed into
 #      place, then the tag and notes move. If any step fails, every step
 #      already taken is undone, so the old files, tag and notes all come back.
-#      If an undo step fails too, nothing that might be serving a download is
-#      deleted, and the script lists what is left and exits 2.
+#      The undo reads the release as it is (a call that reported failure may
+#      still have been applied), retries once, and deletes a staged copy only
+#      once the release shows it isn't needed; otherwise it keeps every copy,
+#      lists what is left and exits 2.
 #   4. Only then are the old files, and any this build doesn't have, deleted.
 set -Eeuo pipefail
 
@@ -60,8 +62,9 @@ if [[ -n $run && $run -gt $GITHUB_RUN_NUMBER ]]; then
     echo "latest has run $run, newer than run $GITHUB_RUN_NUMBER; not publishing this run"
     exit 0
 fi
-# Without a recorded run, fall back to the commits.
-if [[ -n $old_sha ]]; then
+# Only without a recorded run, fall back to the commits: once main has been
+# reset, a newer run can be on an older commit.
+if [[ -z $run && -n $old_sha ]]; then
     status=$(gh api "repos/$GH_REPO/compare/$old_sha...$GITHUB_SHA" --jq .status 2>/dev/null || echo unknown)
     if [[ $status == behind ]]; then
         echo "latest is at $old_sha, which is newer than $GITHUB_SHA; not publishing this run"
@@ -78,14 +81,17 @@ if [[ -z $have_release ]]; then
 fi
 release_id=$(gh api "repos/$GH_REPO/releases/tags/$tag" --jq .id)
 
-declare -A asset_id asset_size asset_state
+# Reads the release's assets: asset_id, asset_size and asset_state by name, and
+# asset_name by id. Fails, leaving the arrays empty, if the listing does.
+declare -A asset_id asset_size asset_state asset_name
 load_assets() {
-    asset_id=() asset_size=() asset_state=()
+    asset_id=() asset_size=() asset_state=() asset_name=()
+    gh api --paginate "repos/$GH_REPO/releases/$release_id/assets?per_page=100" \
+        --jq '.[] | [.id, .name, .size, .state] | @tsv' >"$work/assets.tsv" || return 1
     local id name size state
     while IFS=$'\t' read -r id name size state; do
-        asset_id[$name]=$id asset_size[$name]=$size asset_state[$name]=$state
-    done < <(gh api --paginate "repos/$GH_REPO/releases/$release_id/assets?per_page=100" \
-        --jq '.[] | [.id, .name, .size, .state] | @tsv')
+        asset_id[$name]=$id asset_size[$name]=$size asset_state[$name]=$state asset_name[$id]=$name
+    done <"$work/assets.tsv"
 }
 
 rename_asset() {
@@ -138,45 +144,59 @@ done
 
 # --- 3. Swap the staged files in, then move the tag and notes. ---------------
 
-moved_aside=() promoted=() tag_moved= notes_changed=
+# The undo works from the release as it is now, not from a record of the
+# steps taken: a call that reported failure may still have been applied.
 restore() {
     trap - ERR
     set +e
     echo "publishing failed; restoring the previous build" >&2
-    local i name
+    local attempt name old new cur
     local -a incomplete=()
-    local -A keep_staged=() still_live=()
-    for ((i = ${#promoted[@]} - 1; i >= 0; i--)); do
-        name=${promoted[i]}
-        if ! rename_asset "${staged_id[$name]}" "$stage$name"; then
-            # This build's file still holds the name and serves the download.
-            keep_staged[$name]=1 still_live[$name]=1
-            incomplete+=("$name: this build's file is still live")
-        fi
+
+    # Put every file back, then look again and retry once.
+    for attempt in 1 2; do
+        load_assets || continue
+        for name in "${files[@]}"; do
+            new=${staged_id[$name]} old=${live_id[$name]}
+            if [[ ${asset_name[$new]-} == "$name" ]]; then
+                rename_asset "$new" "$stage$name"
+            fi
+            if [[ -n $old && -n ${asset_name[$old]-} && ${asset_name[$old]} != "$name" ]]; then
+                rename_asset "$old" "$name"
+            fi
+        done
     done
-    for ((i = ${#moved_aside[@]} - 1; i >= 0; i--)); do
-        name=${moved_aside[i]}
-        if [[ -n ${still_live[$name]-} ]]; then
-            incomplete+=("$name: the previous file is kept as $aside$name")
-        elif ! rename_asset "${live_id[$name]}" "$name"; then
-            keep_staged[$name]=1
-            incomplete+=("$name: no live file; the previous one is kept as $aside$name and this build's as $stage$name")
-        fi
-    done
-    if [[ -n $tag_moved ]] &&
-        ! gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$old_sha" -F force=true >/dev/null; then
-        incomplete+=("tag $tag: still at $GITHUB_SHA, was $old_sha")
+
+    # Delete a staged copy only once the release shows it's no longer needed;
+    # if the release can't be read, keep every copy.
+    if load_assets; then
+        for name in "${files[@]}"; do
+            new=${staged_id[$name]} old=${live_id[$name]}
+            if [[ ${asset_name[$new]-} == "$name" ]]; then
+                incomplete+=("$name: this build's file is still live${old:+; the previous one is ${asset_name[$old]:-missing}}")
+            elif [[ -n $old && ${asset_name[$old]-} != "$name" ]]; then
+                incomplete+=("$name: no live file; the previous one is ${asset_name[$old]:-missing} and this build's ${asset_name[$new]:-missing}")
+            elif [[ -n ${asset_name[$new]-} ]]; then
+                delete_asset "$new" || echo "warning: couldn't delete staged asset ${asset_name[$new]}" >&2
+            fi
+        done
+    else
+        incomplete+=("assets: couldn't read the release to check them; every staged and previous copy is kept")
     fi
-    if [[ -n $notes_changed ]] &&
-        ! gh release edit "$tag" --title "$(cat "$work/old-title.txt")" --notes-file "$work/old-body.md"; then
-        incomplete+=("release notes: still describe run $GITHUB_RUN_NUMBER")
-    fi
-    for name in "${!staged_id[@]}"; do
-        if [[ -z ${keep_staged[$name]-} ]]; then
-            delete_asset "${staged_id[$name]}" ||
-                echo "warning: couldn't delete staged asset $stage$name" >&2
+
+    if [[ -n $old_sha ]]; then
+        cur=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)
+        if [[ $cur != "$old_sha" ]]; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$old_sha" -F force=true >/dev/null
+            cur=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)
+            [[ $cur == "$old_sha" ]] || incomplete+=("tag $tag: at ${cur:-unknown}, was $old_sha")
         fi
-    done
+    fi
+    if [[ -n $have_release ]] && ! notes_match; then
+        gh release edit "$tag" --title "$(cat "$work/old-title.txt")" --notes-file "$work/old-body.md"
+        notes_match || incomplete+=("release notes: not the previous build's")
+    fi
+
     if ((${#incomplete[@]})); then
         echo "::error::restoring the previous build is incomplete; re-run this job or fix these by hand:" >&2
         printf '  %s\n' "${incomplete[@]}" >&2
@@ -185,23 +205,26 @@ restore() {
     echo "restored the previous build" >&2
     exit 1
 }
+
+# Whether the release's title and notes are still the previous build's.
+notes_match() {
+    gh release view "$tag" --json name --jq .name >"$work/cur-title.txt" 2>/dev/null &&
+        gh release view "$tag" --json body --jq .body >"$work/cur-body.md" 2>/dev/null &&
+        cmp -s "$work/cur-title.txt" "$work/old-title.txt" && cmp -s "$work/cur-body.md" "$work/old-body.md"
+}
 trap restore ERR
 
 for name in "${files[@]}"; do
     if [[ -n ${live_id[$name]} ]]; then
         rename_asset "${live_id[$name]}" "$aside$name"
-        moved_aside+=("$name")
     fi
     rename_asset "${staged_id[$name]}" "$name"
-    promoted+=("$name")
 done
 
 if [[ -n $old_sha && $old_sha != "$GITHUB_SHA" ]]; then
     gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null
-    tag_moved=1
 fi
 if [[ -n $have_release ]]; then
-    notes_changed=1
     gh release edit "$tag" --prerelease --title "$title" --notes-file "$work/body.md"
 fi
 trap - ERR
@@ -212,7 +235,10 @@ declare -A keep
 for name in "${files[@]}"; do
     keep[$name]=1
 done
-load_assets
+if ! load_assets; then
+    echo "warning: published, but couldn't list the assets to delete the old ones" >&2
+    exit 0
+fi
 for name in "${!asset_id[@]}"; do
     if [[ -z ${keep[$name]-} ]]; then
         delete_asset "${asset_id[$name]}" || echo "warning: couldn't delete old asset $name" >&2

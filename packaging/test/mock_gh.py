@@ -59,14 +59,19 @@ if args[0] == "api":
             die("Reference already exists (HTTP 422)")
         st["tag"] = f["sha"]
     elif ep == "git/refs/tags/latest" and method == "PATCH":
-        if st["fail"].get("tagpatch") and f["sha"] != st["tag_original"]:
+        away = f["sha"] != st["tag_original"]
+        if st["fail"].get("tagpatch") and away:
             die("tag patch failed (HTTP 500)")
         st["tag"] = f["sha"]
+        if st["fail"].get("tagpatch_lost") and away:
+            die("tag patch applied, response lost (HTTP 502)")
     elif ep == "releases/tags/latest":
         if not rel:
             die("Not Found (HTTP 404)")
         print(rel["id"])
     elif ep.endswith("/assets") and method == "GET":
+        if count("list") >= st["fail"].get("list_from", 1 << 30):
+            die("listing failed (HTTP 500)")
         for a in rel["assets"]:
             print(f'{a["id"]}\t{a["name"]}\t{a["size"]}\t{a["state"]}')
     elif ep.startswith("releases/assets/"):
@@ -76,12 +81,19 @@ if args[0] == "api":
             die("asset not found (HTTP 404)")
         if method == "PATCH":
             n = count("rename")
-            fail = st["fail"].get("rename")
-            if n == fail or (isinstance(fail, list) and n in fail):
+
+            def hit(key):
+                v = st["fail"].get(key)
+                return n == v or (isinstance(v, list) and n in v)
+            # rename: fails before applying; rename_from: every rename from
+            # that one on fails; rename_lost: applied, then reports failure.
+            if hit("rename") or n >= st["fail"].get("rename_from", 1 << 30):
                 die("rename failed (HTTP 500)")
             if any(x["name"] == f["name"] for x in rel["assets"]):
                 die("name taken (HTTP 422)")
             a["name"] = f["name"]
+            if hit("rename_lost"):
+                die("rename applied, response lost (HTTP 502)")
         elif method == "DELETE":
             rel["assets"].remove(a)
     else:

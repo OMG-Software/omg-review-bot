@@ -15,7 +15,7 @@ fails=0
 
 build() { # build DIR TAG FILE... : files whose content names the build
     rm -rf "$1"; mkdir -p "$1"
-    local d=$1 b=$2; shift 2
+    local d=$1 b=$2 f; shift 2
     for f in "$@"; do echo "$b $f" >"$d/$f"; done
 }
 echo notes >"$t/notes.md"
@@ -81,13 +81,26 @@ run $NEW 42; rc=$?
 check "newer build publishes" test $rc -eq 0
 check "newer build replaces everything, drops stale, leaves no staging" is_new $NEW 42
 
-# 3. Re-run of an older commit is skipped.
+# 3. Re-run of an older run (lower number, older commit) is skipped.
 published
 set_state "s['compare']['$OLD...$NEW']='behind'"
 cp "$MOCK_STATE" "$t/before.json"
 run $NEW 40; rc=$?
-check "older commit exits 0" test $rc -eq 0
-check "older commit changes nothing" unchanged
+check "older run exits 0" test $rc -eq 0
+check "older run changes nothing" unchanged
+
+# 3b. main was reset to an older commit: a newer run there still publishes.
+published
+set_state "s['compare']['$OLD...$NEW']='behind'"
+run $NEW 42; rc=$?
+check "newer run on an older commit publishes" eval "[ $rc -eq 0 ] && is_new $NEW 42"
+
+# 3c. No recorded run: fall back to the commits, and skip one that's behind.
+published
+set_state "s['compare']['$OLD...$NEW']='behind'; s['release']['body']='old notes'"
+cp "$MOCK_STATE" "$t/before.json"
+run $NEW 42; rc=$?
+check "without a recorded run, an older commit is skipped" eval "[ $rc -eq 0 ] && unchanged"
 
 # 4. Same commit: lower run skipped, same run republished.
 published
@@ -152,13 +165,35 @@ if lost or gone:
 sys.exit(1 if lost or gone else 0)
 EOF
 }
+# A single failed undo rename is retried on the second pass: full restore.
 for n in 5 6; do
     published
     set_state "s['fail']['rename']=[4, $n]"
     run $NEW 42; rc=$?
-    check "failed undo $n exits 2 and says so" eval "[ $rc -eq 2 ] && grep -q incomplete '$t/out.log'"
-    check "failed undo $n deletes nothing still needed" nothing_lost
+    check "undo retries failed rename $n and restores" eval "[ $rc -eq 1 ] && unchanged"
 done
+
+# Every undo rename fails, or the release can't be listed during the undo.
+for spec in "s['fail']['rename']=4; s['fail']['rename_from']=5" "s['fail']['rename']=4; s['fail']['list_from']=2"; do
+    published
+    set_state "$spec"
+    run $NEW 42; rc=$?
+    check "failed undo ($spec) exits 2 and says so" eval "[ $rc -eq 2 ] && grep -q incomplete '$t/out.log'"
+    check "failed undo ($spec) deletes nothing still needed" nothing_lost
+done
+
+# 10. A call GitHub applied but reported as failed is still undone, because
+#     the undo reads the release rather than its own record.
+for n in 1 3 4 6; do
+    published
+    set_state "s['fail']['rename_lost']=$n"
+    run $NEW 42; rc=$?
+    check "lost rename response $n is undone" eval "[ $rc -eq 1 ] && unchanged"
+done
+published
+set_state "s['fail']['tagpatch_lost']=True"
+run $NEW 42; rc=$?
+check "lost tag move response is undone" eval "[ $rc -eq 1 ] && unchanged"
 
 rm -rf "$t"
 echo "$fails failed"
