@@ -61,13 +61,25 @@ func New(cfg Config) (Client, error) {
 	if base == "" {
 		return nil, errors.New("LLM base URL is not set")
 	}
-	if u, err := url.ParseRequestURI(base); err != nil || u.Host == "" {
-		return nil, fmt.Errorf("LLM base URL %q is not a valid URL", base)
+	bu, err := url.ParseRequestURI(base)
+	if err != nil || bu.Host == "" || (bu.Scheme != "http" && bu.Scheme != "https") {
+		return nil, fmt.Errorf("LLM base URL %q is not a valid http(s) URL", base)
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Minute
 	}
-	hc := &http.Client{Timeout: cfg.Timeout}
+	// Prompts carry the PR's code and the API key, so they go only to the
+	// configured server: a redirect elsewhere is refused (Go would otherwise
+	// resend the body on a 307/308).
+	hc := &http.Client{Timeout: cfg.Timeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("stopped after 5 redirects")
+		}
+		if !strings.EqualFold(req.URL.Scheme, bu.Scheme) || !strings.EqualFold(req.URL.Host, bu.Host) {
+			return fmt.Errorf("refusing redirect to %s: not the configured LLM server", req.URL.Host)
+		}
+		return nil
+	}}
 	switch cfg.Provider {
 	case "ollama", "ollama-cloud":
 		base = strings.TrimSuffix(strings.TrimSuffix(base, "/v1"), "/api")

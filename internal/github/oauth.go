@@ -86,7 +86,7 @@ func NewUserClient(apiBase, token string) *UserClient {
 	if apiBase == "" {
 		apiBase = DefaultBaseURL
 	}
-	a := &App{base: apiBase, hc: &http.Client{Timeout: 60 * time.Second}}
+	a := &App{base: apiBase, hc: apiHTTPClient(apiBase, 60*time.Second)}
 	a.rate.Store(-1)
 	return &UserClient{app: a, token: token}
 }

@@ -149,7 +149,7 @@ func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, cl *github
 		if err != nil {
 			return err
 		}
-		posted, err := cl.ReplyToReviewComment(ctx, pr.Repo, pr.Number, rootID, text)
+		posted, err := cl.ReplyToReviewComment(ctx, pr.Repo, pr.Number, rootID, sanitizeModelText(text))
 		if err != nil {
 			return err
 		}
@@ -264,7 +264,7 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, cl *githu
 		if err != nil {
 			return err
 		}
-		posted, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, "@"+c.User.Login+" "+text)
+		posted, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, afterPrefix("@"+c.User.Login, sanitizeModelText(text)))
 		if err != nil {
 			return err
 		}

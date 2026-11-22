@@ -100,6 +100,14 @@ type Bot struct {
 	// upgrades holds a manual review asked for while an automatic one for
 	// the same PR was queued: that queue entry is run as the manual review.
 	upgrades map[string]job
+	// notices holds the "Queued for review" comment of each queued review
+	// job, until the worker takes it (see queued.go).
+	notices map[string]*queuedNotice
+	// running holds the review jobs the worker has taken, until they finish.
+	// A review asked for meanwhile waits in after (a manual one wins), so it
+	// can't take over the running review's comment.
+	running map[string]bool
+	after   map[string]job
 
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
@@ -116,6 +124,9 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		log:         log,
 		queued:      map[string]bool{},
 		upgrades:    map[string]job{},
+		notices:     map[string]*queuedNotice{},
+		running:     map[string]bool{},
+		after:       map[string]job{},
 		jobs:        make(chan job, 4096),
 		wake:        make(chan struct{}, 1),
 		kick:        make(chan struct{}, 1),
@@ -313,6 +324,15 @@ const (
 func (b *Bot) push(j job) pushResult {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if j.kind == jobReview && b.running[j.key()] {
+		// Until the PR's review has finished, its status may still say it's
+		// due, so an automatic review is asked for again. Queued now, it would
+		// edit the running review's comment and then close it as skipped.
+		if prev, ok := b.after[j.key()]; !ok || !prev.force {
+			b.after[j.key()] = j
+		}
+		return pushed
+	}
 	if manual, ok := b.queued[j.key()]; ok {
 		if j.force && !manual {
 			// An automatic review of this PR is queued: it runs as this
@@ -326,6 +346,9 @@ func (b *Bot) push(j job) pushResult {
 	select {
 	case b.jobs <- j:
 		b.queued[j.key()] = j.force
+		if j.kind == jobReview {
+			b.queueNotice(j)
+		}
 		return pushed
 	default:
 		b.log.Warn("job queue full, dropping", "job", j.key())
@@ -338,11 +361,34 @@ func (b *Bot) dequeued(j job) job {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.queued, j.key())
+	if j.kind == jobReview {
+		b.running[j.key()] = true // in the same step, so nothing slips in between
+	}
 	if u, ok := b.upgrades[j.key()]; ok {
 		delete(b.upgrades, j.key())
 		return u
 	}
 	return j
+}
+
+// reviewDone ends a running review job, and queues what was asked for
+// meanwhile: a manual review as asked, while an automatic one only goes
+// ahead if the PR is still due once its status is up to date.
+func (b *Bot) reviewDone(j job) {
+	b.mu.Lock()
+	delete(b.running, j.key())
+	next, ok := b.after[j.key()]
+	delete(b.after, j.key())
+	b.mu.Unlock()
+	switch {
+	case !ok:
+	case next.force:
+		if b.push(next) == queueFull {
+			b.requeueForced(next, b.policyRetry)
+		}
+	default:
+		b.kickDue()
+	}
 }
 
 func (b *Bot) worker(ctx context.Context) {
@@ -370,6 +416,7 @@ func (b *Bot) runJob(ctx context.Context, j job) {
 	defer cancel()
 	switch j.kind {
 	case jobReview:
+		defer b.reviewDone(j)
 		b.handleReview(jctx, j)
 	case jobReplies:
 		b.handleReplies(jctx, j)

@@ -136,6 +136,24 @@ func (n reviewNotice) failedBody(retrying bool) string {
 	return n.body("⚠️ **Review didn't finish**", next)
 }
 
+// nothingBody says the review found no code to look at.
+func (n reviewNotice) nothingBody() string {
+	return n.body("⏭️ **Nothing to review**", "Every changed file is deleted, binary or ignored, so no review was posted.")
+}
+
+// queuedBody is the notice for a review that is queued but hasn't started.
+// It carries the commit's notice marker, so the review that follows (or a
+// retry after a restart) edits it rather than posting another.
+func queuedBody(head string, at time.Time) string {
+	return fmt.Sprintf("⏳ **Queued for review** on `%s`\n\n- **Queued:** %s\n\n<sub>The review starts when the bot gets to it; this comment will be updated then.</sub>\n%s",
+		short(head), at.UTC().Format("2006-01-02 15:04:05 UTC"), noticeMarker(head))
+}
+
+// notStartedBody replaces a queued notice whose review never started.
+func notStartedBody(head, reason string) string {
+	return fmt.Sprintf("⏭️ **Review skipped** on `%s`\n\n<sub>%s</sub>\n%s", short(head), reason, noticeMarker(head))
+}
+
 func (n reviewNotice) body(title, note string) string {
 	return fmt.Sprintf("%s on `%s`\n\n- **Started:** %s\n- **Model:** %s\n- **Review skill:** %s\n\n<sub>%s</sub>\n%s",
 		title, short(n.head), n.started.UTC().Format("2006-01-02 15:04:05 UTC"), inlineCode(n.model), inlineCode(n.skill),
@@ -165,6 +183,11 @@ func inlineCode(s string) string {
 	return "`" + s + "`"
 }
 
+// codePath shows a file path as inline code. A note's path is the model's
+// and a file's name is the PR author's, so either may hold line breaks,
+// backticks or markdown: it's made one sanitized line first.
+func codePath(p string) string { return inlineCode(sanitizeModelLine(p)) }
+
 // ---------- the bot's own finding comments ----------
 
 var (
@@ -182,7 +205,7 @@ func commentBody(f finding) string {
 
 // findingSeverity reads the level back from one of the bot's comments ("" if unknown).
 func findingSeverity(body string) string {
-	if m := sevMarkerRE.FindStringSubmatch(body); m != nil {
+	if m := lastMatch(sevMarkerRE, body); m != nil {
 		return m[1]
 	}
 	first := textutil.FirstLine(body)
@@ -195,6 +218,17 @@ func findingSeverity(body string) string {
 		}
 	}
 	return ""
+}
+
+// lastMatch returns re's last match in s. The bot appends its markers after
+// everything else, so the last one is the bot's even if model text before it
+// somehow contains a lookalike.
+func lastMatch(re *regexp.Regexp, s string) []string {
+	all := re.FindAllStringSubmatch(s, -1)
+	if len(all) == 0 {
+		return nil
+	}
+	return all[len(all)-1]
 }
 
 // findingTitle extracts the claim from the first line of one of the bot's comments.
@@ -249,7 +283,7 @@ var notesMarkerRE = regexp.MustCompile(`<!-- prbot:review notes=([P1-5,]*) -->`)
 // noteSeverities reads which levels a review body listed as notes, and
 // whether the body is one of the bot's reviews at all.
 func noteSeverities(body string) ([]string, bool) {
-	m := notesMarkerRE.FindStringSubmatch(body)
+	m := lastMatch(notesMarkerRE, body)
 	if m == nil {
 		return nil, false
 	}
@@ -307,7 +341,7 @@ func reviewBody(ri reviewInfo) string {
 			if f.Line > 0 {
 				loc = fmt.Sprintf("%s:%d", f.Path, f.Line)
 			}
-			fmt.Fprintf(&sb, "**%s** %s\n`%s`\n\n%s\n\n---\n\n", settings.SeverityInfo(f.Severity).Label, f.Title, loc, f.Body)
+			fmt.Fprintf(&sb, "**%s** %s\n%s\n\n%s\n\n---\n\n", settings.SeverityInfo(f.Severity).Label, f.Title, codePath(loc), f.Body)
 			noteSevs = append(noteSevs, f.Severity)
 		}
 		sb.WriteString("</details>\n\n")
@@ -319,7 +353,7 @@ func reviewBody(ri reviewInfo) string {
 				fmt.Fprintf(&sb, "- …and %d more\n", len(ri.plan.skipped)-50)
 				break
 			}
-			fmt.Fprintf(&sb, "- `%s`\n", s)
+			fmt.Fprintf(&sb, "- %s\n", codePath(s))
 		}
 		sb.WriteString("\n</details>\n\n")
 	}

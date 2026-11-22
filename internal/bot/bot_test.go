@@ -54,6 +54,7 @@ type fakeGitHub struct {
 	docRefs       []string         // refs project docs were read at
 	posted        []string         // PR conversation comments the bot posted
 	edited        map[int64]string // the latest text of each comment the bot edited
+	editLog       []string         // every edit, in order
 	failEdits     bool             // editing issue comments fails (a 502)
 	failList      bool             // listing the PR's conversation comments fails (a 502)
 	mainStatus    string           // main.go's status in the PR's files; "" = modified
@@ -187,6 +188,7 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.edited[id] = body["body"]
+			f.editLog = append(f.editLog, body["body"])
 			send(map[string]any{"id": id, "user": bot, "body": body["body"]})
 		case strings.HasPrefix(p, "/repos/acme/web/git/trees/"):
 			f.treeCalls++
@@ -390,14 +392,24 @@ func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
 	if len(gh.reviews) != 1 {
 		t.Fatalf("expected 1 review posted, got %d", len(gh.reviews))
 	}
-	// The PR is told the review has started, when, and with what.
+	// The PR is told the review is queued as soon as it is; that same comment
+	// then says the review has started, when, and with what.
 	if len(gh.posted) != 1 {
-		t.Fatalf("expected 1 review-started comment, got %d: %q", len(gh.posted), gh.posted)
+		t.Fatalf("expected 1 review notice, got %d: %q", len(gh.posted), gh.posted)
+	}
+	for _, want := range []string{"**Queued for review** on `aaa111`", "- **Queued:** " + time.Now().UTC().Format("2006-01-02 "),
+		"<!-- prbot:review-started sha=aaa111 -->"} {
+		if !strings.Contains(gh.posted[0], want) {
+			t.Errorf("review-queued comment missing %q:\n%s", want, gh.posted[0])
+		}
+	}
+	if len(gh.editLog) < 2 {
+		t.Fatalf("notice edits = %q, want started then posted", gh.editLog)
 	}
 	for _, want := range []string{"**Review started** on `aaa111`", "- **Model:** `test-model`",
 		"- **Review skill:** `default-code-review`", time.Now().UTC().Format("2006-01-02 "), " UTC\n", "<!-- prbot:review-started sha=aaa111 -->"} {
-		if !strings.Contains(gh.posted[0], want) {
-			t.Errorf("review-started comment missing %q:\n%s", want, gh.posted[0])
+		if !strings.Contains(gh.editLog[0], want) {
+			t.Errorf("review-started notice missing %q:\n%s", want, gh.editLog[0])
 		}
 	}
 	// Once the review is posted, the notice says so (keeping its marker).
@@ -1651,7 +1663,7 @@ func forcedRetryBot(t *testing.T, queueLen int) (*Bot, func() (job, bool), func(
 		if _, err := db.Exec(`ALTER TABLE orgs RENAME TO orgs_away`); err != nil {
 			t.Fatal(err)
 		}
-		b.handleReview(context.Background(), j)
+		b.runJob(context.Background(), j)
 		if _, err := db.Exec(`ALTER TABLE orgs_away RENAME TO orgs`); err != nil {
 			t.Fatal(err)
 		}
