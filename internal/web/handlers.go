@@ -540,15 +540,20 @@ func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
 // configuration problems and poll errors (which can name any repository).
 func (s *Server) statusFor(v *viewer) bot.Status { return visibleStatus(s.bot.Status(), v) }
 
-// visibleStatus is the part of the bot's status v may see. The running job
-// is shown only to members of the account it was started for.
+// visibleStatus is the part of the bot's status v may see. A running job is
+// shown only to members of the account it was started for.
 func visibleStatus(st bot.Status, v *viewer) bot.Status {
 	if v != nil && v.Admin {
 		return st
 	}
-	if st.CurrentRepo != "" && (v == nil || st.CurrentAccount == 0 || v.Role(st.CurrentAccount) == "") {
-		st.Current, st.CurrentRepo, st.CurrentAccount = "a review for another organization", "", 0
+	working := make([]bot.Activity, len(st.Working))
+	for i, a := range st.Working {
+		if a.Repo != "" && (v == nil || a.Account == 0 || v.Role(a.Account) == "") {
+			a.What, a.Repo, a.Account = "a review for another organization", "", 0
+		}
+		working[i] = a
 	}
+	st.Working = working
 	st.ConfigIssues, st.LastPollErr = nil, ""
 	return st
 }

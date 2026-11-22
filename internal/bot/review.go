@@ -116,7 +116,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	_ = b.store.SavePR(pr)
 	b.prMu.Unlock()
 
-	b.setCurrent(pr, "Reviewing %s#%d", pr.Repo, pr.Number)
+	b.setCurrent(ctx, pr, "Reviewing %s#%d", pr.Repo, pr.Number)
 	sha, err := b.reviewPR(ctx, st, pr, qn)
 	if qn != nil && !qn.claimed {
 		// The review stopped before it could take the comment over (GitHub
@@ -542,7 +542,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	var summaries []string
 	for i, bt := range p.batches {
 		if len(p.batches) > 1 {
-			b.setCurrent(pr, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
+			b.setCurrent(ctx, pr, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
 		}
 		user := batchPrompt(header, i, len(p.batches), bt, previousFor(mine, bt.paths))
 		var out modelOutput

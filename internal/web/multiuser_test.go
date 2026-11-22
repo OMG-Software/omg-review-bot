@@ -1355,21 +1355,26 @@ func TestHomeRedirectEscaped(t *testing.T) {
 	}
 }
 
-// TestRunningJobShownByAccount: the running job is shown to members of the
+// TestRunningJobShownByAccount: each running job is shown to members of the
 // account it was started for, whoever has the repository's name now.
 func TestRunningJobShownByAccount(t *testing.T) {
 	member := &viewer{ID: aliceID, Orgs: []store.Member{{OrgID: acmeID, Role: store.RoleMember}}}
-	job := bot.Status{Current: "Reviewing acme/web#7", CurrentRepo: "acme/web", CurrentAccount: otherID}
-	if st := visibleStatus(job, member); st.Current == job.Current || st.CurrentRepo != "" {
-		t.Errorf("another account's job, under a name acme has now, shown to acme: %+v", st)
+	const what = "Reviewing acme/web#7"
+	job := func(account int64) bot.Activity { return bot.Activity{What: what, Repo: "acme/web", Account: account} }
+	two := bot.Status{Working: []bot.Activity{job(otherID), job(acmeID)}}
+	st := visibleStatus(two, member)
+	if a := st.Working[0]; a.What == what || a.Repo != "" {
+		t.Errorf("another account's job, under a name acme has now, shown to acme: %+v", a)
 	}
-	job.CurrentAccount = acmeID
-	if st := visibleStatus(job, member); st.Current != job.Current {
-		t.Errorf("acme's own job hidden from acme: %+v", st)
+	if a := st.Working[1]; a.What != what {
+		t.Errorf("acme's own job hidden from acme: %+v", a)
 	}
-	job.CurrentAccount = 0 // not linked to an organization: administrators only
-	if st := visibleStatus(job, member); st.Current == job.Current {
-		t.Errorf("a job of no organization shown to a member: %+v", st)
+	if two.Working[0].What != what {
+		t.Errorf("hiding a job changed the bot's own status: %+v", two.Working[0])
+	}
+	// Not linked to an organization: administrators only.
+	if a := visibleStatus(bot.Status{Working: []bot.Activity{job(0)}}, member).Working[0]; a.What == what {
+		t.Errorf("a job of no organization shown to a member: %+v", a)
 	}
 }
 

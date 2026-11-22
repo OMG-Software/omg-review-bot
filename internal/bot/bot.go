@@ -1,5 +1,6 @@
 // Package bot is the engine: it polls GitHub, queues reviews and replies, and
-// runs them one at a time against the configured model.
+// runs them against the configured model, two at a time (never two for the
+// same PR).
 package bot
 
 import (
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,19 +31,34 @@ type Status struct {
 	LastPoll     time.Time
 	LastPollDur  time.Duration
 	LastPollErr  string
-	Current      string
-	CurrentRepo  string // repository of the running job
-	// CurrentAccount owns the running job's PR, so org views can hide others'
-	// work. It's recorded with the job, not looked up from CurrentRepo: the
-	// name can pass to another account while the job runs.
-	CurrentAccount int64
-	CurrentSince   time.Time
-	QueueLen       int
-	RateRemaining  int64
-	LastWebhook    time.Time
+	// Working is what the workers are doing, longest-running first (empty
+	// when idle).
+	Working       []Activity
+	QueueLen      int
+	RateRemaining int64
+	LastWebhook   time.Time
 	// WebhooksActive: deliveries arrived recently, so polling has slowed to a safety net.
 	WebhooksActive bool
 }
+
+// Activity is the job one worker is running.
+type Activity struct {
+	What string
+	Repo string // repository of the job
+	// Account owns the job's PR, so org views can hide others' work. It's
+	// recorded with the job, not looked up from Repo: the name can pass to
+	// another account while the job runs.
+	Account int64
+	Since   time.Time
+}
+
+// workers is how many jobs run at once. Jobs for the same PR still run one
+// after another (see claimPR).
+const workers = 2
+
+// workerSlot is the context key of the running worker's index, so a job's
+// progress (setCurrent) is shown against the worker running it.
+type workerSlot struct{}
 
 type jobKind string
 
@@ -108,6 +125,13 @@ type Bot struct {
 	// can't take over the running review's comment.
 	running map[string]bool
 	after   map[string]job
+	// active holds each PR (prKey) a worker is running a job for, with the
+	// jobs for that PR taken off the queue meanwhile. Those run next on the
+	// same worker, in order, so no two jobs for one PR ever overlap.
+	active map[string][]job
+	takeMu sync.Mutex // held by the worker taking a job off the queue
+	// working is what each worker is doing (zero when idle).
+	working [workers]Activity
 
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
@@ -127,6 +151,7 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		notices:     map[string]*queuedNotice{},
 		running:     map[string]bool{},
 		after:       map[string]job{},
+		active:      map[string][]job{},
 		jobs:        make(chan job, 4096),
 		wake:        make(chan struct{}, 1),
 		kick:        make(chan struct{}, 1),
@@ -139,13 +164,15 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 	}
 }
 
-// Run polls until ctx is cancelled. A single worker processes the queue so
-// the (often local, single-GPU) model only ever handles one request at a time.
+// Run polls until ctx is cancelled. Two workers process the queue, so the
+// model handles at most two requests at a time.
 func (b *Bot) Run(ctx context.Context) {
 	if err := b.store.ResetReviewing(); err != nil {
 		b.log.Warn("reset interrupted reviews", "err", err)
 	}
-	go b.worker(ctx)
+	for i := range workers {
+		go b.worker(ctx, i)
+	}
 	pollNow := true
 	for {
 		st := b.Settings()
@@ -266,6 +293,12 @@ func (b *Bot) Status() Status {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := b.status
+	for _, a := range b.working {
+		if a.What != "" {
+			s.Working = append(s.Working, a)
+		}
+	}
+	sort.SliceStable(s.Working, func(i, j int) bool { return s.Working[i].Since.Before(s.Working[j].Since) })
 	s.QueueLen = len(b.queued)
 	if b.app != nil {
 		s.RateRemaining = b.app.RateRemaining()
@@ -275,11 +308,11 @@ func (b *Bot) Status() Status {
 	return s
 }
 
-func (b *Bot) setCurrent(pr *store.PR, format string, args ...any) {
+// setCurrent records what the worker running ctx's job is doing.
+func (b *Bot) setCurrent(ctx context.Context, pr *store.PR, format string, args ...any) {
+	slot, _ := ctx.Value(workerSlot{}).(int)
 	b.mu.Lock()
-	b.status.Current = fmt.Sprintf(format, args...)
-	b.status.CurrentRepo, b.status.CurrentAccount = pr.Repo, pr.AccountID
-	b.status.CurrentSince = time.Now()
+	b.working[slot] = Activity{What: fmt.Sprintf(format, args...), Repo: pr.Repo, Account: pr.AccountID, Since: time.Now()}
 	b.mu.Unlock()
 }
 
@@ -391,18 +424,66 @@ func (b *Bot) reviewDone(j job) {
 	}
 }
 
-func (b *Bot) worker(ctx context.Context) {
+// worker runs queued jobs as worker slot. A job for a PR another worker is
+// busy with is handed to that worker instead, to run after its current one.
+func (b *Bot) worker(ctx context.Context, slot int) { b.work(ctx, slot, b.runJob) }
+
+// work is worker with the job runner given (tests pass their own).
+func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)) {
+	ctx = context.WithValue(ctx, workerSlot{}, slot)
 	for {
+		// A job is taken and its PR claimed in one step, so a PR's jobs are
+		// claimed in queue order and run in it.
+		b.takeMu.Lock()
+		var j job
 		select {
 		case <-ctx.Done():
+			b.takeMu.Unlock()
 			return
-		case j := <-b.jobs:
-			b.runJob(ctx, b.dequeued(j))
+		case j = <-b.jobs:
+		}
+		ok := b.claimPR(j)
+		b.takeMu.Unlock()
+		for ; ok && ctx.Err() == nil; j, ok = b.nextForPR(j) {
+			run(ctx, b.dequeued(j))
 			b.mu.Lock()
-			b.status.Current, b.status.CurrentRepo, b.status.CurrentAccount = "", "", 0
+			b.working[slot] = Activity{}
 			b.mu.Unlock()
 		}
 	}
+}
+
+// prKey names the PR a job is for, whatever its kind.
+func prKey(j job) string { return fmt.Sprintf("%s#%d", strings.ToLower(j.repo), j.number) }
+
+// claimPR makes the calling worker the one running j's PR's jobs, and reports
+// whether it may run j now. If another worker has the PR, j waits for that
+// worker (it stays queued until then, as it would in the queue).
+func (b *Bot) claimPR(j job) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	k := prKey(j)
+	if waiting, busy := b.active[k]; busy {
+		b.active[k] = append(waiting, j)
+		return false
+	}
+	b.active[k] = nil
+	return true
+}
+
+// nextForPR returns the next job for j's PR that was taken off the queue
+// while j ran, or releases the PR if there's none.
+func (b *Bot) nextForPR(j job) (job, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	k := prKey(j)
+	waiting := b.active[k]
+	if len(waiting) == 0 {
+		delete(b.active, k)
+		return job{}, false
+	}
+	b.active[k] = waiting[1:]
+	return waiting[0], true
 }
 
 func (b *Bot) runJob(ctx context.Context, j job) {

@@ -229,7 +229,7 @@ func (b *Bot) verifyFixes(ctx context.Context, st settings.Settings, lc llm.Clie
 			}
 			continue
 		}
-		b.setCurrent(pr, "Checking fixes in %s on %s#%d", path, pr.Repo, pr.Number)
+		b.setCurrent(ctx, pr, "Checking fixes in %s on %s#%d", path, pr.Repo, pr.Number)
 		content, err := cl.FileContent(ctx, pr.Repo, path, head)
 		if err != nil {
 			b.logf("warn", pr.Repo, pr.Number, "could not read %s to verify fixes: %v", path, err)
