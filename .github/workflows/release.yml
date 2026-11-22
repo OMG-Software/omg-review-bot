@@ -44,6 +44,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Test the publish script
+        run: packaging/test/publish-latest_test.sh
+
       - name: Build binaries
         env:
           CGO_ENABLED: "0"
@@ -126,8 +129,10 @@ jobs:
           case "$PM" in
             dnf)    dnf install -y --nogpgcheck "./$pkg" ;;
             zypper) zypper --non-interactive install --allow-unsigned-rpm "./$pkg" ;;
-            apt)    apt-get install -y "./$pkg" ;;
-            pacman) pacman -U --noconfirm "./$pkg" ;;
+            # The images ship without package lists, which apt and pacman
+            # need to install the CA bundle dependency.
+            apt)    apt-get update && apt-get install -y "./$pkg" ;;
+            pacman) pacman -Syu --noconfirm && pacman -U --noconfirm "./$pkg" ;;
           esac
 
       - name: Check the installed files
@@ -138,6 +143,9 @@ jobs:
           test -f /usr/lib/systemd/system/prbot.service
           test -f /usr/lib/sysusers.d/prbot.conf
           test -f /etc/prbot/prbot.env
+          # The CA bundle dependency was installed: Go finds the system trust
+          # store in one of these.
+          ls /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt             /etc/ssl/ca-bundle.pem /var/lib/ca-certificates/ca-bundle.pem 2>/dev/null | grep -q .
 
       - name: Remove
         env:
@@ -166,18 +174,15 @@ jobs:
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.build.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: packaging/publish-latest.sh
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@v8
         with:
           name: linux-packages
           path: dist
-
-      - name: Move the latest tag to this commit
-        run: |
-          if gh api "repos/$GH_REPO/git/ref/tags/latest" >/dev/null 2>&1; then
-            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null
-          else
-            gh api "repos/$GH_REPO/git/refs" -f ref=refs/tags/latest -f sha="$GITHUB_SHA" >/dev/null
-          fi
 
       - name: Write release notes
         run: |
@@ -201,17 +206,6 @@ jobs:
           EOF
 
       - name: Publish
-        run: |
-          title="Latest build ($VERSION-$GITHUB_RUN_NUMBER)"
-          if gh release view latest >/dev/null 2>&1; then
-            gh release edit latest --prerelease --title "$title" --notes-file notes.md
-          else
-            gh release create latest --verify-tag --prerelease --title "$title" --notes-file notes.md
-          fi
-          gh release upload latest dist/* --clobber
-          # Drop assets an earlier build had that this one doesn't.
-          gh release view latest --json assets --jq '.assets[].name' | while read -r name; do
-            if [ ! -e "dist/$name" ]; then
-              gh release delete-asset latest "$name" --yes
-            fi
-          done
+        # Skips a run older than the published build, and stages and swaps the
+        # files so a failure leaves the previous build in place.
+        run: packaging/publish-latest.sh dist notes.md

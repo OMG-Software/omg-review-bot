@@ -1,6 +1,6 @@
 # nfpm config for the deb, rpm and Arch packages. packaging/build-packages.sh
-# sets the PKG_* variables, replaces @PRBOT_BINARY@ (nfpm doesn't expand
-# variables in src paths) and runs nfpm from the repository root, which the
+# sets the PKG_* variables, replaces @PRBOT_BINARY@ and @CA_PACKAGE@ (nfpm
+# doesn't expand variables in src paths or depends) and runs nfpm from the repository root, which the
 # other src paths are relative to.
 name: prbot
 arch: ${PKG_ARCH}
@@ -19,6 +19,11 @@ description: |-
   Ollama or Ollama Cloud), following a review skill, and is managed through a
   small web UI. It runs as the prbot systemd service and keeps its data in
   /var/lib/prbot.
+
+# The static binary needs no libraries, only the system's CA bundle to verify
+# GitHub's and the model host's TLS certificates.
+depends:
+  - "@CA_PACKAGE@"
 
 contents:
   - src: "@PRBOT_BINARY@"

@@ -28,15 +28,17 @@ cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# target  packager   release suffix
+# The CA bundle package gives the bot the trust store for GitHub's TLS
+# certificates; openSUSE ships the bundle itself in ca-certificates-mozilla.
+# target  packager  release suffix  CA bundle package
 targets=(
-    "rhel10   rpm       .el10"
-    "fedora44 rpm       .fc44"
-    "fedora45 rpm       .fc45"
-    "opensuse rpm       -"
-    "debian   deb       -"
-    "ubuntu   deb       -"
-    "arch     archlinux -"
+    "rhel10   rpm       .el10  ca-certificates"
+    "fedora44 rpm       .fc44  ca-certificates"
+    "fedora45 rpm       .fc45  ca-certificates"
+    "opensuse rpm       -      ca-certificates-mozilla"
+    "debian   deb       -      ca-certificates"
+    "ubuntu   deb       -      ca-certificates"
+    "arch     archlinux -      ca-certificates"
 )
 
 # Architecture names as each package format spells them.
@@ -62,12 +64,12 @@ for goarch in amd64 arm64; do
         echo "missing or not executable: $binary" >&2
         exit 1
     fi
-    config="$work/nfpm-$goarch.yaml"
-    sed "s|@PRBOT_BINARY@|$binary|" packaging/nfpm.yaml >"$config"
 
     for t in "${targets[@]}"; do
-        read -r target packager suffix <<<"$t"
+        read -r target packager suffix ca_package <<<"$t"
         [[ $suffix == - ]] && suffix=
+        config="$work/nfpm-$target-$goarch.yaml"
+        sed -e "s|@PRBOT_BINARY@|$binary|" -e "s|@CA_PACKAGE@|$ca_package|" packaging/nfpm.yaml >"$config"
         file="prbot-$target-$(arch_name "$packager" "$goarch").$(extension "$packager")"
         echo "building $file"
         PKG_ARCH=$goarch PKG_VERSION=$version PKG_RELEASE="$release$suffix" \
