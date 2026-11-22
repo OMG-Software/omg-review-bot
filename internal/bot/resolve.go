@@ -272,7 +272,7 @@ func (b *Bot) verifyFixes(ctx context.Context, st settings.Settings, lc llm.Clie
 				continue
 			}
 			delete(want, r.ID) // one reply per thread even if the model repeats an id
-			reason := strings.TrimSpace(textutil.Truncate(r.Reason, 500))
+			reason := sanitizeModelText(textutil.Truncate(r.Reason, 500))
 			text := fmt.Sprintf("✅ Confirmed fixed in `%s`.", short(head))
 			if reason != "" {
 				text += " " + reason

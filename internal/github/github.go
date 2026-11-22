@@ -203,7 +203,7 @@ func NewApp(appID int64, privateKeyPEM, baseURL string) (*App, error) {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
-	a := &App{id: appID, base: baseURL, key: key, hc: &http.Client{Timeout: 60 * time.Second}, tokens: map[int64]instToken{}}
+	a := &App{id: appID, base: baseURL, key: key, hc: apiHTTPClient(baseURL, 60*time.Second), tokens: map[int64]instToken{}}
 	a.rate.Store(-1)
 	return a, nil
 }
@@ -249,10 +249,35 @@ func (a *App) jwt() (string, error) {
 	return signing + "." + b64(sig), nil
 }
 
+// apiHTTPClient follows redirects only while they stay on the API's own host,
+// so a token or request body is never sent anywhere else.
+func apiHTTPClient(base string, timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("stopped after 5 redirects")
+		}
+		if !sameOrigin(base, req.URL) {
+			return fmt.Errorf("refusing redirect to %s: not the GitHub API host", req.URL.Host)
+		}
+		return nil
+	}}
+}
+
+// sameOrigin reports whether u has base's scheme and host.
+func sameOrigin(base string, u *url.URL) bool {
+	b, err := url.Parse(base)
+	return err == nil && b.Host != "" && strings.EqualFold(b.Scheme, u.Scheme) && strings.EqualFold(b.Host, u.Host)
+}
+
 func (a *App) send(ctx context.Context, method, urlOrPath, auth string, body any, hdr map[string]string) (*http.Response, []byte, error) {
 	u := urlOrPath
 	if strings.HasPrefix(u, "/") {
 		u = a.base + u
+	}
+	// Absolute URLs come from response headers (pagination links); like
+	// redirects, they must stay on the API host, or the token would go with them.
+	if pu, err := url.Parse(u); err != nil || !sameOrigin(a.base, pu) {
+		return nil, nil, fmt.Errorf("refusing request to %q: not the GitHub API host", textutil.Truncate(u, 200))
 	}
 	var rdr io.Reader
 	if body != nil {
@@ -687,6 +712,9 @@ func (c *Client) FileContent(ctx context.Context, fullName, filePath, ref string
 	}
 	segs := strings.Split(filePath, "/")
 	for i, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return "", fmt.Errorf("refusing file path %q", filePath)
+		}
 		segs[i] = url.PathEscape(s)
 	}
 	p := "/repos/" + fullName + "/contents/" + strings.Join(segs, "/") + "?ref=" + url.QueryEscape(ref)

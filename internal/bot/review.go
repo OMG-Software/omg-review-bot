@@ -499,6 +499,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	default:
 		summary = b.synthesizeSummary(ctx, lc, st, gp, summaries, append(append([]finding{}, inline...), notes...))
 	}
+	summary = sanitizeModelText(summary)
 
 	// Request changes while anything at or above the request-changes level is
 	// open; otherwise approve when nothing at or above the approval level is:
@@ -658,13 +659,13 @@ func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.
 	var kept []finding
 	for _, f := range all {
 		f.Severity = normSeverity(f.Severity)
-		f.Title = strings.TrimSpace(f.Title)
-		f.Body = strings.TrimSpace(f.Body)
+		f.Body = sanitizeModelText(f.Body)
+		if strings.TrimSpace(f.Title) == "" {
+			f.Title = textutil.Truncate(textutil.FirstLine(f.Body), 100)
+		}
+		f.Title = sanitizeModelLine(f.Title)
 		if f.Title == "" && f.Body == "" {
 			continue
-		}
-		if f.Title == "" {
-			f.Title = textutil.Truncate(textutil.FirstLine(f.Body), 100)
 		}
 		if settings.SeverityRank(f.Severity) > maxRank {
 			dropped++

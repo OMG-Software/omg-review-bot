@@ -182,7 +182,7 @@ func commentBody(f finding) string {
 
 // findingSeverity reads the level back from one of the bot's comments ("" if unknown).
 func findingSeverity(body string) string {
-	if m := sevMarkerRE.FindStringSubmatch(body); m != nil {
+	if m := lastMatch(sevMarkerRE, body); m != nil {
 		return m[1]
 	}
 	first := textutil.FirstLine(body)
@@ -195,6 +195,17 @@ func findingSeverity(body string) string {
 		}
 	}
 	return ""
+}
+
+// lastMatch returns re's last match in s. The bot appends its markers after
+// everything else, so the last one is the bot's even if model text before it
+// somehow contains a lookalike.
+func lastMatch(re *regexp.Regexp, s string) []string {
+	all := re.FindAllStringSubmatch(s, -1)
+	if len(all) == 0 {
+		return nil
+	}
+	return all[len(all)-1]
 }
 
 // findingTitle extracts the claim from the first line of one of the bot's comments.
@@ -249,7 +260,7 @@ var notesMarkerRE = regexp.MustCompile(`<!-- prbot:review notes=([P1-5,]*) -->`)
 // noteSeverities reads which levels a review body listed as notes, and
 // whether the body is one of the bot's reviews at all.
 func noteSeverities(body string) ([]string, bool) {
-	m := notesMarkerRE.FindStringSubmatch(body)
+	m := lastMatch(notesMarkerRE, body)
 	if m == nil {
 		return nil, false
 	}
