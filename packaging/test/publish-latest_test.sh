@@ -195,6 +195,20 @@ set_state "s['fail']['tagpatch_lost']=True"
 run $NEW 42; rc=$?
 check "lost tag move response is undone" eval "[ $rc -eq 1 ] && unchanged"
 
+# 11. A first publish that fails leaves no release and no tag, rather than an
+#     empty release whose links 404.
+empty_repo() { python3 -c "import json;s=json.load(open('$MOCK_STATE'));exit(0 if s['tag'] is None and s['release'] is None else 1)"; }
+for spec in "s['fail']['upload']=2" "s['fail']['rename']=2"; do
+    echo '{"tag": null, "compare": {}, "fail": {}, "counts": {}, "next_id": 500, "release": null}' >"$MOCK_STATE"
+    set_state "$spec"
+    run $NEW 42; rc=$?
+    check "failed first publish ($spec) removes the release and tag" eval "[ $rc -eq 1 ] && empty_repo"
+done
+echo '{"tag": null, "compare": {}, "fail": {}, "counts": {}, "next_id": 500, "release": null}' >"$MOCK_STATE"
+set_state "s['fail']['upload']=2; s['fail']['release_delete']=True"
+run $NEW 42; rc=$?
+check "failed first publish that can't remove its release exits 2" eval "[ $rc -eq 2 ] && grep -q 'delete by hand' '$t/out.log'"
+
 rm -rf "$t"
 echo "$fails failed"
 exit $fails

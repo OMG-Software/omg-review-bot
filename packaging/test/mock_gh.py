@@ -65,6 +65,10 @@ if args[0] == "api":
         st["tag"] = f["sha"]
         if st["fail"].get("tagpatch_lost") and away:
             die("tag patch applied, response lost (HTTP 502)")
+    elif ep == "git/refs/tags/latest" and method == "DELETE":
+        if not st["tag"]:
+            die("Reference does not exist (HTTP 422)")
+        st["tag"] = None
     elif ep == "releases/tags/latest":
         if not rel:
             die("Not Found (HTTP 404)")
@@ -111,6 +115,12 @@ elif args[0] == "release":
         if not st["tag"]:
             die("tag doesn't exist")
         st["release"] = {"id": 900, "name": o["--title"], "body": open(o["--notes-file"]).read(), "assets": []}
+    elif sub == "delete":
+        if not rel:
+            die("release not found")
+        if st["fail"].get("release_delete"):
+            die("delete failed (HTTP 500)")
+        st["release"] = None
     elif sub == "edit":
         rel["name"] = o["--title"]
         rel["body"] = open(o["--notes-file"]).read()

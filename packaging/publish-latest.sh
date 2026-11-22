@@ -12,6 +12,8 @@
 #      its number and commit), or one whose commit is behind the tag.
 #   2. This build's files are uploaded under a staging prefix and checked. A
 #      failure here deletes the staged files and leaves the release as it was.
+#      On a first publish, "as it was" is no release: a failure at any later
+#      step deletes the release and tag the run created.
 #   3. Each live file is renamed aside and its staged replacement renamed into
 #      place, then the tag and notes move. If any step fails, every step
 #      already taken is undone, so the old files, tag and notes all come back.
@@ -72,14 +74,39 @@ if [[ -z $run && -n $old_sha ]]; then
     fi
 fi
 
-# A first publish creates the tag and an empty release to upload into.
+# A first publish creates the tag and an empty release to upload into. If it
+# then fails, undo_create removes them again, so the repository is left as it
+# was rather than with a release whose download links 404.
+created_tag= created_release=
+undo_create() {
+    local left=()
+    if [[ -n $created_release ]]; then
+        gh release delete "$tag" --yes >/dev/null 2>&1
+        gh release view "$tag" --json name >/dev/null 2>&1 && left+=("release $tag")
+    fi
+    if [[ -n $created_tag ]]; then
+        gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$tag" >/dev/null 2>&1
+        gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1 && left+=("tag $tag")
+    fi
+    if ((${#left[@]})); then
+        echo "::error::couldn't remove what this first publish created; delete by hand:" >&2
+        printf '  %s\n' "${left[@]}" >&2
+        exit 2
+    fi
+    echo "removed the release and tag this first publish created" >&2
+    exit 1
+}
+trap 'trap - ERR; set +e; undo_create' ERR
 if [[ -z $old_sha ]]; then
+    created_tag=1
     gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
 fi
 if [[ -z $have_release ]]; then
+    created_release=1
     gh release create "$tag" --verify-tag --prerelease --title "$title" --notes-file "$work/body.md"
 fi
 release_id=$(gh api "repos/$GH_REPO/releases/tags/$tag" --jq .id)
+trap - ERR
 
 # Reads the release's assets: asset_id, asset_size and asset_state by name, and
 # asset_name by id. Fails, leaving the arrays empty, if the listing does.
@@ -112,6 +139,7 @@ done
 discard_staged() {
     trap - ERR
     set +e
+    [[ -n $created_release$created_tag ]] && undo_create
     echo "staging failed; deleting the staged files and leaving the release as it was" >&2
     load_assets
     local name
@@ -149,6 +177,7 @@ done
 restore() {
     trap - ERR
     set +e
+    [[ -n $created_release$created_tag ]] && undo_create
     echo "publishing failed; restoring the previous build" >&2
     local attempt name old new cur
     local -a incomplete=()
