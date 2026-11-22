@@ -43,7 +43,7 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
 - [How it works](#how-it-works)
 - [Settings](#settings)
 - [Running as a service](#running-as-a-service)
-- [Behind a reverse proxy (nginx)](#behind-a-reverse-proxy-nginx)
+- [Behind a reverse proxy (nginx, Apache)](#behind-a-reverse-proxy)
 - [Troubleshooting](#troubleshooting)
 - [Security](#security)
 - [Development](#development)
@@ -60,7 +60,9 @@ prbot
 
 `go install` puts `prbot` in Go's bin folder (`%USERPROFILE%\go\bin` on Windows, `~/go/bin` on
 Linux), so add that folder to your PATH or run the binary from there. To build from a clone
-instead: `go build -o prbot.exe ./cmd/prbot` (on Linux, `-o prbot`).
+instead: `go build -o prbot.exe ./cmd/prbot` (on Linux, `-o prbot`). On Windows, `run.bat` in the
+clone does both: it builds `prbot.exe` and starts it, passing any arguments on (for example
+`run.bat -listen 0.0.0.0:8080`), and uses the clone's own `data` folder.
 
 Open **http://127.0.0.1:8080**. On the first visit every page leads to a setup page where you
 choose the administrator password. That signs you in and takes you to **Settings** to connect
@@ -211,7 +213,7 @@ The administrator password has its own sign-in page, **`/admin-login`** (for exa
 
 Keeping the page separate keeps the password form away from everyday users. It isn't a secret,
 though; the password is what protects it. To limit who can reach it, restrict the path in your
-reverse proxy (see [Behind a reverse proxy](#behind-a-reverse-proxy-nginx)). GitHub users who are
+reverse proxy (see [Behind a reverse proxy](#behind-a-reverse-proxy)). GitHub users who are
 administrators sign in with GitHub as usual.
 
 **Statistics.** Each org's **Overview** shows, for the last 7, 30 or 90 days: reviews posted,
@@ -441,7 +443,10 @@ event checks it for replies, so polling only catches anything missed.
    check within a poll; a thread resolved by hand with no new comment isn't visible in the PR list,
    so it's picked up by the 15-minute re-check instead.
 7. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
-   until the next push or **Review now**.
+   until the next push or **Review now**. Clicking **Review now** while an automatic review of the
+   PR is already queued turns that queued review into the manual one, so the request isn't lost,
+   and a manual review that has to wait (for example, when its org's settings can't be read) keeps
+   its place even if the queue is full when it's retried.
 8. Each posted review counts as one round on the PR, and its body says which ("Bot review number
    3 of 10"). Once the bot has posted *Most reviews per PR* reviews, the next push isn't reviewed:
    the PR shows `limit` and gets one comment saying the limit is reached. Later pushes aren't
@@ -534,12 +539,20 @@ because both would use port 8080. To move an existing setup, copy its `data` fol
 install commands. It writes logs to the journal: `journalctl -u prbot -f`.
 
 **Updating.** Run `go install github.com/OMG-Software/omg-review-bot/cmd/prbot@latest` (or
-rebuild), then restart the bot. Reviews that were interrupted are re-queued on startup.
+rebuild), then restart the bot. Reviews that were interrupted are re-queued on startup. When
+updating from a version without organizations, the database is migrated on startup and each
+repository is linked to its org on the next repo sync (**Sync from GitHub** does it at once).
+Until then, the activity entries for a repository that isn't linked yet are shown only to
+administrators.
 
-## Behind a reverse proxy (nginx)
+## Behind a reverse proxy
 
 GitHub sign-in and webhooks need the bot to be reachable over HTTPS. The usual way is to keep the
-bot on its default `127.0.0.1:8080` and put nginx in front of it to handle TLS.
+bot on its default `127.0.0.1:8080` and put a reverse proxy in front of it to handle TLS. Examples
+follow for [nginx](#nginx) and [Apache httpd](#apache-httpd); after either, finish with
+[Configuring the bot](#configuring-the-bot).
+
+### nginx
 
 **1. Get a certificate first.** nginx refuses a configuration whose certificate files don't
 exist yet, so start with only the port-80 block below (the first `server { … }`), reload nginx,
@@ -583,37 +596,109 @@ server {
 }
 ```
 
-Then, in the bot:
+**Restricting the administrator sign-in (optional).** To allow the password sign-in only from
+your own network, add this inside the HTTPS `server` block. Everyone else gets `403` there and can
+still sign in with GitHub:
+
+```nginx
+location = /admin-login {
+    allow 10.0.0.0/8;     # your office or VPN range
+    deny  all;
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+}
+```
+
+### Apache httpd
+
+These steps use Debian/Ubuntu names (`apache2`, `a2enmod`, `/etc/apache2/sites-available/`). On
+RHEL, Fedora and similar, the service is `httpd`, the modules below are loaded by default once the
+`mod_ssl` package is installed, and the site file goes in `/etc/httpd/conf.d/`.
+
+**1. Enable the modules** the configuration uses:
+
+```bash
+sudo a2enmod ssl proxy proxy_http headers
+```
+
+**2. Get a certificate first.** Apache, like nginx, refuses a configuration whose certificate files
+don't exist yet, so start with only the port-80 `<VirtualHost>` below, enable the site
+(`sudo a2ensite prbot`), reload Apache, and get the certificate (this needs certbot's Apache plugin,
+`python3-certbot-apache`):
+
+```bash
+sudo certbot certonly --apache -d prbot.example.com
+```
+
+**3. Add the HTTPS virtual host** to `/etc/apache2/sites-available/prbot.conf` and reload Apache
+(`sudo apachectl configtest && sudo systemctl reload apache2`):
+
+```apache
+<VirtualHost *:80>
+    ServerName prbot.example.com
+    Redirect permanent / https://prbot.example.com/
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName prbot.example.com
+
+    SSLEngine on
+    SSLCertificateFile    /etc/letsencrypt/live/prbot.example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/prbot.example.com/privkey.pem
+
+    # Keep browsers on HTTPS (see the note on cookies below).
+    Header always set Strict-Transport-Security "max-age=31536000"
+
+    # Skill zip uploads can be up to 25 MB, and webhook payloads up to 5 MB. Apache has no 1 MB
+    # limit like nginx, but set one explicitly in case a global LimitRequestBody is lower.
+    LimitRequestBody 26214400
+
+    # Required: the bot blocks a form post unless the browser's Origin matches this host.
+    ProxyPreserveHost On
+
+    # "Test model" waits for the model's reply, up to the LLM timeout (600 s by default).
+    ProxyTimeout 600
+
+    ProxyPass        / http://127.0.0.1:8080/
+    ProxyPassReverse / http://127.0.0.1:8080/
+</VirtualHost>
+```
+
+**Restricting the administrator sign-in (optional).** To allow the password sign-in only from
+your own network, add this inside the `<VirtualHost *:443>` block. Everyone else gets `403` there
+and can still sign in with GitHub:
+
+```apache
+<Location "/admin-login">
+    Require ip 10.0.0.0/8     # your office or VPN range
+</Location>
+```
+
+### Configuring the bot
+
+With either proxy in place, in the bot:
 
 1. Open **Settings → Sign-in and webhooks** and set **Public URL** to `https://prbot.example.com`.
    The bot must be at the root of its host name: a path such as `https://example.com/prbot` isn't
-   supported, and the setting refuses one. Behind a proxy the bot only sees a plain HTTP connection from nginx, so this is how it knows the
-   address to use for the sign-in callback and the webhook URL.
+   supported, and the setting refuses one. Behind a proxy the bot only sees a plain HTTP
+   connection from the proxy, so this is how it knows the address to use for the sign-in callback
+   and the webhook URL.
 2. Copy the callback and webhook URLs the section shows into the GitHub App, as in
    [Organizations and sign-in](#organizations-and-sign-in) and [Webhooks](#webhooks).
 
 Notes:
 
-- **Keep the `Host` header.** Without `proxy_set_header Host $host`, nginx sends `127.0.0.1:8080`,
-  and every save, sign-out and button press fails with *cross-origin request blocked*. If nginx
-  listens on a port other than 443, use `$http_host` instead, which includes the port.
+- **Keep the `Host` header.** Without `proxy_set_header Host $host` (nginx) or
+  `ProxyPreserveHost On` (Apache), the proxy sends `127.0.0.1:8080`, and every save, sign-out and
+  button press fails with *cross-origin request blocked*. If nginx listens on a port other than
+  443, use `$http_host` instead, which includes the port; Apache's `ProxyPreserveHost` already
+  passes the port the browser sent.
 - **Cookies.** The bot marks its cookies `Secure` when a request arrives on an `https://`
-  **Public URL** (which is why nginx must pass the `Host` header) or when it terminates TLS
+  **Public URL** (which is why the proxy must pass the `Host` header) or when it terminates TLS
   itself. A direct plain-HTTP visit, such as `http://127.0.0.1:8080` on the server, gets ordinary
   cookies so it still works. The `Strict-Transport-Security` header keeps browsers on HTTPS.
-- **Don't expose port 8080.** Keep `-listen 127.0.0.1:8080` so the only way in is through nginx.
-- **Restricting the administrator sign-in (optional).** To allow the password sign-in only from
-  your own network, add this inside the `server` block. Everyone else gets `403` there and can
-  still sign in with GitHub:
-
-  ```nginx
-  location = /admin-login {
-      allow 10.0.0.0/8;     # your office or VPN range
-      deny  all;
-      proxy_pass http://127.0.0.1:8080;
-      proxy_set_header Host $host;
-  }
-  ```
+- **Don't expose port 8080.** Keep `-listen 127.0.0.1:8080` so the only way in is through the
+  proxy.
 - **Renewing the certificate.** certbot's timer renews it; `sudo certbot renew --dry-run` checks
   that renewal works.
 
@@ -637,8 +722,8 @@ Notes:
 | GitHub sign-in: "redirect_uri is not associated with this application" | The App's **Callback URL** doesn't match. Copy it from **Settings → Sign-in and webhooks**, and set **Public URL** if the bot is behind a proxy. |
 | Signed in but no organizations listed | The App isn't installed on your org, or you're a plain member and the org hasn't let members in: ask an owner to add you. |
 | "Couldn't read your role in …" | Give the App the **Members: Read-only** organization permission, then accept the new permission on the org's installation page. Until GitHub can confirm someone's role, access that came from GitHub is paused; access added by hand isn't affected. |
-| Behind a proxy, every save or button fails with "cross-origin request blocked" | The proxy isn't passing the original `Host` header. See [Behind a reverse proxy](#behind-a-reverse-proxy-nginx). |
-| Webhook deliveries fail with `413` | The proxy's request size limit is too small; set `client_max_body_size 25m` in nginx. |
+| Behind a proxy, every save or button fails with "cross-origin request blocked" | The proxy isn't passing the original `Host` header. See [Behind a reverse proxy](#behind-a-reverse-proxy). |
+| Webhook deliveries fail with `413` | The proxy's request size limit is too small; set `client_max_body_size 25m` in nginx, or `LimitRequestBody 26214400` in Apache. |
 | Webhook deliveries fail with `401` | The secret in GitHub differs from the bot's. Set them to the same value. |
 
 ## Security
@@ -653,6 +738,18 @@ Notes:
   prompts tell it to ignore instructions inside them. If an injected instruction got through
   anyway, the worst outcome is a misleading comment: the model has no tools and can't take
   actions.
+- Everything the model writes (findings, summaries, thread replies, `@<app-name>` answers and
+  fix confirmations) is made inert before the bot posts it under its own name. Raw HTML is
+  escaped and Markdown images become plain links, so nothing loads (or leaks data in its URL)
+  just by viewing the PR. `@mentions` are put in code spans, so the bot can't be made to notify
+  people or command other bots, and lines starting with a slash command (`/approve`, `/merge`)
+  are escaped for chat-ops bots that trust its account. Fake copies of the bot's own hidden
+  markers are broken up, so they can't change what it thinks it posted. Code blocks are left as
+  they are, so suggested fixes keep their code exactly.
+- Requests carrying the GitHub token or the model API key go only to the configured host: a
+  redirect elsewhere is refused, as is a GitHub pagination link to another host. The model
+  **Base URL** must be `http://` or `https://`. Repository files are only read by paths without
+  empty, `.` or `..` segments.
 - The UI uses an HMAC-signed session cookie and PBKDF2-hashed password. It rejects
   cross-origin POSTs (CSRF) and sends a strict Content-Security-Policy.
 - GitHub sign-in uses a one-time `state` check. The bot keeps each person's GitHub ID, login,
@@ -687,14 +784,15 @@ go run ./cmd/prbot -data data-dev -listen 127.0.0.1:8087
 | Package | Responsibility |
 |---|---|
 | `cmd/prbot` | Entry point, flags, Windows service / signal handling |
-| `internal/bot` | Polling, webhook events (`webhook.go`), the job queue and worker, reviews, replies, prompts, fix checks and approval (`resolve.go`) |
+| `internal/bot` | Polling, webhook events (`webhook.go`), the job queue and worker, reviews, replies, prompts, fix checks and approval (`resolve.go`), ignore-file patterns (`filter.go`), project guidelines (`guidelines.go`) and making model output safe to post (`sanitize.go`) |
 | `internal/github` | GitHub App auth (JWT, installation tokens), the REST calls used, GraphQL for review threads, and sign-in and webhook signatures (`oauth.go`) |
 | `internal/llm` | OpenAI-compatible and native Ollama clients, JSON extraction |
 | `internal/skill` | `SKILL.md` parsing, zip install, language-aware reference selection |
 | `internal/diff` | Unified-diff parsing and line-numbered rendering |
 | `internal/store` | SQLite schema, migrations and queries; users, orgs, memberships, deliveries and statistics (`tenancy.go`) |
 | `internal/settings` | Settings model, defaults and per-org review policy |
-| `internal/web` | Web UI: handlers, sessions (`auth.go`), GitHub sign-in (`oauth.go`), org pages (`orgs.go`), admin pages and the webhook endpoint (`admin.go`), SVG charts (`charts.go`), embedded templates and static files |
+| `internal/web` | Web UI: handlers, sessions (`auth.go`), GitHub sign-in (`oauth.go`), org pages (`orgs.go`), admin pages and the webhook endpoint (`admin.go`), SVG charts (`charts.go`), the on-disk note of sessions to end after a restart (`pending.go`), embedded templates and static files |
+| `internal/textutil` | Small string helpers shared across packages |
 
 `internal/bot/bot_test.go` runs the bot end to end against fake GitHub and fake model servers.
 It's the best place to start when changing review or reply behaviour.
