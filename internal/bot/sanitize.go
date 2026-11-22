@@ -91,6 +91,11 @@ func sanitizeModelText(s string) string {
 		}
 		lines[i] = cleanLine(l)
 	}
+	if fenceLen > 0 {
+		// Left open (the model forgot, or truncation cut it off): close it, or
+		// everything the bot appends, its markers included, renders as code.
+		lines = append(lines, strings.Repeat(string(fenceChar), fenceLen))
+	}
 	return strings.Join(lines, "\n")
 }
 

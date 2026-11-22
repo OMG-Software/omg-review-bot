@@ -117,6 +117,44 @@ func TestQueuedNoticeClosedDespitePolicyError(t *testing.T) {
 	}
 }
 
+// A policy read error postpones a review that will run again: its queued
+// comment stays open, and the rerun edits that same comment once the policy
+// reads.
+func TestQueuedNoticeKeptOpenForPostponedReview(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(*settings.Settings) {})
+	e.b.pollOnce(e.ctx)
+	waitQueued(e.b)
+	if pr, _ := e.st.GetPR("acme/web", 7); pr == nil || pr.AccountID == 0 {
+		t.Fatalf("PR = %+v, want one with an account, whose policy is read", pr)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(e.b.dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`ALTER TABLE orgs RENAME TO orgs_away`); err != nil {
+		t.Fatal(err)
+	}
+
+	drain(e.ctx, e.b)
+	if got, ok := e.gh.edited[9001]; ok {
+		t.Fatalf("notice edited to %q, want it left queued for the rerun", got)
+	}
+	if pr, _ := e.st.GetPR("acme/web", 7); pr == nil || pr.Status != "pending" {
+		t.Fatalf("PR = %+v, want it still pending", pr)
+	}
+
+	if _, err := db.Exec(`ALTER TABLE orgs_away RENAME TO orgs`); err != nil {
+		t.Fatal(err)
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.posted) != 1 || len(e.gh.reviews) != 1 || !strings.Contains(e.gh.edited[9001], "**Review posted**") {
+		t.Errorf("posted = %q, reviews = %d, notice = %q; want the rerun to post on the same notice",
+			e.gh.posted, len(e.gh.reviews), e.gh.edited[9001])
+	}
+}
+
 // After a restart loses the queue, the review is queued again and reuses
 // the commit's queued comment instead of posting a second one.
 func TestQueuedNoticeReusedAfterRestart(t *testing.T) {

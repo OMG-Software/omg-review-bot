@@ -53,7 +53,11 @@ func TestSanitizeModelText(t *testing.T) {
 			"```\n<!-- PRBOT" + z + ":review notes= -->\n```"},
 		"backtick in a backtick fence's info: not a fence": {
 			"```sh`x\n<img src=x>\n```",
-			"```sh`x\n<" + z + "img src=x>\n```"},
+			"```sh`x\n<" + z + "img src=x>\n```\n```"}, // the last line opens a fence, closed
+		"unclosed fence closed": {
+			"Fix:\n````go\nx := 1", "Fix:\n````go\nx := 1\n````"},
+		"unclosed tilde fence closed": {
+			"~~~\n<x>", "~~~\n<x>\n~~~"},
 		"indented fence treated as prose": {
 			"- item\n  ```\n<img src=x>\n  ```",
 			"- item\n  ```\n<" + z + "img src=x>\n  ```"},
@@ -116,6 +120,11 @@ func TestAfterPrefix(t *testing.T) {
 	}
 	if got := sanitizeModelText(strings.Repeat("x", 3*maxModelBody)); len(got) > maxModelBody+len("…") {
 		t.Errorf("not capped: %d bytes", len(got))
+	}
+	// A fence the cap cuts off is closed, so the bot's marker after it isn't code.
+	body := commentBody(finding{Severity: "P2", Title: "t", Body: sanitizeModelText("```\n" + strings.Repeat("x\n", maxModelBody))})
+	if !strings.Contains(body, "\n```\n\n<sub>") {
+		t.Errorf("truncated fence left open:\n…%s", body[len(body)-120:])
 	}
 }
 
