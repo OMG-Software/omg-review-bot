@@ -1,0 +1,30 @@
+# systemd unit installed by the deb, rpm and Arch packages.
+# The listen address and other settings go in /etc/prbot/prbot.env.
+#   sudo systemctl enable --now prbot
+#   journalctl -u prbot -f
+# For a manual install under /opt, use deploy/prbot.service instead.
+[Unit]
+Description=LLM pull request review bot
+Documentation=https://github.com/OMG-Software/omg-review-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=prbot
+Group=prbot
+EnvironmentFile=-/etc/prbot/prbot.env
+# systemd creates /var/lib/prbot owned by prbot, and keeps it on removal: it
+# holds the database, which contains the GitHub App key.
+StateDirectory=prbot
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/prbot
+ExecStart=/usr/bin/prbot -data /var/lib/prbot
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

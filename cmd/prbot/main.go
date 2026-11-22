@@ -16,6 +16,7 @@ import (
 
 	"github.com/OMG-Software/omg-review-bot/internal/bot"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
+	"github.com/OMG-Software/omg-review-bot/internal/version"
 	"github.com/OMG-Software/omg-review-bot/internal/web"
 )
 
@@ -30,7 +31,13 @@ func main() {
 	listen := flag.String("listen", env("PRBOT_LISTEN", "127.0.0.1:8080"), "address for the web UI (use 0.0.0.0:8080 to allow other machines)")
 	data := flag.String("data", env("PRBOT_DATA", "data"), "data directory for the database and skill")
 	resetPw := flag.Bool("reset-password", false, "clear the admin password (set a new one in the web UI), then exit")
+	showVersion := flag.Bool("version", false, "print the version, then exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("prbot", version.String())
+		return
+	}
 
 	if err := run(*listen, *data, *resetPw); err != nil {
 		fmt.Fprintln(os.Stderr, "prbot:", err)
@@ -75,6 +82,7 @@ func run(listen, dataDir string, resetPw bool) error {
 		return nil
 	}
 
+	logger.Info("starting prbot", "version", version.String())
 	b := bot.New(st, dataDir, logger)
 	srv, err := web.New(st, b, logger)
 	if err != nil {

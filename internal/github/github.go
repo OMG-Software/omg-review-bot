@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/textutil"
+	"github.com/OMG-Software/omg-review-bot/internal/version"
 )
 
 const DefaultBaseURL = "https://api.github.com"
@@ -293,7 +294,7 @@ func (a *App) send(ctx context.Context, method, urlOrPath, auth string, body any
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "llm-pr-bot")
+	req.Header.Set("User-Agent", version.UserAgent())
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
 	}

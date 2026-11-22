@@ -1,0 +1,223 @@
+# Builds static linux/amd64 and linux/arm64 binaries, packages them for RHEL 10,
+# Fedora 44 and 45, openSUSE, Debian, Ubuntu and Arch Linux, installs each
+# package on its distribution, then publishes everything to the rolling
+# "latest" prerelease. Pull requests that touch packaging build and test the
+# packages without publishing.
+name: Release packages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - packaging/**
+      - deploy/**
+      - .github/workflows/release.yml
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a publish half way through; a newer push queues behind it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build binaries and packages
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            packaging/tools/go.sum
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test the publish script
+        run: packaging/test/publish-latest_test.sh
+
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          for arch in amd64 arm64; do
+            GOARCH=$arch go build -trimpath -ldflags="-s -w" -o "dist/bin/prbot-linux-$arch" ./cmd/prbot
+          done
+
+      - name: Read version
+        id: version
+        # internal/version is the only place the version is written down.
+        run: |
+          dist/bin/prbot-linux-amd64 -version
+          echo "version=$(dist/bin/prbot-linux-amd64 -version | awk '{print $2}')" >>"$GITHUB_OUTPUT"
+
+      - name: Build nfpm
+        # packaging/tools pins nfpm and its dependencies in go.mod and go.sum;
+        # -mod=readonly fails the build rather than resolve anything newer.
+        run: |
+          go -C packaging/tools build -mod=readonly -o "$RUNNER_TEMP/bin/nfpm" github.com/goreleaser/nfpm/v2/cmd/nfpm
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      - name: Build packages
+        # The run number is the package release, so each rolling build
+        # upgrades the previous one: 0.1.0-41 -> 0.1.0-42.
+        run: packaging/build-packages.sh "${{ steps.version.outputs.version }}" "$GITHUB_RUN_NUMBER" dist/bin dist/out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages
+          path: dist/out/
+          if-no-files-found: error
+
+  install-test:
+    name: Install on ${{ matrix.name }} (${{ matrix.cpu }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [rhel10, fedora44, fedora45, leap16, tumbleweed, debian13, ubuntu2404, ubuntu2604, arch]
+        cpu: [amd64, arm64]
+        exclude:
+          # The archlinux image is x86_64 only; Arch Linux ARM is a separate project.
+          - distro: arch
+            cpu: arm64
+        include:
+          - { distro: rhel10, name: RHEL 10, target: rhel10, image: "registry.access.redhat.com/ubi10/ubi:latest", pm: dnf }
+          - { distro: fedora44, name: Fedora 44, target: fedora44, image: "fedora:44", pm: dnf }
+          - { distro: fedora45, name: Fedora 45, target: fedora45, image: "fedora:45", pm: dnf }
+          - { distro: leap16, name: openSUSE Leap 16.0, target: opensuse, image: "opensuse/leap:16.0", pm: zypper }
+          - { distro: tumbleweed, name: openSUSE Tumbleweed, target: opensuse, image: "opensuse/tumbleweed:latest", pm: zypper }
+          - { distro: debian13, name: Debian 13, target: debian, image: "debian:13", pm: apt }
+          - { distro: ubuntu2404, name: Ubuntu 24.04, target: ubuntu, image: "ubuntu:24.04", pm: apt }
+          - { distro: ubuntu2604, name: Ubuntu 26.04, target: ubuntu, image: "ubuntu:26.04", pm: apt }
+          - { distro: arch, name: Arch Linux, target: arch, image: "archlinux:latest", pm: pacman }
+          - { cpu: amd64, runner: ubuntu-latest }
+          - { cpu: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-packages
+          path: pkgs
+
+      - name: Install
+        env:
+          TARGET: ${{ matrix.target }}
+          PM: ${{ matrix.pm }}
+          CPU: ${{ matrix.cpu }}
+        run: |
+          case "$PM:$CPU" in
+            apt:*)        pkg=pkgs/prbot-$TARGET-$CPU.deb ;;
+            pacman:amd64) pkg=pkgs/prbot-$TARGET-x86_64.pkg.tar.zst ;;
+            *:amd64)      pkg=pkgs/prbot-$TARGET-x86_64.rpm ;;
+            *:arm64)      pkg=pkgs/prbot-$TARGET-aarch64.rpm ;;
+          esac
+          echo "installing $pkg"
+          case "$PM" in
+            dnf)    dnf install -y --nogpgcheck "./$pkg" ;;
+            # zypper exits 106 when it installed the package but skipped a
+            # repository it couldn't refresh (a mirror mid-sync); the next
+            # step checks the install itself.
+            zypper) zypper --non-interactive install --allow-unsigned-rpm "./$pkg" || [ $? -eq 106 ] ;;
+            # The images ship without package lists, which apt and pacman
+            # need to install the CA bundle dependency.
+            apt)    apt-get update && apt-get install -y "./$pkg" ;;
+            pacman) pacman -Syu --noconfirm && pacman -U --noconfirm "./$pkg" ;;
+          esac
+
+      - name: Check the installed files
+        run: |
+          prbot -version
+          prbot -version | grep -F "prbot ${{ needs.build.outputs.version }}"
+          getent passwd prbot
+          test -f /usr/lib/systemd/system/prbot.service
+          test -f /usr/lib/sysusers.d/prbot.conf
+          test -f /etc/prbot/prbot.env
+          # The CA bundle dependency was installed: Go finds the system trust
+          # store in one of these. Each distribution has only one, so test the
+          # files rather than rely on ls's status, which fails for the others.
+          found=
+          for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
+                   /etc/ssl/ca-bundle.pem /var/lib/ca-certificates/ca-bundle.pem; do
+            if [ -s "$f" ]; then
+              echo "CA bundle: $f"
+              found=1
+            fi
+          done
+          [ -n "$found" ]
+
+      - name: Remove
+        env:
+          PM: ${{ matrix.pm }}
+        run: |
+          case "$PM" in
+            dnf)    dnf remove -y prbot ;;
+            zypper) zypper --non-interactive remove prbot || [ $? -eq 106 ] ;;
+            apt)    apt-get remove -y prbot ;;
+            pacman) pacman -R --noconfirm prbot ;;
+          esac
+          if command -v prbot; then
+            echo "::error::prbot is still installed"
+            exit 1
+          fi
+
+  publish:
+    name: Publish to the latest release
+    needs: [build, install-test]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: packaging/publish-latest.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-packages
+          path: dist
+
+      - name: Write release notes
+        run: |
+          base="https://github.com/$GH_REPO/releases/download/latest"
+          short=${GITHUB_SHA:0:12}
+          cat >notes.md <<EOF
+          Rolling build of \`main\` at [\`$short\`](https://github.com/$GH_REPO/commit/$GITHUB_SHA): version **$VERSION**, package release **$GITHUB_RUN_NUMBER**. This release is replaced on every push to \`main\`, and the download links below always fetch the newest build.
+
+          | Distribution | x86_64 | aarch64 |
+          |---|---|---|
+          | RHEL 10 (and Alma, Rocky, CentOS Stream 10) | [rpm]($base/prbot-rhel10-x86_64.rpm) | [rpm]($base/prbot-rhel10-aarch64.rpm) |
+          | Fedora 44 | [rpm]($base/prbot-fedora44-x86_64.rpm) | [rpm]($base/prbot-fedora44-aarch64.rpm) |
+          | Fedora 45 | [rpm]($base/prbot-fedora45-x86_64.rpm) | [rpm]($base/prbot-fedora45-aarch64.rpm) |
+          | openSUSE Leap 16, Tumbleweed | [rpm]($base/prbot-opensuse-x86_64.rpm) | [rpm]($base/prbot-opensuse-aarch64.rpm) |
+          | Debian | [deb]($base/prbot-debian-amd64.deb) | [deb]($base/prbot-debian-arm64.deb) |
+          | Ubuntu | [deb]($base/prbot-ubuntu-amd64.deb) | [deb]($base/prbot-ubuntu-arm64.deb) |
+          | Arch Linux | [pkg.tar.zst]($base/prbot-arch-x86_64.pkg.tar.zst) | [pkg.tar.zst]($base/prbot-arch-aarch64.pkg.tar.zst) |
+          | Other (static binary) | [tar.gz]($base/prbot-linux-amd64.tar.gz) | [tar.gz]($base/prbot-linux-arm64.tar.gz) |
+
+          Packages are unsigned; check downloads against \`SHA256SUMS\`. After installing, edit \`/etc/prbot/prbot.env\` if needed and run \`sudo systemctl enable --now prbot\`. See the README's *Linux packages* section.
+          EOF
+
+      - name: Publish
+        # Skips a run older than the published build, and stages and swaps the
+        # files so a failure leaves the previous build in place.
+        run: packaging/publish-latest.sh dist notes.md

@@ -43,6 +43,7 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
 - [How it works](#how-it-works)
 - [Settings](#settings)
 - [Running as a service](#running-as-a-service)
+- [Linux packages](#linux-packages)
 - [Behind a reverse proxy (nginx, Apache)](#behind-a-reverse-proxy)
 - [Troubleshooting](#troubleshooting)
 - [Security](#security)
@@ -62,7 +63,10 @@ prbot
 Linux), so add that folder to your PATH or run the binary from there. To build from a clone
 instead: `go build -o prbot.exe ./cmd/prbot` (on Linux, `-o prbot`). On Windows, `run.bat` in the
 clone does both: it builds `prbot.exe` and starts it, passing any arguments on (for example
-`run.bat -listen 0.0.0.0:8080`), and uses the clone's own `data` folder.
+`run.bat -listen 0.0.0.0:8080`), and uses the clone's own `data` folder. On Linux you can
+install a package instead, which runs the bot as a systemd service: see
+[Linux packages](#linux-packages). `prbot -version` prints the version and the commit it was
+built from.
 
 Open **http://127.0.0.1:8080**. On the first visit every page leads to a setup page where you
 choose the administrator password. That signs you in and takes you to **Settings** to connect
@@ -535,15 +539,74 @@ sc.exe start prbot
 As a service, it writes logs to `data\prbot.log`. Stop any copy running in a console first,
 because both would use port 8080. To move an existing setup, copy its `data` folder.
 
-**Linux (systemd).** See [deploy/prbot.service](deploy/prbot.service) for the unit file and
-install commands. It writes logs to the journal: `journalctl -u prbot -f`.
+**Linux (systemd).** The [Linux packages](#linux-packages) install and configure the service
+for you. For a manual install under `/opt`, see [deploy/prbot.service](deploy/prbot.service)
+for the unit file and install commands. Either way it writes logs to the journal:
+`journalctl -u prbot -f`.
 
 **Updating.** Run `go install github.com/OMG-Software/omg-review-bot/cmd/prbot@latest` (or
-rebuild), then restart the bot. Reviews that were interrupted are re-queued on startup. When
+rebuild, or install the newer package), then restart the bot. Reviews that were interrupted are re-queued on startup. When
 updating from a version without organizations, the database is migrated on startup and each
 repository is linked to its org on the next repo sync (**Sync from GitHub** does it at once).
 Until then, the activity entries for a repository that isn't linked yet are shown only to
 administrators.
+
+## Linux packages
+
+Every push to `main` is built, packaged, installed on each distribution below in CI, and
+published to the rolling [`latest` release](https://github.com/OMG-Software/omg-review-bot/releases/tag/latest).
+The file names stay the same from build to build, so these links always fetch the newest one.
+Each package is for x86_64 or aarch64 (`amd64` / `arm64` for deb):
+
+| Distribution | File |
+|---|---|
+| RHEL 10 (and Alma, Rocky, CentOS Stream 10) | `prbot-rhel10-x86_64.rpm` |
+| Fedora 44 | `prbot-fedora44-x86_64.rpm` |
+| Fedora 45 | `prbot-fedora45-x86_64.rpm` |
+| openSUSE Leap 16, Tumbleweed | `prbot-opensuse-x86_64.rpm` |
+| Debian | `prbot-debian-amd64.deb` |
+| Ubuntu | `prbot-ubuntu-amd64.deb` |
+| Arch Linux | `prbot-arch-x86_64.pkg.tar.zst` |
+| Any other distribution (static binary) | `prbot-linux-amd64.tar.gz` |
+
+Download from `https://github.com/OMG-Software/omg-review-bot/releases/download/latest/<file>`,
+then install with your package manager, for example on Fedora:
+
+```bash
+curl -LO https://github.com/OMG-Software/omg-review-bot/releases/download/latest/prbot-fedora44-x86_64.rpm
+sudo dnf install ./prbot-fedora44-x86_64.rpm
+```
+
+The other distributions use `sudo apt install ./prbot-debian-amd64.deb`,
+`sudo zypper install --allow-unsigned-rpm ./prbot-opensuse-x86_64.rpm` and
+`sudo pacman -U ./prbot-arch-x86_64.pkg.tar.zst`. The packages aren't signed; `SHA256SUMS` in the
+release lists their checksums.
+
+A package installs:
+
+| Path | What it is |
+|---|---|
+| `/usr/bin/prbot` | The bot |
+| `/usr/lib/systemd/system/prbot.service` | The service, run as the `prbot` user the package creates |
+| `/etc/prbot/prbot.env` | Settings for the service, such as `PRBOT_LISTEN` (kept across upgrades) |
+| `/var/lib/prbot` | The data directory, created on first start |
+
+Installing doesn't start the bot. Check `/etc/prbot/prbot.env`, then start it and enable it at
+boot:
+
+```bash
+sudo systemctl enable --now prbot
+```
+
+An upgrade restarts a running bot on the new version. Removing the package stops the service but
+keeps the `prbot` user and `/var/lib/prbot`, because the database there holds the GitHub App key;
+delete them by hand if you're done with the bot. To clear the admin password of a packaged
+install, run `sudo -u prbot prbot -data /var/lib/prbot -reset-password`.
+
+The version is in [internal/version/version.go](internal/version/version.go). Packages from the
+`latest` release take that version, with the CI run number as the package release (for example
+`0.1.0-42`), so each build upgrades the one before. To build the packages yourself, see
+[packaging/build-packages.sh](packaging/build-packages.sh).
 
 ## Behind a reverse proxy
 
@@ -784,6 +847,12 @@ go run ./cmd/prbot -data data-dev -listen 127.0.0.1:8087
 
 `data-dev/` is gitignored, so a development instance can't touch your real database.
 
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) checks formatting, vets, builds and runs
+the tests with the race detector on Linux amd64 and arm64 for every pull request and push to
+`main`. [.github/workflows/release.yml](.github/workflows/release.yml) builds the packages; it
+also runs on pull requests that change `packaging/` or `deploy/`, without publishing. To release
+a new version, change `Version` in `internal/version/version.go`.
+
 | Package | Responsibility |
 |---|---|
 | `cmd/prbot` | Entry point, flags, Windows service / signal handling |
@@ -796,6 +865,8 @@ go run ./cmd/prbot -data data-dev -listen 127.0.0.1:8087
 | `internal/settings` | Settings model, defaults and per-org review policy |
 | `internal/web` | Web UI: handlers, sessions (`auth.go`), GitHub sign-in (`oauth.go`), org pages (`orgs.go`), admin pages and the webhook endpoint (`admin.go`), SVG charts (`charts.go`), the on-disk note of sessions to end after a restart (`pending.go`), embedded templates and static files |
 | `internal/textutil` | Small string helpers shared across packages |
+| `internal/version` | The release version, `-version` output and the GitHub User-Agent |
+| `packaging` | nfpm config, systemd unit, sysusers file and install scripts for the Linux packages |
 
 `internal/bot/bot_test.go` runs the bot end to end against fake GitHub and fake model servers.
 It's the best place to start when changing review or reply behaviour.
