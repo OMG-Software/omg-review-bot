@@ -49,7 +49,8 @@ type Activity struct {
 	// recorded with the job, not looked up from Repo: the name can pass to
 	// another account while the job runs.
 	Account int64
-	Since   time.Time
+	Since   time.Time // when What started (each step of a job restarts it)
+	started time.Time // when the job started, which orders Working
 }
 
 // workers is how many jobs run at once. Jobs for the same PR still run one
@@ -298,7 +299,7 @@ func (b *Bot) Status() Status {
 			s.Working = append(s.Working, a)
 		}
 	}
-	sort.SliceStable(s.Working, func(i, j int) bool { return s.Working[i].Since.Before(s.Working[j].Since) })
+	sort.SliceStable(s.Working, func(i, j int) bool { return s.Working[i].started.Before(s.Working[j].started) })
 	s.QueueLen = len(b.queued)
 	if b.app != nil {
 		s.RateRemaining = b.app.RateRemaining()
@@ -311,8 +312,21 @@ func (b *Bot) Status() Status {
 // setCurrent records what the worker running ctx's job is doing.
 func (b *Bot) setCurrent(ctx context.Context, pr *store.PR, format string, args ...any) {
 	slot, _ := ctx.Value(workerSlot{}).(int)
+	now := time.Now()
 	b.mu.Lock()
-	b.working[slot] = Activity{What: fmt.Sprintf(format, args...), Repo: pr.Repo, Account: pr.AccountID, Since: time.Now()}
+	started := b.working[slot].started
+	if started.IsZero() {
+		started = now
+	}
+	b.working[slot] = Activity{What: fmt.Sprintf(format, args...), Repo: pr.Repo, Account: pr.AccountID, Since: now, started: started}
+	b.mu.Unlock()
+}
+
+// jobStarted marks worker slot as starting a new job, which Working is
+// ordered by. Nothing is shown until the job says what it's doing.
+func (b *Bot) jobStarted(slot int) {
+	b.mu.Lock()
+	b.working[slot] = Activity{started: time.Now()}
 	b.mu.Unlock()
 }
 
@@ -445,6 +459,7 @@ func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)
 		ok := b.claimPR(j)
 		b.takeMu.Unlock()
 		for ; ok && ctx.Err() == nil; j, ok = b.nextForPR(j) {
+			b.jobStarted(slot)
 			run(ctx, b.dequeued(j))
 			b.mu.Lock()
 			b.working[slot] = Activity{}

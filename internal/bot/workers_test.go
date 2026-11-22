@@ -173,3 +173,33 @@ func TestSamePRJobsDontOverlap(t *testing.T) {
 		t.Errorf("jobs for the same PR overlapped: %v", e.overlap)
 	}
 }
+
+// Running jobs are listed by when each job started: a job's next step
+// restarts its own timer, as before, but doesn't move it down the list.
+func TestWorkingOrderedByJobStart(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	slot := func(i int) context.Context { return context.WithValue(context.Background(), workerSlot{}, i) }
+	pr := &store.PR{Repo: "acme/web", Number: 1}
+
+	b.jobStarted(1)
+	b.setCurrent(slot(1), pr, "first, part 1")
+	time.Sleep(10 * time.Millisecond)
+	b.jobStarted(0)
+	b.setCurrent(slot(0), pr, "second")
+	time.Sleep(10 * time.Millisecond)
+	before := b.Status().Working[0].Since
+	b.setCurrent(slot(1), pr, "first, part 2")
+
+	w := b.Status().Working
+	if len(w) != 2 || w[0].What != "first, part 2" || w[1].What != "second" {
+		t.Fatalf("working = %+v, want the first job still listed first", w)
+	}
+	if !w[0].Since.After(before) {
+		t.Errorf("a job's new step kept the old step's time: %v, then %v", before, w[0].Since)
+	}
+}
