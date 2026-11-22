@@ -18,7 +18,8 @@ import (
 //     <!-- prbot:… --> markers, which the bot reads back to make decisions.
 //   - Markdown images become plain links, so nothing loads unless clicked.
 //   - @mentions are broken, so the bot can't be made to notify people or
-//     teams, or to address other bots ("@dependabot merge").
+//     teams, or to address other bots ("@dependabot merge"). So are
+//     character references for "@" ("&#64;"), which GitHub decodes first.
 //   - Lines that start with a slash command ("/approve", "/merge") are
 //     broken, so chat-ops bots that read the raw comment and trust the bot's
 //     account don't act on them.
@@ -65,7 +66,10 @@ var (
 	// GitHub links "@name" (a user, or "@org/team") after any non-word
 	// character; after a word character it's an e-mail address.
 	atMentionRE = regexp.MustCompile(`(^|[^A-Za-z0-9_])@([A-Za-z0-9])`)
-	slashCmdRE  = regexp.MustCompile(`^(\s*)/([A-Za-z])`)
+	// Character references that decode to "@" ("&#64;", "&#x40;",
+	// "&commat;"): GitHub links mentions in the decoded text.
+	entityAtRE = regexp.MustCompile(`(?i)&(#0*64;|#x0*40;|commat;)`)
+	slashCmdRE = regexp.MustCompile(`^(\s*)/([A-Za-z])`)
 	// A code line that is a bare command: "/approve", "/assign @x". A path
 	// ("/usr/bin") or comment ("// x") isn't one.
 	codeCmdRE = regexp.MustCompile(`^(\s*)/([A-Za-z][\w-]*)(\s|$)`)
@@ -165,5 +169,6 @@ func cleanLine(s string) string {
 	s = slashCmdRE.ReplaceAllString(s, "${1}"+zwsp+"/${2}")
 	s = htmlTagRE.ReplaceAllString(s, "<"+zwsp+"$1")
 	s = strings.ReplaceAll(s, "![", "!"+zwsp+"[")
+	s = entityAtRE.ReplaceAllString(s, "&"+zwsp+"$1") // shown as written, not as "@"
 	return atMentionRE.ReplaceAllString(s, "${1}@"+zwsp+"${2}")
 }
