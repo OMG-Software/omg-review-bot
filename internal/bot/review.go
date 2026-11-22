@@ -123,9 +123,12 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		// unreachable, say, or the PR closed); the status below says whether
 		// it will be retried.
 		defer func() {
-			switch cur, _ := b.store.GetPR(j.repo, j.number); {
+			switch cur, getErr := b.store.GetPR(j.repo, j.number); {
 			case errors.Is(err, errSkip):
 				b.closeQueued(qn, "The pull request was closed before the review started.")
+			case getErr != nil:
+				// Whether it will be retried isn't known, so it isn't said.
+				b.closeQueued(qn, "The review couldn't start.")
 			case cur != nil && cur.Status == "pending":
 				b.closeQueued(qn, "The review couldn't start. It will be tried again automatically.")
 			default:
