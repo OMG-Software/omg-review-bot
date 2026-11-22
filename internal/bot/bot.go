@@ -311,7 +311,10 @@ func (b *Bot) Status() Status {
 
 // setCurrent records what the worker running ctx's job is doing.
 func (b *Bot) setCurrent(ctx context.Context, pr *store.PR, format string, args ...any) {
-	slot, _ := ctx.Value(workerSlot{}).(int)
+	slot, ok := ctx.Value(workerSlot{}).(int)
+	if !ok || slot < 0 || slot >= workers {
+		return // not run by a worker, so there's no worker's progress to show
+	}
 	now := time.Now()
 	b.mu.Lock()
 	started := b.working[slot].started
@@ -458,12 +461,17 @@ func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)
 		}
 		ok := b.claimPR(j)
 		b.takeMu.Unlock()
-		for ; ok && ctx.Err() == nil; j, ok = b.nextForPR(j) {
+		for ok {
+			if ctx.Err() != nil {
+				b.releasePR(j)
+				return
+			}
 			b.jobStarted(slot)
 			run(ctx, b.dequeued(j))
 			b.mu.Lock()
 			b.working[slot] = Activity{}
 			b.mu.Unlock()
+			j, ok = b.nextForPR(j)
 		}
 	}
 }
@@ -499,6 +507,26 @@ func (b *Bot) nextForPR(j job) (job, bool) {
 	}
 	b.active[k] = waiting[1:]
 	return waiting[0], true
+}
+
+// releasePR gives up j's PR without running j or the jobs waiting for it,
+// as a worker stops. j hasn't been run, so it and the waiting jobs go back on
+// the queue, where they're still counted: nothing is left claimed or lost.
+func (b *Bot) releasePR(j job) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	k := prKey(j)
+	for _, w := range append([]job{j}, b.active[k]...) {
+		select {
+		case b.jobs <- w:
+		default:
+			// No room: forgotten, so asking for it again queues it.
+			delete(b.queued, w.key())
+			delete(b.upgrades, w.key())
+			b.log.Warn("job queue full, dropping", "job", w.key())
+		}
+	}
+	delete(b.active, k)
 }
 
 func (b *Bot) runJob(ctx context.Context, j job) {

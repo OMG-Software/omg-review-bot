@@ -22,6 +22,7 @@ type workerEnv struct {
 	release map[string]chan struct{} // job key → closed to let it finish
 	running map[string]bool          // PRs (prKey) with a job running now
 	overlap []string                 // PRs that had two jobs running at once
+	stop    context.CancelFunc       // stops the workers
 }
 
 func newWorkerEnv(t *testing.T) *workerEnv {
@@ -40,6 +41,7 @@ func newWorkerEnv(t *testing.T) *workerEnv {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	e.stop = cancel
 	for i := range workers {
 		go e.b.work(ctx, i, e.run)
 	}
@@ -202,4 +204,64 @@ func TestWorkingOrderedByJobStart(t *testing.T) {
 	if !w[0].Since.After(before) {
 		t.Errorf("a job's new step kept the old step's time: %v, then %v", before, w[0].Since)
 	}
+}
+
+// Progress reported from outside a worker isn't shown as a worker's.
+func TestProgressOutsideWorkerIgnored(t *testing.T) {
+	e := newWorkerEnv(t)
+	e.b.setCurrent(context.Background(), &store.PR{Repo: "acme/web", Number: 1}, "not a worker's")
+	if w := e.b.Status().Working; len(w) != 0 {
+		t.Fatalf("working = %+v, want nothing shown", w)
+	}
+}
+
+// A worker that stops gives its PR up: the jobs waiting for that PR go back
+// on the queue, still counted, rather than being lost with the PR claimed.
+func TestStoppingWorkerReleasesPR(t *testing.T) {
+	e := newWorkerEnv(t)
+	first, waiting := job{kind: jobReview, repo: "acme/web", number: 1}, replies("acme/web", 1)
+	for _, j := range []job{first, waiting} {
+		if !e.b.enqueue(j) {
+			t.Fatalf("%s not queued", j.key())
+		}
+	}
+	e.next()
+	deadline := time.Now().Add(5 * time.Second)
+	for e.waitingFor(first) != 1 { // the other worker has handed it over
+		if time.Now().After(deadline) {
+			t.Fatal("the second job never waited for the first")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	e.stop()
+	e.finish(first)
+	for {
+		e.b.mu.Lock()
+		claimed, back := len(e.b.active), len(e.b.jobs)
+		e.b.mu.Unlock()
+		if claimed == 0 && back == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after stopping: %d PRs claimed, %d jobs queued; want 0 and 1", claimed, back)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if j := <-e.b.jobs; j.key() != waiting.key() {
+		t.Errorf("queued %s, want %s", j.key(), waiting.key())
+	}
+	if q := e.b.Status().QueueLen; q != 1 {
+		t.Errorf("queue length = %d, want the waiting job still counted", q)
+	}
+	select {
+	case j := <-e.started:
+		t.Errorf("%s ran after the workers stopped", j.key())
+	default:
+	}
+}
+
+func (e *workerEnv) waitingFor(j job) int {
+	e.b.mu.Lock()
+	defer e.b.mu.Unlock()
+	return len(e.b.active[prKey(j)])
 }
