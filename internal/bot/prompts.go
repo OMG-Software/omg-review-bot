@@ -136,6 +136,24 @@ func (n reviewNotice) failedBody(retrying bool) string {
 	return n.body("⚠️ **Review didn't finish**", next)
 }
 
+// nothingBody says the review found no code to look at.
+func (n reviewNotice) nothingBody() string {
+	return n.body("⏭️ **Nothing to review**", "Every changed file is deleted, binary or ignored, so no review was posted.")
+}
+
+// queuedBody is the notice for a review that is queued but hasn't started.
+// It carries the commit's notice marker, so the review that follows (or a
+// retry after a restart) edits it rather than posting another.
+func queuedBody(head string, at time.Time) string {
+	return fmt.Sprintf("⏳ **Queued for review** on `%s`\n\n- **Queued:** %s\n\n<sub>The review starts when the bot gets to it; this comment will be updated then.</sub>\n%s",
+		short(head), at.UTC().Format("2006-01-02 15:04:05 UTC"), noticeMarker(head))
+}
+
+// notStartedBody replaces a queued notice whose review never started.
+func notStartedBody(head, reason string) string {
+	return fmt.Sprintf("⏭️ **Review skipped** on `%s`\n\n<sub>%s</sub>\n%s", short(head), reason, noticeMarker(head))
+}
+
 func (n reviewNotice) body(title, note string) string {
 	return fmt.Sprintf("%s on `%s`\n\n- **Started:** %s\n- **Model:** %s\n- **Review skill:** %s\n\n<sub>%s</sub>\n%s",
 		title, short(n.head), n.started.UTC().Format("2006-01-02 15:04:05 UTC"), inlineCode(n.model), inlineCode(n.skill),

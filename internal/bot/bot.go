@@ -100,6 +100,9 @@ type Bot struct {
 	// upgrades holds a manual review asked for while an automatic one for
 	// the same PR was queued: that queue entry is run as the manual review.
 	upgrades map[string]job
+	// notices holds the "Queued for review" comment of each queued review
+	// job, until the worker takes it (see queued.go).
+	notices map[string]*queuedNotice
 
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
@@ -116,6 +119,7 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		log:         log,
 		queued:      map[string]bool{},
 		upgrades:    map[string]job{},
+		notices:     map[string]*queuedNotice{},
 		jobs:        make(chan job, 4096),
 		wake:        make(chan struct{}, 1),
 		kick:        make(chan struct{}, 1),
@@ -326,6 +330,9 @@ func (b *Bot) push(j job) pushResult {
 	select {
 	case b.jobs <- j:
 		b.queued[j.key()] = j.force
+		if j.kind == jobReview {
+			b.queueNotice(j)
+		}
 		return pushed
 	default:
 		b.log.Warn("job queue full, dropping", "job", j.key())

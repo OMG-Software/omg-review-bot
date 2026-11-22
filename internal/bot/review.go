@@ -61,14 +61,18 @@ var reviewSchema = map[string]any{
 }
 
 func (b *Bot) handleReview(ctx context.Context, j job) {
+	// Before prMu: the queued comment may still be being posted.
+	qn := b.takeQueued(ctx, j)
 	b.prMu.Lock()
 	pr, err := b.store.GetPR(j.repo, j.number)
 	var st settings.Settings
+	policyErr := false
 	if err == nil && pr != nil {
 		if st, err = b.policySettings(b.Settings(), pr.AccountID); err != nil {
 			// Not reviewed with the wrong policy. enqueueDue tries again, but
 			// not a manual review if automatic ones are off: that's retried
 			// here.
+			policyErr = true
 			b.logf("warn", pr.Repo, pr.Number, "review postponed: couldn't read the organization's policy: %v", err)
 			if j.force && pr.AccountID == j.account {
 				b.retryForced(j)
@@ -79,6 +83,11 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		(j.force && pr.AccountID != j.account) || // the name passed to another account since it was asked for
 		(!j.force && (pr.Status != "pending" || !st.Review.Enabled)) {
 		b.prMu.Unlock()
+		// A postponed review is queued again and edits the same comment, and
+		// one already under way owns it.
+		if pr != nil && !policyErr && pr.Status != "reviewing" {
+			b.closeQueued(qn, pr, notReviewedReason(st, pr, j))
+		}
 		return
 	}
 	if !j.force { // a review asked for by hand goes past the limit
@@ -87,6 +96,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 			_ = b.store.SavePR(pr)
 			b.prMu.Unlock()
 			b.logf("info", pr.Repo, pr.Number, "not reviewing %s: the bot has reviewed this PR %d times, its limit", short(pr.HeadSHA), rounds)
+			b.closeQueued(qn, pr, "This pull request has reached the most reviews the bot posts automatically.")
 			b.announceLimit(ctx, st, pr, rounds)
 			return
 		}
@@ -97,7 +107,22 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	b.prMu.Unlock()
 
 	b.setCurrent(pr, "Reviewing %s#%d", pr.Repo, pr.Number)
-	sha, err := b.reviewPR(ctx, st, pr)
+	sha, err := b.reviewPR(ctx, st, pr, qn)
+	if qn != nil && !qn.claimed {
+		// The review stopped before it could take the comment over (GitHub
+		// unreachable, say, or the PR closed); the status below says whether
+		// it will be retried.
+		defer func() {
+			switch cur, _ := b.store.GetPR(j.repo, j.number); {
+			case errors.Is(err, errSkip):
+				b.closeQueued(qn, pr, "The pull request was closed before the review started.")
+			case cur != nil && cur.Status == "pending":
+				b.closeQueued(qn, pr, "The review couldn't start. It will be tried again automatically.")
+			default:
+				b.closeQueued(qn, pr, "The review couldn't start. It won't be retried until the next push, or until someone asks for a review in the bot.")
+			}
+		}()
+	}
 
 	b.prMu.Lock()
 	defer b.prMu.Unlock()
@@ -138,6 +163,21 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	b.kickDue()
 }
 
+// notReviewedReason says why a queued review didn't run, for its comment.
+func notReviewedReason(st settings.Settings, pr *store.PR, j job) string {
+	switch {
+	case !pr.Open:
+		return "The pull request was closed before the review started."
+	case !allowedRepo(st, pr.Repo):
+		return "The repository is paused, so it isn't reviewed."
+	case j.force && pr.AccountID != j.account:
+		return "The pull request now belongs to another organization."
+	case !st.Review.Enabled && !j.force:
+		return "Automatic reviews were turned off before the review started."
+	}
+	return "This commit doesn't need a review any more."
+}
+
 // retryForced queues a manual review again once its organization's policy
 // couldn't be read, waiting twice as long each time, up to half an hour.
 func (b *Bot) retryForced(j job) {
@@ -159,31 +199,36 @@ func (b *Bot) requeueForced(j job, wait time.Duration) {
 	})
 }
 
-// announceReview posts the review-started notice, or, when this commit
-// already has one, turns that back into one, so retries and reviews cut
-// short by a restart don't pile up comments (or leave one saying a review
-// is under way). It returns the comment's ID (0 if it couldn't be posted).
+// announceReview posts the review-started notice (see announceNotice).
 func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.PR, n reviewNotice) int64 {
+	return b.announceNotice(ctx, cl, pr, n.head, n.startedBody())
+}
+
+// announceNotice posts a review notice for commit head, or, when that commit
+// already has one, edits it to body, so retries and reviews cut short by a
+// restart don't pile up comments (or leave one saying a review is queued or
+// under way). It returns the comment's ID (0 if it couldn't be posted).
+func (b *Bot) announceNotice(ctx context.Context, cl *github.Client, pr *store.PR, head, body string) int64 {
 	cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number)
 	if err != nil {
 		// This commit may have a notice already (from before a restart), and
 		// a second would leave that one saying a review is under way. The
 		// review goes ahead without one.
-		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier review-started comment, so none is posted: %v", err)
+		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier review notice, so none is posted: %v", err)
 		return 0
 	}
-	if id := findNotice(cs, b.BotLogin(), n.head); id != 0 {
+	if id := findNotice(cs, b.BotLogin(), head); id != 0 {
 		// Even if it can't be edited now, it's this commit's notice: a
 		// second one would leave this one behind, never updated again.
 		// The edit when the review ends tries again.
-		if err := cl.UpdateIssueComment(ctx, pr.Repo, id, n.startedBody()); err != nil {
-			b.logf("warn", pr.Repo, pr.Number, "could not update the review-started comment: %v", err)
+		if err := cl.UpdateIssueComment(ctx, pr.Repo, id, body); err != nil {
+			b.logf("warn", pr.Repo, pr.Number, "could not update the review notice: %v", err)
 		}
 		return id
 	}
-	c, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, n.startedBody())
+	c, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, body)
 	if err != nil {
-		b.logf("warn", pr.Repo, pr.Number, "could not post the review-started comment: %v", err)
+		b.logf("warn", pr.Repo, pr.Number, "could not post the review notice: %v", err)
 		return 0
 	}
 	return c.ID
@@ -232,7 +277,7 @@ func (b *Bot) updateNotice(cl *github.Client, pr *store.PR, id int64, body strin
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := cl.UpdateIssueComment(ctx, pr.Repo, id, body); err != nil {
-		b.logf("warn", pr.Repo, pr.Number, "could not update the review-started comment: %v", err)
+		b.logf("warn", pr.Repo, pr.Number, "could not update the review notice: %v", err)
 	}
 }
 
@@ -335,7 +380,9 @@ func listOrNone(ss []string) string {
 }
 
 // reviewPR runs one full review and posts it. It returns the head SHA reviewed.
-func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) (sha string, err error) {
+// qn is the review's queued comment (nil if none): reviewPR claims it once it
+// can see the review through, and turns it into the review notice.
+func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, qn *queuedNotice) (sha string, err error) {
 	app, err := b.getApp(ctx, st)
 	if err != nil {
 		return "", err
@@ -358,10 +405,15 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	}
 	notice := reviewNotice{head: head, model: st.LLM.Model, skill: sk.Name, started: time.Unix(rec.StartedAt, 0)}
 	var noticeID int64
+	if qn != nil {
+		noticeID, qn.claimed = qn.id, true // from here on, the deferred edit below keeps it current
+	}
 	var raw strings.Builder
 	defer func() {
 		switch {
 		case noticeID == 0:
+		case err == nil && rec.Status == "nothing to review":
+			b.updateNotice(cl, pr, noticeID, notice.nothingBody())
 		case err == nil:
 			// So the notice doesn't go on saying a review is under way.
 			b.updateNotice(cl, pr, noticeID, notice.postedBody(rec.URL))
@@ -437,8 +489,13 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR) 
 	rec.Batches = len(p.batches)
 	if len(p.batches) > 0 {
 		// Only when there's code to review, so a PR with nothing reviewable
-		// doesn't get a notice that's never followed by a review.
-		noticeID = b.announceReview(ctx, cl, pr, notice)
+		// doesn't get a notice that's never followed by a review. A queued
+		// review's comment becomes the notice.
+		if noticeID != 0 {
+			b.updateNotice(cl, pr, noticeID, notice.startedBody())
+		} else {
+			noticeID = b.announceReview(ctx, cl, pr, notice)
+		}
 	}
 
 	// First check whether earlier findings have since been fixed: confirmed
