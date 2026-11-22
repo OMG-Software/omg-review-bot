@@ -66,7 +66,9 @@ var (
 
 // sanitizeModelText makes model-written markdown safe to post (see above).
 func sanitizeModelText(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
+	// Every line ending CommonMark knows, so these lines are GitHub's lines:
+	// a lone "\r" ends one too.
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
 	s = breakMarkers(s)
 	s = textutil.Truncate(strings.TrimSpace(s), maxModelBody)
 
