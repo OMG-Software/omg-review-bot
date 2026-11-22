@@ -147,8 +147,17 @@ jobs:
           test -f /usr/lib/sysusers.d/prbot.conf
           test -f /etc/prbot/prbot.env
           # The CA bundle dependency was installed: Go finds the system trust
-          # store in one of these.
-          ls /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt             /etc/ssl/ca-bundle.pem /var/lib/ca-certificates/ca-bundle.pem 2>/dev/null | grep -q .
+          # store in one of these. Each distribution has only one, so test the
+          # files rather than rely on ls's status, which fails for the others.
+          found=
+          for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
+                   /etc/ssl/ca-bundle.pem /var/lib/ca-certificates/ca-bundle.pem; do
+            if [ -s "$f" ]; then
+              echo "CA bundle: $f"
+              found=1
+            fi
+          done
+          [ -n "$found" ]
 
       - name: Remove
         env:
