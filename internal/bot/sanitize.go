@@ -43,6 +43,11 @@ import (
 //     as markdown.
 //   - A backtick fence's info string can't contain a backtick (CommonMark),
 //     or the line is a paragraph, not a fence.
+//
+// Every other run of three or more backticks or tildes is broken, so GitHub
+// sees no fence the sanitizer doesn't. Otherwise an indented "  ```", which
+// GitHub opens a fence with, would make it close at the next "```", while the
+// sanitizer took that line for an opener and left the markdown after it alone.
 
 const (
 	maxModelBody  = 12000 // a finding body, summary or reply
@@ -64,6 +69,9 @@ var (
 	// A code line that is a bare command: "/approve", "/assign @x". A path
 	// ("/usr/bin") or comment ("// x") isn't one.
 	codeCmdRE = regexp.MustCompile(`^(\s*)/([A-Za-z][\w-]*)(\s|$)`)
+	// A run that could open or close a fence somewhere the sanitizer doesn't
+	// trust one (see cleanLine).
+	fenceRunRE = regexp.MustCompile("(`{3,}|~{3,})")
 )
 
 // sanitizeModelText makes model-written markdown safe to post (see above).
@@ -153,6 +161,7 @@ func breakMarkers(s string) string {
 
 // cleanLine neutralizes one line of markdown outside fenced code.
 func cleanLine(s string) string {
+	s = fenceRunRE.ReplaceAllString(s, zwsp+"$1")
 	s = slashCmdRE.ReplaceAllString(s, "${1}"+zwsp+"/${2}")
 	s = htmlTagRE.ReplaceAllString(s, "<"+zwsp+"$1")
 	s = strings.ReplaceAll(s, "![", "!"+zwsp+"[")

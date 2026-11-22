@@ -1663,7 +1663,7 @@ func forcedRetryBot(t *testing.T, queueLen int) (*Bot, func() (job, bool), func(
 		if _, err := db.Exec(`ALTER TABLE orgs RENAME TO orgs_away`); err != nil {
 			t.Fatal(err)
 		}
-		b.handleReview(context.Background(), j)
+		b.runJob(context.Background(), j)
 		if _, err := db.Exec(`ALTER TABLE orgs_away RENAME TO orgs`); err != nil {
 			t.Fatal(err)
 		}

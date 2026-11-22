@@ -183,6 +183,11 @@ func inlineCode(s string) string {
 	return "`" + s + "`"
 }
 
+// codePath shows a file path as inline code. A note's path is the model's
+// and a file's name is the PR author's, so either may hold line breaks,
+// backticks or markdown: it's made one sanitized line first.
+func codePath(p string) string { return inlineCode(sanitizeModelLine(p)) }
+
 // ---------- the bot's own finding comments ----------
 
 var (
@@ -336,7 +341,7 @@ func reviewBody(ri reviewInfo) string {
 			if f.Line > 0 {
 				loc = fmt.Sprintf("%s:%d", f.Path, f.Line)
 			}
-			fmt.Fprintf(&sb, "**%s** %s\n`%s`\n\n%s\n\n---\n\n", settings.SeverityInfo(f.Severity).Label, f.Title, loc, f.Body)
+			fmt.Fprintf(&sb, "**%s** %s\n%s\n\n%s\n\n---\n\n", settings.SeverityInfo(f.Severity).Label, f.Title, codePath(loc), f.Body)
 			noteSevs = append(noteSevs, f.Severity)
 		}
 		sb.WriteString("</details>\n\n")
@@ -348,7 +353,7 @@ func reviewBody(ri reviewInfo) string {
 				fmt.Fprintf(&sb, "- …and %d more\n", len(ri.plan.skipped)-50)
 				break
 			}
-			fmt.Fprintf(&sb, "- `%s`\n", s)
+			fmt.Fprintf(&sb, "- %s\n", codePath(s))
 		}
 		sb.WriteString("\n</details>\n\n")
 	}

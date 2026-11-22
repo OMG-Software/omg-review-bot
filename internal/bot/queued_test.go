@@ -155,6 +155,44 @@ func TestQueuedNoticeKeptOpenForPostponedReview(t *testing.T) {
 	}
 }
 
+// A review asked for again while one is starting (the PR still reads as due)
+// waits for it, rather than taking over its comment and closing it as
+// skipped; a manual one asked for meanwhile is queued once it's done.
+func TestQueuedNoticeKeptByRunningReview(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(*settings.Settings) {})
+	e.b.pollOnce(e.ctx)
+	waitQueued(e.b)
+	j := e.b.dequeued(<-e.b.jobs) // the worker has it; the PR is still pending
+
+	key := job{kind: jobReview, repo: "acme/web", number: 7}.key()
+	if !e.b.enqueue(job{kind: jobReview, repo: "acme/web", number: 7}) {
+		t.Fatal("automatic review refused")
+	}
+	if !e.b.enqueue(job{kind: jobReview, repo: "acme/web", number: 7, force: true, account: 500}) {
+		t.Fatal("manual review refused")
+	}
+	e.b.mu.Lock()
+	_, queued := e.b.queued[key]
+	e.b.mu.Unlock()
+	if queued || len(e.gh.posted) != 1 {
+		t.Fatalf("queued = %v, posted = %q; want nothing queued or posted while the review runs", queued, e.gh.posted)
+	}
+
+	e.b.runJob(e.ctx, j)
+	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.edited[9001], "**Review posted**") {
+		t.Fatalf("reviews = %d, notice = %q; want the review posted on its notice", len(e.gh.reviews), e.gh.edited[9001])
+	}
+	select {
+	case next := <-e.b.jobs:
+		if next = e.b.dequeued(next); !next.force || next.account != 500 {
+			t.Errorf("queued afterwards: %+v, want the manual review", next)
+		}
+	default:
+		t.Error("the manual review asked for meanwhile wasn't queued")
+	}
+	waitQueued(e.b)
+}
+
 // After a restart loses the queue, the review is queued again and reuses
 // the commit's queued comment instead of posting a second one.
 func TestQueuedNoticeReusedAfterRestart(t *testing.T) {
