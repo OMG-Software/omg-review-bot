@@ -209,6 +209,14 @@ set_state "s['fail']['upload']=2; s['fail']['release_delete']=True"
 run $NEW 42; rc=$?
 check "failed first publish that can't remove its release exits 2" eval "[ $rc -eq 2 ] && grep -q 'delete by hand' '$t/out.log'"
 
+# 12. A failure before anything changed doesn't claim to have removed anything.
+published
+set_state "s['fail']['release_lookup']=True"
+cp "$MOCK_STATE" "$t/before.json"
+run $NEW 42; rc=$?
+check "early failure on an existing release says nothing was changed" \
+    eval "[ $rc -eq 1 ] && unchanged && grep -q 'failed before changing' '$t/out.log' && ! grep -q 'removed the release' '$t/out.log'"
+
 rm -rf "$t"
 echo "$fails failed"
 exit $fails

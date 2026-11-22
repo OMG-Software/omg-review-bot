@@ -70,6 +70,8 @@ if args[0] == "api":
             die("Reference does not exist (HTTP 422)")
         st["tag"] = None
     elif ep == "releases/tags/latest":
+        if st["fail"].get("release_lookup"):
+            die("lookup failed (HTTP 500)")
         if not rel:
             die("Not Found (HTTP 404)")
         print(rel["id"])

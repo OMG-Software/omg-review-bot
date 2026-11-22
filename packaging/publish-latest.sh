@@ -80,6 +80,10 @@ fi
 created_tag= created_release=
 undo_create() {
     local left=()
+    if [[ -z $created_release$created_tag ]]; then
+        echo "failed before changing the release" >&2
+        exit 1
+    fi
     if [[ -n $created_release ]]; then
         gh release delete "$tag" --yes >/dev/null 2>&1
         gh release view "$tag" --json name >/dev/null 2>&1 && left+=("release $tag")
