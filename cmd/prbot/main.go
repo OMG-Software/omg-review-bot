@@ -82,6 +82,7 @@ func run(listen, dataDir string, resetPw bool) error {
 		return nil
 	}
 
+	logger.Info("starting prbot", "version", version.String())
 	b := bot.New(st, dataDir, logger)
 	srv, err := web.New(st, b, logger)
 	if err != nil {
@@ -93,7 +94,7 @@ func run(listen, dataDir string, resetPw bool) error {
 		hs := &http.Server{Addr: listen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 		errc := make(chan error, 1)
 		go func() {
-			logger.Info("web UI listening", "url", "http://"+listen, "data", dataDir, "version", version.String())
+			logger.Info("web UI listening", "url", "http://"+listen, "data", dataDir)
 			errc <- hs.ListenAndServe()
 		}()
 		select {

@@ -5,13 +5,15 @@
 #
 # BIN_DIR holds prbot-linux-amd64 and prbot-linux-arm64. RELEASE is the package
 # release number; the release workflow passes its run number, so each rolling
-# build upgrades the one before. Needs nfpm on PATH (or NFPM=/path/to/nfpm).
+# build upgrades the one before. Needs nfpm on PATH (or NFPM=/path/to/nfpm);
+# to build the version the release workflow uses:
+#   go -C packaging/tools build -o "$PWD/nfpm" github.com/goreleaser/nfpm/v2/cmd/nfpm
 #
 # File names leave out the version so the rolling "latest" release keeps the
 # same download URLs; the version is inside each package.
 set -euo pipefail
 
-if [ $# -ne 4 ]; then
+if [[ $# -ne 4 ]]; then
     echo "usage: $0 VERSION RELEASE BIN_DIR OUT_DIR" >&2
     exit 2
 fi
@@ -56,7 +58,7 @@ extension() {
 
 for goarch in amd64 arm64; do
     binary="$bin_dir/prbot-linux-$goarch"
-    if [ ! -x "$binary" ]; then
+    if [[ ! -x $binary ]]; then
         echo "missing or not executable: $binary" >&2
         exit 1
     fi
@@ -65,7 +67,7 @@ for goarch in amd64 arm64; do
 
     for t in "${targets[@]}"; do
         read -r target packager suffix <<<"$t"
-        [ "$suffix" = - ] && suffix=
+        [[ $suffix == - ]] && suffix=
         file="prbot-$target-$(arch_name "$packager" "$goarch").$(extension "$packager")"
         echo "building $file"
         PKG_ARCH=$goarch PKG_VERSION=$version PKG_RELEASE="$release$suffix" \
