@@ -67,6 +67,24 @@ func TestQueuedNoticeClosedBeforeStart(t *testing.T) {
 	}
 }
 
+// A queued comment is closed even when the worker can't read the PR's row.
+func TestQueuedNoticeClosedWithoutPRRow(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(*settings.Settings) {})
+	e.b.pollOnce(e.ctx) // posts #7's queued comment
+	waitQueued(e.b)
+	// Hand that comment to a job for a PR the store has no row for.
+	j7, j99 := job{kind: jobReview, repo: "acme/web", number: 7}, job{kind: jobReview, repo: "acme/web", number: 99}
+	e.b.mu.Lock()
+	e.b.notices[j99.key()] = e.b.notices[j7.key()]
+	delete(e.b.notices, j7.key())
+	e.b.mu.Unlock()
+
+	e.b.handleReview(e.ctx, j99)
+	if got := e.gh.edited[9001]; !strings.Contains(got, "**Review skipped**") || !strings.Contains(got, "couldn't read") {
+		t.Errorf("notice = %q, want it closed", got)
+	}
+}
+
 // After a restart loses the queue, the review is queued again and reuses
 // the commit's queued comment instead of posting a second one.
 func TestQueuedNoticeReusedAfterRestart(t *testing.T) {

@@ -22,9 +22,11 @@ import (
 type queuedNotice struct {
 	done chan struct{} // closed once the post has finished, posted or not
 	// Set before done is closed:
-	id   int64 // the comment; 0 if none could be posted
-	cl   *github.Client
-	head string // the commit the comment names
+	id     int64 // the comment; 0 if none could be posted
+	cl     *github.Client
+	repo   string
+	number int
+	head   string // the commit the comment names
 	// claimed: reviewPR has taken the comment over and keeps it current.
 	// Only the worker uses it, after done.
 	claimed bool
@@ -53,7 +55,7 @@ func (b *Bot) postQueued(qn *queuedNotice, j job) {
 		b.logf("warn", pr.Repo, pr.Number, "could not post the review-queued comment: %v", err)
 		return
 	}
-	qn.cl, qn.head = app.Installation(pr.InstallationID), pr.HeadSHA
+	qn.cl, qn.repo, qn.number, qn.head = app.Installation(pr.InstallationID), pr.Repo, pr.Number, pr.HeadSHA
 	qn.id = b.announceNotice(ctx, qn.cl, pr, pr.HeadSHA, queuedBody(pr.HeadSHA, time.Now()))
 }
 
@@ -79,9 +81,10 @@ func (b *Bot) takeQueued(ctx context.Context, j job) *queuedNotice {
 }
 
 // closeQueued edits a queued comment whose review never started to say why.
-func (b *Bot) closeQueued(qn *queuedNotice, pr *store.PR, reason string) {
+// It needs nothing but the notice, so it works when the PR's row can't be read.
+func (b *Bot) closeQueued(qn *queuedNotice, reason string) {
 	if qn == nil {
 		return
 	}
-	b.updateNotice(qn.cl, pr, qn.id, notStartedBody(qn.head, reason))
+	b.updateNotice(qn.cl, &store.PR{Repo: qn.repo, Number: qn.number}, qn.id, notStartedBody(qn.head, reason))
 }

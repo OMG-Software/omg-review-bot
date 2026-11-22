@@ -85,8 +85,13 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		b.prMu.Unlock()
 		// A postponed review is queued again and edits the same comment, and
 		// one already under way owns it.
-		if pr != nil && !policyErr && pr.Status != "reviewing" {
-			b.closeQueued(qn, pr, notReviewedReason(st, pr, j))
+		switch {
+		case pr == nil:
+			// Unreadable or no longer tracked. If it's due again once it can be
+			// read, the new queued comment reuses this one.
+			b.closeQueued(qn, "The review couldn't start: the bot couldn't read this pull request's record.")
+		case !policyErr && pr.Status != "reviewing":
+			b.closeQueued(qn, notReviewedReason(st, pr, j))
 		}
 		return
 	}
@@ -96,7 +101,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 			_ = b.store.SavePR(pr)
 			b.prMu.Unlock()
 			b.logf("info", pr.Repo, pr.Number, "not reviewing %s: the bot has reviewed this PR %d times, its limit", short(pr.HeadSHA), rounds)
-			b.closeQueued(qn, pr, "This pull request has reached the most reviews the bot posts automatically.")
+			b.closeQueued(qn, "This pull request has reached the most reviews the bot posts automatically.")
 			b.announceLimit(ctx, st, pr, rounds)
 			return
 		}
@@ -115,11 +120,11 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		defer func() {
 			switch cur, _ := b.store.GetPR(j.repo, j.number); {
 			case errors.Is(err, errSkip):
-				b.closeQueued(qn, pr, "The pull request was closed before the review started.")
+				b.closeQueued(qn, "The pull request was closed before the review started.")
 			case cur != nil && cur.Status == "pending":
-				b.closeQueued(qn, pr, "The review couldn't start. It will be tried again automatically.")
+				b.closeQueued(qn, "The review couldn't start. It will be tried again automatically.")
 			default:
-				b.closeQueued(qn, pr, "The review couldn't start. It won't be retried until the next push, or until someone asks for a review in the bot.")
+				b.closeQueued(qn, "The review couldn't start. It won't be retried until the next push, or until someone asks for a review in the bot.")
 			}
 		}()
 	}
