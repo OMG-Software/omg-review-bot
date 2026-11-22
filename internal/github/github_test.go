@@ -22,7 +22,11 @@ func TestTokenStaysOnAPIHost(t *testing.T) {
 	}))
 	defer other.Close()
 
+	var contents atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/acme/web/contents") {
+			contents.Add(1)
+		}
 		switch r.URL.Path {
 		case "/repos/acme/web/pulls/1/comments":
 			w.Header().Set("Link", `<`+other.URL+`/steal?page=2>; rel="next"`)
@@ -56,8 +60,11 @@ func TestTokenStaysOnAPIHost(t *testing.T) {
 		t.Errorf("token sent to another host %d time(s)", n)
 	}
 	for _, p := range []string{"../../orgs/x", "a/../b", "a//b", "./a"} {
-		if _, err := c.FileContent(ctx, "acme/web", p, "main"); err == nil {
-			t.Errorf("FileContent(%q) was allowed", p)
+		if _, err := c.FileContent(ctx, "acme/web", p, "main"); err == nil || !strings.Contains(err.Error(), "refusing file path") {
+			t.Errorf("FileContent(%q): err = %v, want the path refused", p, err)
 		}
+	}
+	if n := contents.Load(); n != 0 {
+		t.Errorf("refused paths still made %d contents request(s)", n)
 	}
 }

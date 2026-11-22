@@ -264,7 +264,7 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, cl *githu
 		if err != nil {
 			return err
 		}
-		posted, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, "@"+c.User.Login+" "+sanitizeModelText(text))
+		posted, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, afterPrefix("@"+c.User.Login, sanitizeModelText(text)))
 		if err != nil {
 			return err
 		}

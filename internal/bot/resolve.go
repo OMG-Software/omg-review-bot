@@ -275,7 +275,7 @@ func (b *Bot) verifyFixes(ctx context.Context, st settings.Settings, lc llm.Clie
 			reason := sanitizeModelText(textutil.Truncate(r.Reason, 500))
 			text := fmt.Sprintf("✅ Confirmed fixed in `%s`.", short(head))
 			if reason != "" {
-				text += " " + reason
+				text = afterPrefix(text, reason)
 			}
 			resolve(i, text)
 		}

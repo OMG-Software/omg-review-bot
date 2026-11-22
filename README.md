@@ -670,7 +670,8 @@ and can still sign in with GitHub:
 
 ```apache
 <Location "/admin-login">
-    Require ip 10.0.0.0/8     # your office or VPN range
+    # Your office or VPN range.
+    Require ip 10.0.0.0/8
 </Location>
 ```
 

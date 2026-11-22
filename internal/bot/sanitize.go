@@ -93,10 +93,25 @@ func sanitizeModelText(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// sanitizeModelLine is sanitizeModelText for one-line text such as a title.
+// sanitizeModelLine is sanitizeModelText for one-line text such as a title,
+// which is posted after other text on the same line. There it can't open a
+// fence, so it gets no fence exemption: "**[P1]** ~~~ ![x](…)" isn't code.
 func sanitizeModelLine(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	return sanitizeModelText(textutil.Truncate(s, maxModelTitle))
+	s = markerRE.ReplaceAllStringFunc(s, func(m string) string { return m[:len(m)-1] + zwsp + ":" })
+	return cleanLine(textutil.Truncate(s, maxModelTitle))
+}
+
+// afterPrefix joins sanitized model text to the bot's own prefix. Text that
+// opens with a fence keeps it on a line of its own: after the prefix it would
+// no longer be a fence, and the lines it was exempting would render as
+// markdown.
+func afterPrefix(prefix, text string) string {
+	first, _, _ := strings.Cut(text, "\n")
+	if m := fenceOpenRE.FindStringSubmatch(first); m != nil && !(m[1][0] == '`' && strings.Contains(m[2], "`")) {
+		return prefix + "\n\n" + text
+	}
+	return prefix + " " + text
 }
 
 // cleanLine neutralizes one line of markdown outside fenced code, leaving

