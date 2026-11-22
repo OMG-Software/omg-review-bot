@@ -1,8 +1,10 @@
 package bot
 
 import (
+	"database/sql"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -81,6 +83,36 @@ func TestQueuedNoticeClosedWithoutPRRow(t *testing.T) {
 
 	e.b.handleReview(e.ctx, j99)
 	if got := e.gh.edited[9001]; !strings.Contains(got, "**Review skipped**") || !strings.Contains(got, "couldn't read") {
+		t.Errorf("notice = %q, want it closed", got)
+	}
+}
+
+// A policy read error keeps a queued comment open only for a review that will
+// run again: one for a PR that has closed meanwhile is closed.
+func TestQueuedNoticeClosedDespitePolicyError(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(*settings.Settings) {})
+	e.b.pollOnce(e.ctx)
+	waitQueued(e.b)
+	pr, err := e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil {
+		t.Fatalf("PR not tracked: %v", err)
+	}
+	pr.Open = false
+	if err := e.st.SavePR(pr); err != nil {
+		t.Fatal(err)
+	}
+	// The policy can't be read for now: its table is out of the way.
+	db, err := sql.Open("sqlite", filepath.Join(e.b.dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`ALTER TABLE orgs RENAME TO orgs_away`); err != nil {
+		t.Fatal(err)
+	}
+
+	drain(e.ctx, e.b)
+	if got := e.gh.edited[9001]; !strings.Contains(got, "**Review skipped**") || !strings.Contains(got, "closed before the review started") {
 		t.Errorf("notice = %q, want it closed", got)
 	}
 }
