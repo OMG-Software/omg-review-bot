@@ -229,7 +229,7 @@ table**. The administrator's dashboard shows the same totals for every org.
 **Review settings** page. From then on it has its own: wait after push, comment, approval and
 request-changes levels, comment cap, most reviews per PR, drafts, skip labels, guideline and
 ignore files, and replies. **Use instance defaults instead** removes them. The model, the skill and the review queue stay shared, so every
-org's reviews take turns on the same GPU.
+org's reviews take turns on the same model, two at a time.
 
 ### Adding more organizations
 
@@ -412,7 +412,8 @@ event checks it for replies, so polling only catches anything missed.
 **Reviewing.**
 
 1. When a PR's head commit changes, the PR becomes `pending`. After the *wait after push*
-   delay, it's queued. Reviews run one at a time, so a single GPU never gets two requests at once.
+   delay, it's queued. Up to two jobs (reviews or replies) run at once, each on a different PR, so
+   the model never gets more than two requests at a time. A PR's own jobs run one after another.
 2. Files that are ignored, deleted or binary are skipped. Each remaining diff line is labelled
    with its new-file line number, so the model doesn't have to work out line numbers inside diff
    hunks. Large diffs are split into parts that fit the context, and the parts' summaries are

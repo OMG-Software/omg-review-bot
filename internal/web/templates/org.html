@@ -7,7 +7,7 @@
 {{if not .D.Enabled}}<div class="flash warn">No repositories are being watched. {{if .CanManage}}Turn some on under <a href="{{orgPath .Org.Login}}/repos">Repositories</a>.{{else}}Ask an owner to turn some on.{{end}}</div>{{end}}
 
 {{with .Status}}
-<p class="muted">Bot status: {{if .Current}}working on {{.Current}}{{else}}idle{{end}} · {{.QueueLen}} queued{{if .WebhooksActive}} · receiving webhooks{{end}}.
+<p class="muted">Bot status: {{range $i, $w := .Working}}{{if $i}} and {{else}}working on {{end}}{{$w.What}}{{else}}idle{{end}} · {{.QueueLen}} queued{{if .WebhooksActive}} · receiving webhooks{{end}}.
   {{$.D.Enabled}} of {{$.D.Repos}} repositories watched · review settings: {{if $.D.CustomPolicy}}this organization's own{{else}}instance defaults{{end}}.</p>
 {{end}}
 

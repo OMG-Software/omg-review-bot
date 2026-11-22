@@ -144,7 +144,7 @@ func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, cl *github
 			}
 			continue
 		}
-		b.setCurrent(pr, "Replying to @%s on %s#%d", last.User.Login, pr.Repo, pr.Number)
+		b.setCurrent(ctx, pr, "Replying to @%s on %s#%d", last.User.Login, pr.Repo, pr.Number)
 		text, resolved, err := b.threadReply(ctx, st, cl, pr, root, list, login, last)
 		if err != nil {
 			return err
@@ -259,7 +259,7 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, cl *githu
 			_ = b.store.MarkHandled(c.ID, "mention-skipped", pr.Repo, pr.Number, 0)
 			continue
 		}
-		b.setCurrent(pr, "Answering @%s on %s#%d", c.User.Login, pr.Repo, pr.Number)
+		b.setCurrent(ctx, pr, "Answering @%s on %s#%d", c.User.Login, pr.Repo, pr.Number)
 		text, err := b.mentionReply(ctx, st, cl, pr, ics[:i+1], login)
 		if err != nil {
 			return err
