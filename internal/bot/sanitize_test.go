@@ -58,6 +58,15 @@ func TestSanitizeModelText(t *testing.T) {
 			"Fix:\n````go\nx := 1", "Fix:\n````go\nx := 1\n````"},
 		"unclosed tilde fence closed": {
 			"~~~\n<x>", "~~~\n<x>\n~~~"},
+		"suggestion kept exactly": {
+			"```suggestion\nre := regexp.MustCompile(`<b>@x`)\n```",
+			"```suggestion\nre := regexp.MustCompile(`<b>@x`)\n```"},
+		"suggestion with a marker shown as plain code": {
+			"```suggestion\nm := \"prbot:x\"\n```", "```\nm := \"prbot" + z + ":x\"\n```"},
+		"suggestion with a bare command shown as plain code": {
+			"````Suggestion\n/approve\n````\nafter", "````\n" + z + "/approve\n````\nafter"},
+		"unclosed suggestion shown as plain code": {
+			"```suggestion\nx := 1", "```\nx := 1\n```"},
 		"indented fence treated as prose": {
 			"- item\n  ```\n<img src=x>\n  ```",
 			"- item\n  ```\n<" + z + "img src=x>\n  ```"},

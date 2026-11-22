@@ -32,9 +32,11 @@ import (
 // markdown blocks as GitHub does, and any mismatch would leave live markdown
 // unescaped. The cost is a hidden character in inline code that someone copies.
 //
-// Fenced code blocks are left alone (apart from "prbot:" and bare command
-// lines), so suggested fixes keep their code exactly. A fence is only trusted
-// where GitHub is sure to see one:
+// Fenced code blocks are left alone apart from "prbot:" and bare command
+// lines, which are rare in real code. A suggested change ("```suggestion")
+// that needed either is posted as plain code, so a reviewer can't commit the
+// hidden character with "Apply suggestion". A fence is only trusted where
+// GitHub is sure to see one:
 //
 //   - It opens in column 0. An indented one may belong to a list item or quote
 //     that ends before the fence closes, and the lines after that end render
@@ -69,34 +71,55 @@ func sanitizeModelText(s string) string {
 	// Every line ending CommonMark knows, so these lines are GitHub's lines:
 	// a lone "\r" ends one too.
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
-	s = breakMarkers(s)
-	s = textutil.Truncate(strings.TrimSpace(s), maxModelBody)
+	lines := strings.Split(textutil.Truncate(strings.TrimSpace(s), maxModelBody), "\n")
 
-	lines := strings.Split(s, "\n")
-	var fenceChar byte
-	fenceLen := 0 // > 0 inside a fenced code block
-	for i, l := range lines {
-		if fenceLen > 0 {
-			if m := fenceEndRE.FindStringSubmatch(l); m != nil && m[1][0] == fenceChar && len(m[1]) >= fenceLen {
-				fenceLen = 0
-				continue
-			}
-			lines[i] = codeCmdRE.ReplaceAllString(l, "${1}"+zwsp+"/${2}${3}")
+	out := make([]string, 0, len(lines)+1)
+	for i := 0; i < len(lines); i++ {
+		if !opensFence(lines[i]) {
+			out = append(out, cleanLine(breakMarkers(lines[i])))
 			continue
 		}
-		if opensFence(l) {
-			m := fenceOpenRE.FindStringSubmatch(l)
-			fenceChar, fenceLen = m[1][0], len(m[1])
-			continue
+		open := fenceOpenRE.FindStringSubmatch(lines[i])
+		end := i + 1
+		for end < len(lines) && !closesFence(lines[end], open[1]) {
+			end++
 		}
-		lines[i] = cleanLine(l)
+		code, changed := make([]string, 0, end-i-1), false
+		for _, l := range lines[i+1 : end] {
+			c := codeCmdRE.ReplaceAllString(breakMarkers(l), "${1}"+zwsp+"/${2}${3}")
+			code, changed = append(code, c), changed || c != l
+		}
+		opener := breakMarkers(lines[i])
+		// A suggestion is applied to the code as it's posted, hidden
+		// characters and all, so one that had to change, or that the length
+		// cap cut short, is shown as plain code instead.
+		if isSuggestion(open[2]) && (changed || end == len(lines)) {
+			opener = open[1]
+		}
+		out = append(append(out, opener), code...)
+		if end < len(lines) {
+			out = append(out, lines[end])
+		} else {
+			// Left open (the model forgot, or the cap cut it off): close it, or
+			// everything the bot appends, its markers included, renders as code.
+			out = append(out, open[1])
+		}
+		i = end
 	}
-	if fenceLen > 0 {
-		// Left open (the model forgot, or truncation cut it off): close it, or
-		// everything the bot appends, its markers included, renders as code.
-		lines = append(lines, strings.Repeat(string(fenceChar), fenceLen))
-	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
+}
+
+// closesFence reports whether a line closes the fence opened by fence ("```", "~~~~"…).
+func closesFence(l, fence string) bool {
+	m := fenceEndRE.FindStringSubmatch(l)
+	return m != nil && m[1][0] == fence[0] && len(m[1]) >= len(fence)
+}
+
+// isSuggestion reports whether a fence's info string makes it a GitHub
+// suggested change, which a reviewer can commit with one click.
+func isSuggestion(info string) bool {
+	f := strings.Fields(info)
+	return len(f) > 0 && strings.EqualFold(f[0], "suggestion")
 }
 
 // sanitizeModelLine is sanitizeModelText for one-line text such as a title,

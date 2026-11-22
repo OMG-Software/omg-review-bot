@@ -742,11 +742,13 @@ Notes:
 - Everything the model writes (findings, summaries, thread replies, `@<app-name>` answers and
   fix confirmations) is made inert before the bot posts it under its own name. Raw HTML is
   escaped and Markdown images become plain links, so nothing loads (or leaks data in its URL)
-  just by viewing the PR. `@mentions` are put in code spans, so the bot can't be made to notify
-  people or command other bots, and lines starting with a slash command (`/approve`, `/merge`)
-  are escaped for chat-ops bots that trust its account. Fake copies of the bot's own hidden
-  markers are broken up, so they can't change what it thinks it posted. Code blocks are left as
-  they are, so suggested fixes keep their code exactly.
+  just by viewing the PR. `@mentions` are broken, so the bot can't be made to notify people or
+  command other bots, and so are lines starting with a slash command (`/approve`, `/merge`), for
+  chat-ops bots that trust its account. Fake copies of the bot's own hidden markers are broken
+  up, so they can't change what it thinks it posted. Each is broken with an invisible zero-width
+  space. Code blocks are left as they are, apart from those markers and lines that are a bare
+  slash command; a suggested change that contains either is posted as plain code, so applying
+  it can never commit the invisible character.
 - Requests carrying the GitHub token or the model API key go only to the configured host: a
   redirect elsewhere is refused, as is a GitHub pagination link to another host. The model
   **Base URL** must be `http://` or `https://`. Repository files are only read by paths without
