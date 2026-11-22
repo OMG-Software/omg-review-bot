@@ -86,15 +86,15 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		// A review postponed by a policy error is queued again and edits the
 		// same comment, and one already under way owns it. Every other way of
 		// ending here is final for this job, so the comment says so.
-		postponed := policyErr && pr.Open && allowedRepo(st, pr.Repo) &&
-			((j.force && pr.AccountID == j.account) || // retryForced queues it again
-				(!j.force && pr.Status == "pending")) // enqueueDue does, once the policy reads
 		switch {
 		case pr == nil:
 			// Unreadable or no longer tracked. If it's due again once it can be
 			// read, the new queued comment reuses this one.
 			b.closeQueued(qn, "The review couldn't start: the bot couldn't read this pull request's record.")
-		case pr.Status == "reviewing" || postponed:
+		case pr.Status == "reviewing":
+		case policyErr && pr.Open && allowedRepo(st, pr.Repo) &&
+			((j.force && pr.AccountID == j.account) || // retryForced queues it again
+				(!j.force && pr.Status == "pending")): // enqueueDue does, once the policy reads
 		default:
 			b.closeQueued(qn, notReviewedReason(st, pr, j))
 		}
