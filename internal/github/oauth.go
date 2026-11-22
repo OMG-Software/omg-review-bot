@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/OMG-Software/omg-review-bot/internal/version"
 )
 
 // WebBaseURL derives the GitHub website from the REST API base URL:
@@ -47,7 +49,7 @@ func ExchangeCode(ctx context.Context, webBase, clientID, clientSecret, code, re
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "llm-pr-bot")
+	req.Header.Set("User-Agent", version.UserAgent())
 	resp, err := oauthClient.Do(req)
 	if err != nil {
 		return "", err
