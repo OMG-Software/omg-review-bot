@@ -479,23 +479,33 @@ func TestReviewCompletionReconcilesHeadWithWebhook(t *testing.T) {
 	}
 }
 
-func TestReviewRetriesWhenFetchedHeadIsStale(t *testing.T) {
+func TestReviewRetriesWhenFetchedHeadIsInvalid(t *testing.T) {
 	const clean = `{"summary":"Looks fine.","comments":[]}`
-	e := newReviewEnv(t, clean, func(*settings.Settings) {})
-	e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
-	e.b.pollOnce(e.ctx)
-	e.push("aaa111", e.gh.patch, e.gh.content, clean, "2026-01-01T00:00:00Z")
-	drain(e.ctx, e.b)
-	pr, err := e.st.GetPR("acme/web", 7)
-	if err != nil || pr == nil || pr.HeadSHA != "bbb222" || pr.ReviewedSHA != "" || pr.Status != "pending" ||
-		pr.AttemptSHA != "bbb222" || pr.Attempts != 1 || pr.NotBefore <= time.Now().Unix() ||
-		!strings.Contains(pr.LastError, "fetched PR head aaa111 is older than the tracked head bbb222") {
-		t.Fatalf("expected a delayed retry of bbb222, got %+v (%v)", pr, err)
+	cases := []struct {
+		name, head, updatedAt, wantError string
+	}{
+		{"stale head", "aaa111", "2026-01-01T00:00:00Z", "fetched PR head aaa111 is older than the tracked head bbb222"},
+		{"missing head", "", "2026-01-01T00:20:00Z", "fetched PR has no head SHA"},
 	}
-	e.gh.mu.Lock()
-	defer e.gh.mu.Unlock()
-	if len(e.gh.reviews) != 0 {
-		t.Fatalf("expected no review for the stale fetch, got %+v", e.gh.reviews)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newReviewEnv(t, clean, func(*settings.Settings) {})
+			e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+			e.b.pollOnce(e.ctx)
+			e.push(tc.head, e.gh.patch, e.gh.content, clean, tc.updatedAt)
+			drain(e.ctx, e.b)
+			pr, err := e.st.GetPR("acme/web", 7)
+			if err != nil || pr == nil || pr.HeadSHA != "bbb222" || pr.ReviewedSHA != "" || pr.Status != "pending" ||
+				pr.AttemptSHA != "bbb222" || pr.Attempts != 1 || pr.NotBefore <= time.Now().Unix() ||
+				!strings.Contains(pr.LastError, tc.wantError) {
+				t.Fatalf("expected a delayed retry of bbb222 with error %q, got %+v (%v)", tc.wantError, pr, err)
+			}
+			e.gh.mu.Lock()
+			defer e.gh.mu.Unlock()
+			if len(e.gh.reviews) != 0 {
+				t.Fatalf("expected no review for an invalid fetched head, got %+v", e.gh.reviews)
+			}
+		})
 	}
 }
 
