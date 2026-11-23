@@ -237,6 +237,18 @@ func (f *failover) Label() string {
 	return strings.Join(f.used, " → ")
 }
 
+// inUse returns the index of the model lc is using: the failover's current
+// one, or 0 for a client of one model.
+func inUse(lc llm.Client) int {
+	f, ok := lc.(*failover)
+	if !ok {
+		return 0
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cur
+}
+
 // skip gives up on the model in use after its answers couldn't be used
 // (they weren't the JSON asked for, say), and reports whether the next one
 // takes over.

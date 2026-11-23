@@ -398,3 +398,48 @@ func TestJobClientKeptForTheJob(t *testing.T) {
 		t.Errorf("round-robin turns taken: %d (%s, %s), want 1", b.roundRobin[0], x.Label(), y.Label())
 	}
 }
+
+// TestBadJSONRetriesPerModel: A answers in prose, then fails outright on
+// the retry, so B takes over within that call. B's first answer is prose
+// too; it still gets its own retry, and its second answer is used.
+func TestBadJSONRetriesPerModel(t *testing.T) {
+	const valid = `{"summary":"Looks fine.","comments":[]}`
+	serve := func(answers ...string) (*httptest.Server, *atomic.Int32) {
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := int(calls.Add(1))
+			if n > len(answers) || answers[n-1] == "" {
+				http.Error(w, "down", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []any{map[string]any{"message": map[string]any{"content": answers[n-1]}, "finish_reason": "stop"}},
+			})
+		}))
+		t.Cleanup(srv.Close)
+		return srv, &calls
+	}
+	aSrv, aCalls := serve("Here is my review, in prose.")
+	bSrv, bCalls := serve("Also prose.", valid)
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := settings.Defaults()
+	cfg.Models = settings.Models{Strategy: settings.StrategyFailover,
+		Configs: []settings.LLM{modelAt("a", aSrv.URL), modelAt("b", bSrv.URL)}}
+	cfg.Normalize()
+	lc, err := b.chatClient(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out modelOutput
+	if _, _, err := b.chatJSON(t.Context(), lc, cfg, reviewSchema, "code_review", "sys", "user", &out); err != nil {
+		t.Fatalf("chatJSON: %v (a calls %d, b calls %d)", err, aCalls.Load(), bCalls.Load())
+	}
+	if out.Summary != "Looks fine." || bCalls.Load() != 2 || lc.Label() != "a → b" {
+		t.Errorf("summary %q, b calls %d, label %q", out.Summary, bCalls.Load(), lc.Label())
+	}
+}

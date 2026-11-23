@@ -802,6 +802,7 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 	msgs := []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}}
 	var total llm.Response
 	var lastErr error
+	at := inUse(lc)
 	for attempt := 1; attempt <= 2; attempt++ {
 		resp, err := lc.Chat(ctx, llm.Request{
 			Messages: msgs, Schema: schema, SchemaName: schemaName,
@@ -809,6 +810,12 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 		})
 		if err != nil {
 			return total, err
+		}
+		if now := inUse(lc); now != at {
+			// The model in use failed and the next answered: that one gets
+			// its own tries, starting from this answer.
+			at, attempt, msgs = now, 1, msgs[:2]
+			rawAll.WriteString("\n----- next model -----\n")
 		}
 		total.PromptTokens += resp.PromptTokens
 		total.CompletionTokens += resp.CompletionTokens
