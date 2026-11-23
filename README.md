@@ -264,7 +264,8 @@ totals and most active repositories for every org.
 - **Models:** how many reviews were sent to each configured model and how many it answered, its
   replies, calls, failures, tokens and average answer time. With failover, a review is sent to a
   model that fails and then to the next; with collate, every review goes to every model. Members
-  see the instance's models by name only; the org's own models also show the model.
+  see the instance's models only as numbered placeholders ("Instance model 1"), never their names;
+  the org's own models show their name and model.
 
 Administrators get the same page for every org together under **Metrics**, plus each org's
 findings by level and a table of orgs, and the server and owner of every model. Each model's card

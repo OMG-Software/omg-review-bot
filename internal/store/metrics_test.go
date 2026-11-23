@@ -60,6 +60,9 @@ func TestModelUsage(t *testing.T) {
 	call(ModelCall{AccountID: 1, Kind: CallReply, ConfigID: "m1", Label: "Fast", Model: "small", OK: true})
 	call(ModelCall{AccountID: 2, ReviewID: 3, Kind: CallReview, ModelSet: 2, ConfigID: "m1", Label: "Own", Model: "theirs", OK: true})
 	call(ModelCall{AccountID: 1, ReviewID: 9, Kind: CallReview, ConfigID: "m1", Label: "Fast", Model: "small", OK: true, TS: now - 86400*40}) // before the period
+	// A review whose record couldn't be created has no ID: its call counts
+	// as a call, not as a review.
+	call(ModelCall{AccountID: 1, Kind: CallReview, ConfigID: "m2", Label: "Big (renamed)", Model: "large", OK: true, PromptTokens: 0, DurationMS: 400})
 
 	since := now - 86400*30
 	acme, err := st.ModelUsageSince(1, since)
@@ -70,7 +73,7 @@ func TestModelUsage(t *testing.T) {
 		t.Fatalf("acme's models = %+v, want m2 and m1", acme)
 	}
 	big, fast := acme[0], acme[1]
-	if big.ConfigID != "m2" || big.Label != "Big (renamed)" || big.Reviews != 2 || big.Answered != 2 || big.Calls != 3 ||
+	if big.ConfigID != "m2" || big.Label != "Big (renamed)" || big.Reviews != 2 || big.Answered != 2 || big.Calls != 4 ||
 		big.Failed != 0 || big.PromptTokens != 200 || big.CompletionTokens != 20 || big.AvgMS != 400 {
 		t.Errorf("m2 = %+v", big)
 	}

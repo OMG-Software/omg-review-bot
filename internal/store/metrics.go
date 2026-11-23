@@ -95,8 +95,8 @@ func (s *Store) ModelUsageSince(accountID, since int64) ([]ModelUsage, error) {
 	// label and provider come from the model's newest call (SQLite takes bare
 	// columns from the row MAX picks).
 	rows, err := s.db.Query(`SELECT c.model_set, COALESCE(o.login,''), c.config_id, c.model, MAX(c.id), c.label, c.provider,
-  COUNT(DISTINCT CASE WHEN c.kind='review' THEN c.review_id END),
-  COUNT(DISTINCT CASE WHEN c.kind='review' AND c.ok=1 THEN c.review_id END),
+  COUNT(DISTINCT CASE WHEN c.kind='review' AND c.review_id<>0 THEN c.review_id END),
+  COUNT(DISTINCT CASE WHEN c.kind='review' AND c.review_id<>0 AND c.ok=1 THEN c.review_id END),
   COALESCE(SUM(c.kind='reply' AND c.ok=1),0), COUNT(*), COALESCE(SUM(c.ok=0),0),
   COALESCE(SUM(c.prompt_tokens),0), COALESCE(SUM(c.completion_tokens),0),
   COALESCE(AVG(CASE WHEN c.ok=1 THEN c.duration_ms END),0)
@@ -136,8 +136,8 @@ type ConfigUsage struct {
 // model name joined by a NUL (see ConfigKey).
 func (s *Store) ConfigUsageSince(set, since int64) (map[string]ConfigUsage, error) {
 	rows, err := s.db.Query(`SELECT config_id, model,
-  COUNT(DISTINCT CASE WHEN kind='review' THEN review_id END),
-  COUNT(DISTINCT CASE WHEN kind='review' AND ok=1 THEN review_id END),
+  COUNT(DISTINCT CASE WHEN kind='review' AND review_id<>0 THEN review_id END),
+  COUNT(DISTINCT CASE WHEN kind='review' AND review_id<>0 AND ok=1 THEN review_id END),
   COALESCE(SUM(kind='reply' AND ok=1),0), COALESCE(SUM(ok=0),0)
 FROM model_calls WHERE model_set=? AND ts>=? GROUP BY config_id, model`, set, since)
 	if err != nil {
