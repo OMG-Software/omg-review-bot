@@ -101,7 +101,9 @@ func (b *Bot) webhookPull(st settings.Settings, ev *github.WebhookEvent) string 
 		b.logf("info", r.FullName, ev.PullRequest.Number, "new pull request (webhook)")
 	}
 	// Any change can make a review due now (a push, a new PR, a draft marked
-	// ready, a skip label removed); the run loop decides, and it's cheap.
+	// ready, a skip label removed); the run loop decides, and it's cheap. It
+	// starts nothing itself: enqueueDue also skips an organization whose
+	// models aren't set up (see modelsUnset).
 	b.kickDue()
 	if u.stale {
 		return fmt.Sprintf("%s#%d %s: ignored, older than the state already recorded", r.FullName, ev.PullRequest.Number, ev.Action)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/diff"
+	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
@@ -289,6 +290,16 @@ func TestOwnModelsWithoutInstanceModels(t *testing.T) {
 	drain(e.ctx, e.b)
 	if len(e.gh.reviews) != 0 || e.lm.count() != 0 {
 		t.Fatalf("reviewed on unset instance models: reviews %d, calls %d", len(e.gh.reviews), e.lm.count())
+	}
+	// A push's webhook only wakes the run loop, whose enqueueDue skips it too.
+	e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+	ev := &github.WebhookEvent{Action: "synchronize", Repository: &github.Repo{ID: 100, FullName: "acme/web"},
+		PullRequest: &github.PullRequest{Number: 7, State: "open", UpdatedAt: "2026-01-01T00:10:00Z", Head: github.Ref{SHA: "bbb222"}}}
+	e.b.webhookPull(e.b.Settings(), ev)
+	e.b.enqueueDue(e.b.Settings())
+	drain(e.ctx, e.b)
+	if pr, _ := e.st.GetPR("acme/web", 7); len(e.gh.reviews) != 0 || e.lm.count() != 0 || pr == nil || pr.LastError != "" {
+		t.Fatalf("a webhook started a review on unset instance models: reviews %d, calls %d, PR %+v", len(e.gh.reviews), e.lm.count(), pr)
 	}
 	own := &fakeLLM{review: clean}
 	ownSrv := httptest.NewServer(own.handler(t))
