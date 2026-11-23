@@ -3,11 +3,10 @@ package bot
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
@@ -164,14 +163,16 @@ func (b *Bot) holdForDailyLimit(pr *store.PR, q DailyQuota) {
 	}
 }
 
-var dailyMarkerRE = regexp.MustCompile(`<!-- prbot:daily-limit at=(\d+) -->`)
-
-func dailyMarker(at time.Time) string {
-	return fmt.Sprintf("<!-- prbot:daily-limit at=%d -->", at.Unix())
+// dailyMarker names one hold of pr: when it was held (HeldAt, kept while the
+// PR waits, so held again after losing its place it's the same hold) and the
+// commit held. A hold after the PR was reviewed, or of a newer push, is a new
+// one and gets a comment of its own.
+func dailyMarker(pr *store.PR) string {
+	return fmt.Sprintf("<!-- prbot:daily-limit held=%d sha=%s -->", pr.HeldAt, pr.HeadSHA)
 }
 
 // dailyBody is the PR comment posted when the daily review limit stops a review.
-func dailyBody(q DailyQuota, now time.Time) string {
+func dailyBody(q DailyQuota, pr *store.PR) string {
 	when := "once the organization's reviews from the last 24 hours start to age out"
 	if !q.ResetAt.IsZero() {
 		when = "from about " + q.ResetAt.UTC().Format("2006-01-02 15:04 UTC")
@@ -179,7 +180,7 @@ func dailyBody(q DailyQuota, now time.Time) string {
 	return fmt.Sprintf("🛑 **Daily review limit reached.** This organization has had %d of its %d reviews for the last 24 hours%s, "+
 		"so I won't review this pull request, or further pushes to it, for now. Reviews resume automatically %s. "+
 		"I'll still answer replies in my review threads. The limit is set by the bot's administrator.\n%s",
-		q.Used(), q.Limit, kept(q), when, dailyMarker(now))
+		q.Used(), q.Limit, kept(q), when, dailyMarker(pr))
 }
 
 // prRef names a PR.
@@ -188,9 +189,9 @@ type prRef struct {
 	number int
 }
 
-// announceDailyLimit posts the daily-limit comment on pr, unless the bot
-// posted one there in the last 24 hours. If GitHub fails it, it's tried
-// again later (see retryDailyNotices).
+// announceDailyLimit posts the daily-limit comment for pr's hold, or, if
+// this hold already has one, brings it up to date (the resume time may have
+// moved). If GitHub fails it, it's tried again later (see retryDailyNotices).
 func (b *Bot) announceDailyLimit(ctx context.Context, st settings.Settings, pr *store.PR, q DailyQuota) {
 	ref := prRef{pr.Repo, pr.Number}
 	done := b.postDailyNotice(ctx, st, pr, q)
@@ -254,16 +255,15 @@ func (b *Bot) postDailyNotice(ctx context.Context, st settings.Settings, pr *sto
 		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier daily-limit comment, so none is posted yet: %v", err)
 		return false
 	}
-	now := time.Now()
-	for _, c := range cs {
-		if !strings.EqualFold(c.User.Login, b.BotLogin()) {
-			continue
+	body, marker := dailyBody(q, pr), dailyMarker(pr)
+	var existing *github.IssueComment
+	for i, c := range cs {
+		if strings.EqualFold(c.User.Login, b.BotLogin()) && strings.Contains(c.Body, marker) {
+			existing = &cs[i]
 		}
-		if m := lastMatch(dailyMarkerRE, c.Body); m != nil {
-			if at, err := strconv.ParseInt(m[1], 10, 64); err == nil && now.Sub(time.Unix(at, 0)) < dailyWindow {
-				return true
-			}
-		}
+	}
+	if existing != nil && existing.Body == body {
+		return true
 	}
 	// The lookups above take a while, and a raised limit may have let the PR
 	// through meanwhile: then the comment would be wrong, and would hold back
@@ -273,7 +273,12 @@ func (b *Bot) postDailyNotice(ctx context.Context, st settings.Settings, pr *sto
 		b.logf("info", pr.Repo, pr.Number, "the daily limit let this PR through before its comment was posted; none is")
 		return true
 	}
-	if _, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, dailyBody(q, now)); err != nil {
+	if existing != nil {
+		err = cl.UpdateIssueComment(ctx, pr.Repo, existing.ID, body)
+	} else {
+		_, err = cl.CreateIssueComment(ctx, pr.Repo, pr.Number, body)
+	}
+	if err != nil {
 		b.logf("warn", pr.Repo, pr.Number, "could not post the daily-limit comment; it will be tried again: %v", err)
 		return false
 	}

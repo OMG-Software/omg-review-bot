@@ -2094,11 +2094,14 @@ func TestDailyReviewLimit(t *testing.T) {
 		t.Errorf("a release is still scheduled with nothing held")
 	}
 
-	// 5) At the raised limit again, the next push is held, but the PR was told
-	// within the last 24 hours, so it isn't told again.
+	// 5) At the raised limit again, the next push is held. It's a new hold
+	// (the PR was reviewed since), with its own resume time, so its own comment.
 	push()
-	if len(gh.reviews) != 2 || status() != "daily" || len(notices()) != 1 {
+	if len(gh.reviews) != 2 || status() != "daily" || len(notices()) != 2 {
 		t.Fatalf("at the raised limit: %d reviews, status %q, %d notices", len(gh.reviews), status(), len(notices()))
+	}
+	if ns := notices(); !strings.Contains(ns[1], "2 of its 2 reviews") || !strings.Contains(ns[1], fmt.Sprintf("sha=head%03d", pushes)) {
+		t.Errorf("second hold's notice = %s", ns[1])
 	}
 }
 
@@ -2339,5 +2342,36 @@ func TestDailyNoticeRetried(t *testing.T) {
 	b.retryDailyNotices(b.Settings())
 	if n := notices(); n != 1 {
 		t.Fatalf("notices after a second wake-up = %d, want still 1", n)
+	}
+}
+
+// TestDailyNoticeUpdatedForSameHold: a PR held again in the same hold (it
+// lost its place before being reviewed) gets its comment brought up to date,
+// not a second one.
+func TestDailyNoticeUpdatedForSameHold(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(cfg *settings.Settings) {})
+	gh, st, b, ctx := e.gh, e.st, e.b, e.ctx
+	p := store.PR{Repo: "acme/web", Number: 7, AccountID: 500, InstallationID: 10, Open: true, Status: "daily",
+		HeadSHA: "aaa111", HeldAt: time.Now().Unix() - 60}
+	if err := st.SavePR(&p); err != nil {
+		t.Fatal(err)
+	}
+	first := time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)
+	q := DailyQuota{Limit: 1, DailyUsage: store.DailyUsage{Posted: 1}, ResetAt: first}
+	b.announceDailyLimit(ctx, b.Settings(), &p, q)
+	q.ResetAt = first.Add(5 * time.Hour)
+	b.announceDailyLimit(ctx, b.Settings(), &p, q)
+	b.announceDailyLimit(ctx, b.Settings(), &p, q) // unchanged: no edit
+
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	if len(gh.posted) != 1 {
+		t.Fatalf("comments posted = %d, want 1", len(gh.posted))
+	}
+	if e := gh.edited[9001]; !strings.Contains(e, "2026-01-02 08:04 UTC") || strings.Contains(e, "03:04") {
+		t.Errorf("comment after the resume time moved = %q", e)
+	}
+	if len(gh.editLog) != 1 {
+		t.Errorf("edits = %d, want 1 (none when nothing changed)", len(gh.editLog))
 	}
 }
