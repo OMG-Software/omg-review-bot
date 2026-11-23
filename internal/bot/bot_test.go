@@ -2067,8 +2067,13 @@ func TestDailyReviewLimit(t *testing.T) {
 	if pr, _ := st.GetPR("acme/web", 7); pr.HeldAt != heldAt {
 		t.Errorf("a push moved the hold time from %d to %d", heldAt, pr.HeldAt)
 	}
-	if err := b.ReviewNow("acme/web", 7, 500); err == nil || !strings.Contains(err.Error(), "1 of its 1 reviews") {
+	err := b.ReviewNow("acme/web", 7, 500)
+	if err == nil || !strings.Contains(err.Error(), "1 of its 1 reviews") {
 		t.Fatalf("ReviewNow past the daily limit = %v", err)
+	}
+	// The resume time is about a day away, so it carries its date.
+	if want := b.nextDailyRelease().UTC().Format("2006-01-02 15:04 UTC"); !strings.Contains(err.Error(), "from about "+want) {
+		t.Errorf("ReviewNow refusal = %q, want it to say from about %s", err, want)
 	}
 	drain(ctx, b)
 	if len(gh.reviews) != 1 || status() != "daily" {

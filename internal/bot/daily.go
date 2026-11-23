@@ -196,7 +196,8 @@ func (b *Bot) announceDailyLimit(ctx context.Context, st settings.Settings, pr *
 func dailyLimitError(q DailyQuota) error {
 	msg := fmt.Sprintf("this organization has had %d of its %d reviews for the last 24 hours", q.Used(), q.Limit)
 	if !q.ResetAt.IsZero() {
-		msg += "; the next can start from about " + q.ResetAt.UTC().Format("15:04 UTC")
+		// With the date: the next place can be nearly a day away.
+		msg += "; the next can start from about " + q.ResetAt.UTC().Format("2006-01-02 15:04 UTC")
 	}
 	return fmt.Errorf("%s", msg)
 }
