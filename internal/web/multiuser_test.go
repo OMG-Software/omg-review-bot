@@ -1815,6 +1815,19 @@ func TestDailyLimitAdminOnly(t *testing.T) {
 	if n, _ := s.st.OrgDailyLimit(otherID); n != 100 {
 		t.Errorf("acme's limit leaked into other: %d", n)
 	}
+	// An administrator can cap an organization they don't belong to.
+	if m, _ := s.st.GetMembership(otherID, aliceID); m != nil {
+		t.Fatalf("alice is a member of other: %+v", m)
+	}
+	if _, body, _ := s.get("/orgs/other/settings"); !strings.Contains(body, `action="/orgs/other/daily-limit"`) {
+		t.Error("admin who isn't a member of other gets no daily-limit form there")
+	}
+	if code, _ := s.post("/orgs/other/daily-limit", url.Values{"daily_reviews": {"30"}}); code != http.StatusSeeOther {
+		t.Errorf("admin POST other's daily-limit = %d", code)
+	}
+	if n, _ := s.st.OrgDailyLimit(otherID); n != 30 {
+		t.Errorf("other's limit = %d, want 30", n)
+	}
 	_, body, _ = s.get("/orgs/acme/settings")
 	if !strings.Contains(body, `name="daily_reviews" min="1" max="100000" value="25"`) || !strings.Contains(body, "Use the default (100)") {
 		t.Errorf("admin's settings page has no daily-limit form:\n%s", body)
