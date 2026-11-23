@@ -18,21 +18,22 @@ import (
 // special lists ranges that aren't public unicast and that the netip
 // predicates below don't cover. They're the IANA special-purpose registries'
 // ranges (RFC 6890 and successors), listed to be refused: no connection is
-// ever made to them, hence the NOSONAR on each (Sonar's "hardcoded IP" rule).
+// ever made to them, hence the NOSONAR on each (Sonar's "hardcoded IP" rule;
+// it must start the comment to count).
 var special = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" NOSONAR
-	netip.MustParsePrefix("100.64.0.0/10"),   // carrier-grade NAT (shared address space) NOSONAR
-	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments NOSONAR
-	netip.MustParsePrefix("192.0.2.0/24"),    // documentation NOSONAR
-	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking NOSONAR
-	netip.MustParsePrefix("198.51.100.0/24"), // documentation NOSONAR
-	netip.MustParsePrefix("203.0.113.0/24"),  // documentation NOSONAR
-	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, and broadcast NOSONAR
-	netip.MustParsePrefix("64:ff9b::/96"),    // NAT64: can map to any IPv4 address, private ones included NOSONAR
-	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64 NOSONAR
-	netip.MustParsePrefix("2001:db8::/32"),   // documentation NOSONAR
-	netip.MustParsePrefix("2002::/16"),       // 6to4: embeds an IPv4 address NOSONAR
-	netip.MustParsePrefix("2001::/32"),       // Teredo: embeds an IPv4 address NOSONAR
+	netip.MustParsePrefix("0.0.0.0/8"),       // NOSONAR: "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),   // NOSONAR: carrier-grade NAT (shared address space)
+	netip.MustParsePrefix("192.0.0.0/24"),    // NOSONAR: IETF protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),    // NOSONAR: documentation
+	netip.MustParsePrefix("198.18.0.0/15"),   // NOSONAR: benchmarking
+	netip.MustParsePrefix("198.51.100.0/24"), // NOSONAR: documentation
+	netip.MustParsePrefix("203.0.113.0/24"),  // NOSONAR: documentation
+	netip.MustParsePrefix("240.0.0.0/4"),     // NOSONAR: reserved, and broadcast
+	netip.MustParsePrefix("64:ff9b::/96"),    // NOSONAR: NAT64: can map to any IPv4 address, private ones included
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // NOSONAR: local-use NAT64
+	netip.MustParsePrefix("2001:db8::/32"),   // NOSONAR: documentation
+	netip.MustParsePrefix("2002::/16"),       // NOSONAR: 6to4: embeds an IPv4 address
+	netip.MustParsePrefix("2001::/32"),       // NOSONAR: Teredo: embeds an IPv4 address
 }
 
 // PublicIP reports whether a is a public unicast address.
