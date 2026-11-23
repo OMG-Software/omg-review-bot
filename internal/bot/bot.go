@@ -169,9 +169,12 @@ type Bot struct {
 	orgBusy map[int64]int
 	orgHeld map[int64][]job
 	// slotLimit is how many workers one organization may hold (orgSlots),
-	// kept by the run loop from the settings it reads each pass (a save
-	// wakes it), so a worker taking a job reads it without the database.
+	// kept from the settings so a worker taking a job reads it without the
+	// database. It's refreshed as soon as settings are saved (SettingsSaved)
+	// and on each pass of the run loop; slotMu makes each refresh's read
+	// and store one step, so an older read can't replace a newer one.
 	slotLimit atomic.Int64
+	slotMu    sync.Mutex
 
 	jobs chan job
 	wake chan struct{} // poll GitHub now
@@ -218,7 +221,7 @@ func (b *Bot) Run(ctx context.Context) {
 	pollNow := true
 	for {
 		st := b.Settings()
-		b.setSlotLimit(st)
+		b.refreshSlotLimit()
 		interval := b.pollInterval(st)
 		if pollNow || time.Since(b.lastPollTime()) >= interval {
 			b.pollOnce(ctx)
@@ -547,14 +550,26 @@ func (b *Bot) orgSlots() int {
 	if n := b.slotLimit.Load(); n > 0 {
 		return int(n)
 	}
-	return b.setSlotLimit(b.Settings())
+	return b.refreshSlotLimit()
 }
 
-// setSlotLimit keeps st's slot share for orgSlots, and returns it.
-func (b *Bot) setSlotLimit(st settings.Settings) int {
-	n := st.Limits.OrgSlots(workers)
+// refreshSlotLimit reads the slot share from the stored settings and keeps
+// it for orgSlots, returning it.
+func (b *Bot) refreshSlotLimit() int {
+	b.slotMu.Lock()
+	defer b.slotMu.Unlock()
+	n := b.Settings().Limits.OrgSlots(workers)
 	b.slotLimit.Store(int64(n))
 	return n
+}
+
+// SettingsSaved is called once the settings are saved. What the bot keeps
+// of them in memory (the slot share) takes effect at once, for the next job
+// a worker takes, even while the run loop is busy polling; then the loop is
+// woken for the rest.
+func (b *Bot) SettingsSaved() {
+	b.refreshSlotLimit()
+	b.Wake()
 }
 
 // claimPR makes the calling worker the one running j's PR's jobs, and reports

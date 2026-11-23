@@ -581,8 +581,9 @@ func TestEachModelItsOwnOutputCap(t *testing.T) {
 	}
 }
 
-// TestSlotLimitFollowsSettings: the share a worker admits a job under is
-// the one the run loop last read, and changes when the settings do.
+// TestSlotLimitFollowsSettings: a lowered share applies to the next job a
+// worker takes as soon as the settings are saved, with the run loop busy
+// elsewhere (here, not running at all).
 func TestSlotLimitFollowsSettings(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -590,12 +591,27 @@ func TestSlotLimitFollowsSettings(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	cfg := settings.Defaults()
-	for _, c := range []struct{ percent, want int }{{100, workers}, {25, 1}, {50, workers / 2}} {
-		cfg.Limits.OrgSlotPercent = c.percent
-		b.setSlotLimit(cfg)
-		if got := b.orgSlots(); got != c.want {
-			t.Errorf("at %d%%: orgSlots = %d, want %d", c.percent, got, c.want)
+	save := func(percent int) {
+		cfg := b.Settings()
+		cfg.Limits.OrgSlotPercent = percent
+		if err := settings.Save(st, cfg); err != nil {
+			t.Fatal(err)
 		}
+		b.SettingsSaved()
+	}
+	save(100)
+	if got := b.orgSlots(); got != workers {
+		t.Fatalf("at 100%%: orgSlots = %d, want %d", got, workers)
+	}
+	j := func(n int) job { return job{kind: jobReview, repo: "acme/web", number: n, org: 500} }
+	if !b.claimPR(j(1), b.orgSlots()) {
+		t.Fatal("first job held")
+	}
+	save(25) // one place per organization from now on
+	if got := b.orgSlots(); got != 1 {
+		t.Fatalf("after lowering to 25%%: orgSlots = %d, want 1", got)
+	}
+	if b.claimPR(j(2), b.orgSlots()) {
+		t.Error("a second job of the organization was admitted under the old share")
 	}
 }

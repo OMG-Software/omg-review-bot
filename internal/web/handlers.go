@@ -512,7 +512,7 @@ func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, "/settings", err)
 		return
 	}
-	s.bot.Wake()
+	s.bot.SettingsSaved()
 	redirectMsg(w, r, "/settings", "Settings saved.")
 }
 
