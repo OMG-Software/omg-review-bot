@@ -66,6 +66,9 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	qn := b.takeQueued(ctx, j)
 	b.prMu.Lock()
 	pr, err := b.store.GetPR(j.repo, j.number)
+	manualRetry := pr != nil && pr.Status == "pending" && pr.ForceRetry
+	force := j.force || manualRetry
+	waiting := !j.force && manualRetry && pr.NotBefore > time.Now().Unix()
 	var st settings.Settings
 	policyErr := false
 	if err == nil && pr != nil {
@@ -80,9 +83,9 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 			}
 		}
 	}
-	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" || !allowedRepo(st, pr.Repo) ||
+	if err != nil || pr == nil || !pr.Open || pr.Status == "reviewing" || waiting || !allowedRepo(st, pr.Repo) ||
 		(j.force && pr.AccountID != j.account) || // the name passed to another account since it was asked for
-		(!j.force && (pr.Status != "pending" || !st.Review.Enabled)) {
+		(!force && (pr.Status != "pending" || !st.Review.Enabled)) {
 		b.prMu.Unlock()
 		// A review postponed by a policy error is queued again and edits the
 		// same comment, and one already under way owns it. Every other way of
@@ -92,7 +95,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 			// Unreadable or no longer tracked. If it's due again once it can be
 			// read, the new queued comment reuses this one.
 			b.closeQueued(qn, "The review couldn't start: the bot couldn't read this pull request's record.")
-		case pr.Status == "reviewing":
+		case pr.Status == "reviewing" || waiting:
 		case policyErr && pr.Open && allowedRepo(st, pr.Repo) &&
 			((j.force && pr.AccountID == j.account) || // retryForced queues it again
 				(!j.force && pr.Status == "pending")): // enqueueDue does, once the policy reads
@@ -101,7 +104,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		}
 		return
 	}
-	if !j.force { // a review asked for by hand goes past the limit
+	if !force { // a review asked for by hand goes past the limit
 		if rounds, over := b.overRoundLimit(pr, st); over {
 			pr.Status = "limit"
 			_ = b.store.SavePR(pr)
@@ -118,7 +121,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	b.prMu.Unlock()
 
 	b.setCurrent(ctx, pr, "Reviewing %s#%d", pr.Repo, pr.Number)
-	fetchedPull, err := b.reviewPR(ctx, st, pr, qn, j.force)
+	fetchedPull, err := b.reviewPR(ctx, st, pr, qn, force)
 	if qn != nil && !qn.claimed {
 		// The review stopped before it could take the comment over (GitHub
 		// unreachable, say, or the PR closed); the status below says whether
@@ -149,6 +152,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		return
 	}
 	cur.Status = "" // leave "reviewing" so recompute can decide
+	cur.ForceRetry = false
 	switch {
 	case errors.Is(err, errSkip):
 		b.recompute(cur, st)
@@ -160,6 +164,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		cur.Attempts++
 		if cur.Attempts < maxAttempts {
 			cur.Status = "pending"
+			cur.ForceRetry = force && cur.Open
 			cur.NotBefore = time.Now().Add(time.Duration(cur.Attempts*cur.Attempts) * 2 * time.Minute).Unix()
 			b.logf("warn", cur.Repo, cur.Number, "review failed (attempt %d/%d, will retry): %v", cur.Attempts, maxAttempts, err)
 		} else {

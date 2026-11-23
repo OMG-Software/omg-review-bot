@@ -434,6 +434,62 @@ func TestAutomaticReviewUsesFreshHeadOnce(t *testing.T) {
 	}
 }
 
+func TestManualReviewRetainsForceAfterFailure(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(*settings.Settings) {})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	pr, err := e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.ReviewedSHA != "aaa111" {
+		t.Fatalf("expected an already-reviewed commit, got %+v (%v)", pr, err)
+	}
+
+	e.push("", e.gh.patch, e.gh.content, clean, "2026-01-01T00:00:00Z")
+	if err := e.b.ReviewNow(pr.Repo, pr.Number, pr.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	drain(e.ctx, e.b)
+	pr, err = e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.Status != "pending" || !pr.ForceRetry || pr.Attempts != 1 || pr.NotBefore <= time.Now().Unix() {
+		t.Fatalf("expected a manual review retry after backoff, got %+v (%v)", pr, err)
+	}
+
+	e.push("aaa111", e.gh.patch, e.gh.content, clean, "2026-01-01T00:00:00Z")
+	e.cfg.Review.Enabled = false
+	if err := settings.Save(e.st, e.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.b.SetSkip(pr.Repo, pr.Number, pr.AccountID, true); err != nil {
+		t.Fatal(err)
+	}
+	pr, err = e.st.GetPR(pr.Repo, pr.Number)
+	if err != nil || pr == nil || pr.Status != "pending" || !pr.Skip || !pr.ForceRetry {
+		t.Fatalf("expected manual retry to survive status recomputation, got %+v (%v)", pr, err)
+	}
+	if due := e.st.NextDue(time.Now().Unix()); due != pr.NotBefore {
+		t.Fatalf("next retry due at %d, want %d", due, pr.NotBefore)
+	}
+	e.b.enqueueDue(e.cfg)
+	if len(e.b.jobs) != 0 {
+		t.Fatal("manual retry was queued before its backoff expired")
+	}
+	pr.NotBefore = 0
+	if err := e.st.SavePR(pr); err != nil {
+		t.Fatal(err)
+	}
+	e.b.enqueueDue(e.cfg)
+	drain(e.ctx, e.b)
+	pr, err = e.st.GetPR(pr.Repo, pr.Number)
+	if err != nil || pr == nil || pr.Status != "skipped" || pr.ForceRetry || pr.Attempts != 0 {
+		t.Fatalf("expected manual retry to finish and clear its intent, got %+v (%v)", pr, err)
+	}
+	e.gh.mu.Lock()
+	defer e.gh.mu.Unlock()
+	if len(e.gh.reviews) != 2 || e.gh.reviews[1].CommitID != "aaa111" {
+		t.Fatalf("expected the retry to re-review aaa111, got %+v", e.gh.reviews)
+	}
+}
+
 func TestReviewCompletionReconcilesHeadWithWebhook(t *testing.T) {
 	cases := []struct {
 		name, action, webhookHead, updatedAt, wantHead, wantStatus string
