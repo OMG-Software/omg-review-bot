@@ -169,3 +169,19 @@ func TestOrgModelsPageInstanceUnset(t *testing.T) {
 		t.Errorf("org models page with unset instance models:\n%s", body)
 	}
 }
+
+// TestOrgModelsPageUnreadable: when an organization's stored models can't be
+// read, its page says so, not that it uses the instance's models.
+func TestOrgModelsPageUnreadable(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	if err := s.st.SetOrgModels(acmeID, "v1:garbage"); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := s.get("/orgs/acme/models")
+	if !strings.Contains(body, "can't be read, so its pull requests aren't being reviewed") ||
+		strings.Contains(body, "uses the instance's models") || !strings.Contains(body, "Remove all of its own models") {
+		t.Errorf("org models page with unreadable models:\n%s", body)
+	}
+}
