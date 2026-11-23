@@ -2142,3 +2142,79 @@ func TestDailyLimitReleasesOnlyWhatFits(t *testing.T) {
 		t.Fatalf("second release let through PR 2 (%s) while PR 3 is due", pr.Status)
 	}
 }
+
+// TestDailyLimitKeepsManualReview: a review asked for by hand that the daily
+// limit holds (the place it was accepted for went first) stays a manual
+// review: it waits at "daily" through a push and runs once released, though
+// automatic reviews are off. Holding it wakes the run loop.
+func TestDailyLimitKeepsManualReview(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Review.Enabled = false
+		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+	})
+	gh, st, b, ctx := e.gh, e.st, e.b, e.ctx
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	setLimit := func(n int) {
+		t.Helper()
+		if err := st.SetOrgDailyReviews(500, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	patch, content := gh.patch, gh.content
+	push := func(sha, at string) {
+		e.push(sha, patch, content, clean, at)
+		b.pollOnce(ctx)
+		drain(ctx, b)
+	}
+	pr := func() *store.PR {
+		p, _ := st.GetPR("acme/web", 7)
+		return p
+	}
+	setLimit(2)
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
+		t.Fatal(err)
+	}
+	drain(ctx, b)
+	if len(gh.reviews) != 1 {
+		t.Fatalf("first manual review: %d reviews", len(gh.reviews))
+	}
+
+	// Accepted with one place left, which is gone by the time it runs.
+	push("bbb222", "2026-01-01T02:00:00Z")
+	if err := b.ReviewNow("acme/web", 7, 500); err != nil {
+		t.Fatal(err)
+	}
+	setLimit(1)
+	select {
+	case <-b.kick:
+	default:
+	}
+	drain(ctx, b)
+	if p := pr(); len(gh.reviews) != 1 || p.Status != "daily" || !p.ForceRetry {
+		t.Fatalf("held manual review: %d reviews, status %q, force retry %v", len(gh.reviews), p.Status, p.ForceRetry)
+	}
+	select {
+	case <-b.kick:
+	default:
+		t.Error("holding the review didn't wake the run loop for the earlier release")
+	}
+
+	// A push doesn't let it out early.
+	push("ccc333", "2026-01-01T03:00:00Z")
+	if p := pr(); p.Status != "daily" || !p.ForceRetry {
+		t.Fatalf("after a push: status %q, force retry %v", p.Status, p.ForceRetry)
+	}
+
+	// Released, it runs though automatic reviews are off, on the latest head.
+	setLimit(2)
+	b.enqueueDue(b.Settings())
+	drain(ctx, b)
+	if p := pr(); len(gh.reviews) != 2 || gh.reviews[1].CommitID != "ccc333" || p.Status != "reviewed" || p.ForceRetry {
+		t.Fatalf("after release: %d reviews, status %q, force retry %v", len(gh.reviews), p.Status, p.ForceRetry)
+	}
+}

@@ -137,10 +137,14 @@ func (b *Bot) holdForDailyLimit(pr *store.PR, q DailyQuota) {
 	b.logf("info", pr.Repo, pr.Number, "not reviewing %s: the organization has had %d of its %d reviews in the last 24 hours",
 		short(pr.HeadSHA), q.Used(), q.Limit)
 	b.mu.Lock()
-	if at := q.ResetAt; !at.IsZero() && (b.dailyWake.IsZero() || at.Before(b.dailyWake)) {
-		b.dailyWake = at
+	earlier := !q.ResetAt.IsZero() && (b.dailyWake.IsZero() || q.ResetAt.Before(b.dailyWake))
+	if earlier {
+		b.dailyWake = q.ResetAt
 	}
 	b.mu.Unlock()
+	if earlier {
+		b.kickDue() // the run loop's timer may be set for later
+	}
 }
 
 var dailyMarkerRE = regexp.MustCompile(`<!-- prbot:daily-limit at=(\d+) -->`)

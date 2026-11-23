@@ -343,6 +343,10 @@ func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 		pr.ForceRetry = false
 	case pr.Status == "reviewing":
 		// the worker owns it until it finishes
+	case pr.Status == "daily":
+		// the organization's daily review limit stopped it: only
+		// releaseDailyCapped lets it go, once there's room. Ahead of the
+		// cases below, so a push or a manual retry doesn't let it out early.
 	case pr.ForceRetry:
 		pr.Status = "pending"
 	case pr.Skip:
@@ -360,9 +364,6 @@ func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 	case pr.Status == "limit" && b.stillOverLimit(pr, st):
 		// reviewed as often as the bot may: later pushes wait for the limit
 		// to be raised or a review asked for by hand
-	case pr.Status == "daily":
-		// the organization's daily review limit stopped it: only
-		// releaseDailyCapped lets it go, once there's room
 	default:
 		pr.Status = "pending"
 	}
