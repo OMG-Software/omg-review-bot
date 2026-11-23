@@ -465,10 +465,9 @@ event checks it for replies, so polling only catches anything missed.
 9. Each org also has a **daily review limit**: at most that many posted reviews in any 24 hours
    (100 by default). A review counts from when it started, and reviews under way count too, so
    no two workers can take the last place. A review past the limit isn't run: the PR shows
-   `daily` and gets one comment saying the limit is reached and when reviews resume (tried again every few
-   minutes if GitHub fails it). After that
-   nothing more is reviewed on it, new pushes included, and **Review now** is refused for the
-   whole org, until a place frees up 24 hours after the oldest review in the window. Then held
+   `daily` and gets one comment saying the limit is reached and when reviews resume (tried again
+   every few minutes if GitHub fails it). After that nothing more is reviewed on it, new pushes
+   included, and **Review now** is refused for the whole org, until a place frees up 24 hours after the oldest review in the window. Then held
    PRs are let through automatically, longest held first, only as many as there's room for. A
    place freed for a held PR is kept for it until its review starts, so **Review now** on another
    PR can't take it, and a PR held again keeps its place in line.
