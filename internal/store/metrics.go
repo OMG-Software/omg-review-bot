@@ -122,9 +122,13 @@ GROUP BY c.model_set, c.config_id, c.model ORDER BY 8 DESC, 11 DESC`, since, acc
 	return out, rows.Err()
 }
 
-// ConfigUsage is one configuration's use, for the models page.
+// ConfigUsage is one configuration's use, for the models page. Reviews and
+// Answered mean what ModelUsage's do, so both pages agree.
 type ConfigUsage struct {
-	Reviews, Replies, Failed int
+	Reviews  int // reviews sent to it
+	Answered int // of those, ones it answered at least once
+	Replies  int // reply calls answered
+	Failed   int // calls that failed
 }
 
 // ConfigUsageSince sums up the use of a set's models (0 = the instance's,
@@ -132,6 +136,7 @@ type ConfigUsage struct {
 // model name joined by a NUL (see ConfigKey).
 func (s *Store) ConfigUsageSince(set, since int64) (map[string]ConfigUsage, error) {
 	rows, err := s.db.Query(`SELECT config_id, model,
+  COUNT(DISTINCT CASE WHEN kind='review' THEN review_id END),
   COUNT(DISTINCT CASE WHEN kind='review' AND ok=1 THEN review_id END),
   COALESCE(SUM(kind='reply' AND ok=1),0), COALESCE(SUM(ok=0),0)
 FROM model_calls WHERE model_set=? AND ts>=? GROUP BY config_id, model`, set, since)
@@ -143,7 +148,7 @@ FROM model_calls WHERE model_set=? AND ts>=? GROUP BY config_id, model`, set, si
 	for rows.Next() {
 		var id, model string
 		var u ConfigUsage
-		if err := rows.Scan(&id, &model, &u.Reviews, &u.Replies, &u.Failed); err != nil {
+		if err := rows.Scan(&id, &model, &u.Reviews, &u.Answered, &u.Replies, &u.Failed); err != nil {
 			return nil, err
 		}
 		out[ConfigKey(id, model)] = u

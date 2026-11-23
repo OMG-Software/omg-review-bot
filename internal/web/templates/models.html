@@ -88,7 +88,7 @@
 <section class="card" id="model-{{$c.ID}}">
   <h2>{{add $i 1}}. {{$c.Label}}
     {{if and (eq $d.M.Strategy "single") (eq $c.ID $d.M.Active)}}<span class="pill s-reviewed">in use</span>{{end}}</h2>
-  {{if $d.UsageKnown}}<p class="hint">Last {{$d.UsageDays}} days: {{$c.Usage.Reviews}} {{if eq $c.Usage.Reviews 1}}review{{else}}reviews{{end}} · {{$c.Usage.Replies}} {{if eq $c.Usage.Replies 1}}reply{{else}}replies{{end}}{{if $c.Usage.Failed}} · <span class="bad">{{$c.Usage.Failed}} failed {{if eq $c.Usage.Failed 1}}call{{else}}calls{{end}}</span>{{end}}</p>{{end}}
+  {{if $d.UsageKnown}}<p class="hint">Last {{$d.UsageDays}} days: {{$c.Usage.Reviews}} {{if eq $c.Usage.Reviews 1}}review{{else}}reviews{{end}} sent{{if ne $c.Usage.Answered $c.Usage.Reviews}}, {{$c.Usage.Answered}} answered{{end}} ·{{$c.Usage.Replies}} {{if eq $c.Usage.Replies 1}}reply{{else}}replies{{end}}{{if $c.Usage.Failed}} · <span class="bad">{{$c.Usage.Failed}} failed {{if eq $c.Usage.Failed 1}}call{{else}}calls{{end}}</span>{{end}}</p>{{end}}
   <form method="post" action="{{$base}}/{{$c.ID}}/update" data-model-form>
   <fieldset class="plain" {{if $d.ReadOnly}}disabled{{end}}>
     <input type="hidden" name="id" value="{{$c.ID}}">

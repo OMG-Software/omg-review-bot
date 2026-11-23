@@ -94,11 +94,12 @@ func TestModelUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u := use[ConfigKey("m2", "large")]; u.Reviews != 2 || u.Failed != 0 {
+	// The same counts as the metrics page's for the same models.
+	if u := use[ConfigKey("m2", "large")]; u.Reviews != big.Reviews || u.Answered != big.Answered || u.Failed != 0 {
 		t.Errorf("instance m2 use = %+v", u)
 	}
-	if u := use[ConfigKey("m1", "small")]; u.Reviews != 0 || u.Replies != 1 || u.Failed != 1 {
-		t.Errorf("instance m1 use = %+v (a review it only failed isn't one it answered)", u)
+	if u := use[ConfigKey("m1", "small")]; u.Reviews != fast.Reviews || u.Answered != 0 || u.Replies != 1 || u.Failed != 1 {
+		t.Errorf("instance m1 use = %+v (a review it was sent and failed is sent, not answered)", u)
 	}
 	if _, ok := use[ConfigKey("m1", "theirs")]; ok {
 		t.Error("an organization's own model was counted as the instance's")
