@@ -1830,4 +1830,21 @@ func TestDailyLimitAdminOnly(t *testing.T) {
 	if o, _ := s.st.GetOrg(acmeID); o.DailyReviews != 0 {
 		t.Errorf("default stored as %d, want 0", o.DailyReviews)
 	}
+
+	// If the usage can't be read, the page still shows the limit, and the
+	// form starts from it rather than from 0.
+	s.post("/orgs/acme/daily-limit", url.Values{"daily_reviews": {"40"}})
+	db, err := sql.Open("sqlite", s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`ALTER TABLE reviews RENAME TO reviews_gone`); err != nil {
+		t.Fatal(err)
+	}
+	code, body, _ := s.get("/orgs/acme/settings")
+	if code != http.StatusOK || !strings.Contains(body, "up to <strong>40</strong> reviews in any 24 hours") ||
+		!strings.Contains(body, `value="40"`) || !strings.Contains(body, "couldn't be read just now") {
+		t.Errorf("settings page with the usage unreadable = %d:\n%s", code, body)
+	}
 }

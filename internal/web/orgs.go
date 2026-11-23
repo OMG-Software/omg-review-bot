@@ -336,11 +336,16 @@ func (s *Server) orgSettings(w http.ResponseWriter, r *http.Request) {
 	} else {
 		p = base.Policy()
 	}
+	// The limit comes from the org row already loaded, so it shows (and the
+	// admin's form starts from it) even if the usage can't be read.
 	q, qerr := s.bot.DailyQuota(org.ID, time.Now())
+	if qerr != nil {
+		s.log.Warn("daily review usage", "org", org.Login, "err", qerr)
+	}
 	s.render(w, r, "org_settings.html", page{Title: org.Login + " · Settings", Nav: "orgs", Org: org, Tab: "settings", D: map[string]any{
 		"P": p, "Custom": custom, "Severities": settings.Severities,
 		"ReadOnly": !me(r).CanManage(org.ID),
-		"Admin":    me(r).Admin, "Daily": q, "DailyKnown": qerr == nil,
+		"Admin":    me(r).Admin, "DailyLimit": org.DailyLimit(), "Daily": q, "DailyKnown": qerr == nil,
 		"DailyDefault": store.DefaultDailyReviews, "DailyMax": store.MaxDailyReviews,
 	}})
 }

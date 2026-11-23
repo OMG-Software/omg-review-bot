@@ -20,11 +20,12 @@
 </form>
 <section class="card">
   <h2>Daily review limit</h2>
-  {{if .D.DailyKnown}}<p>{{.Org.Login}} can have up to <strong>{{.D.Daily.Limit}}</strong> reviews in any 24 hours{{if not .Org.DailyReviews}} (the default){{end}}.
-  Used in the last 24 hours: {{.D.Daily.Used}}. Pull requests that reach the limit wait, with a comment saying so, until there's room again.</p>{{end}}
+  <p>{{.Org.Login}} can have up to <strong>{{.D.DailyLimit}}</strong> reviews in any 24 hours{{if not .Org.DailyReviews}} (the default){{end}}.
+  {{if .D.DailyKnown}}Used in the last 24 hours: {{.D.Daily.Used}}.{{else}}How many were used in the last 24 hours couldn't be read just now.{{end}}
+  Pull requests that reach the limit wait, with a comment saying so, until there's room again.</p>
   {{if .D.Admin}}
   <form method="post" action="{{orgPath .Org.Login}}/daily-limit" class="inline">
-    <label>Reviews per 24 hours <input type="number" name="daily_reviews" min="1" max="{{.D.DailyMax}}" value="{{.D.Daily.Limit}}" required></label>
+    <label>Reviews per 24 hours <input type="number" name="daily_reviews" min="1" max="{{.D.DailyMax}}" value="{{.D.DailyLimit}}" required></label>
     <button class="primary">Save limit</button>
   </form>
   {{if .Org.DailyReviews}}<form method="post" action="{{orgPath .Org.Login}}/daily-limit" class="inline">
