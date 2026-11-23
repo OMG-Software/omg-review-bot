@@ -425,37 +425,77 @@ func TestAutomaticReviewUsesFreshHeadOnce(t *testing.T) {
 	}
 }
 
-func TestReviewCompletionPreservesHeadFromWebhook(t *testing.T) {
-	const clean = `{"summary":"Looks fine.","comments":[]}`
-	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
-		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
-	})
-	e.b.pollOnce(e.ctx)
-	e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
-	e.gh.mu.Lock()
-	e.gh.onReview = func() {
-		e.gh.head, e.gh.updatedAt = "ccc333", "2026-01-01T00:20:00Z"
-		event := &github.WebhookEvent{
-			Action:     "synchronize",
-			Repository: &github.Repo{ID: 100, FullName: "acme/web"},
-			PullRequest: &github.PullRequest{
-				Number: 7, State: "open", UpdatedAt: e.gh.updatedAt, Head: github.Ref{SHA: e.gh.head},
-			},
-		}
-		if got := e.b.webhookPull(e.cfg, event); got != "acme/web#7 synchronize: reviewing" {
-			t.Errorf("unexpected webhook result: %s", got)
-		}
+func TestReviewCompletionReconcilesHeadWithWebhook(t *testing.T) {
+	cases := []struct {
+		name, action, webhookHead, updatedAt, wantHead, wantStatus string
+	}{
+		{"old head metadata", "edited", "aaa111", "2026-01-01T00:05:00Z", "bbb222", "reviewed"},
+		{"newer push", "synchronize", "ccc333", "2026-01-01T00:20:00Z", "ccc333", "pending"},
+		{"push back to original head", "synchronize", "aaa111", "2026-01-01T00:20:00Z", "aaa111", "pending"},
 	}
-	e.gh.mu.Unlock()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const clean = `{"summary":"Looks fine.","comments":[]}`
+			e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+				cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+			})
+			e.b.pollOnce(e.ctx)
+			e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+			e.gh.mu.Lock()
+			e.gh.onReview = func() {
+				if tc.action == "synchronize" {
+					e.gh.head, e.gh.updatedAt = tc.webhookHead, tc.updatedAt
+				}
+				event := &github.WebhookEvent{
+					Action:     tc.action,
+					Repository: &github.Repo{ID: 100, FullName: "acme/web"},
+					PullRequest: &github.PullRequest{
+						Number: 7, State: "open", UpdatedAt: tc.updatedAt, Head: github.Ref{SHA: tc.webhookHead},
+					},
+				}
+				want := "acme/web#7 " + tc.action + ": reviewing"
+				if got := e.b.webhookPull(e.cfg, event); got != want {
+					t.Errorf("webhook result = %q, want %q", got, want)
+				}
+			}
+			e.gh.mu.Unlock()
+			drain(e.ctx, e.b)
+			pr, err := e.st.GetPR("acme/web", 7)
+			if err != nil || pr == nil || pr.HeadSHA != tc.wantHead || pr.ReviewedSHA != "bbb222" || pr.Status != tc.wantStatus {
+				t.Fatalf("expected head %s and status %s after reviewing bbb222, got %+v (%v)", tc.wantHead, tc.wantStatus, pr, err)
+			}
+			e.b.enqueueDue(e.cfg)
+			drain(e.ctx, e.b)
+			e.gh.mu.Lock()
+			defer e.gh.mu.Unlock()
+			if tc.wantStatus == "reviewed" {
+				if len(e.gh.reviews) != 1 || e.gh.reviews[0].CommitID != "bbb222" {
+					t.Fatalf("expected only a review of bbb222, got %+v", e.gh.reviews)
+				}
+			} else if len(e.gh.reviews) != 2 || e.gh.reviews[0].CommitID != "bbb222" || e.gh.reviews[1].CommitID != tc.wantHead {
+				t.Fatalf("expected reviews of bbb222 and %s, got %+v", tc.wantHead, e.gh.reviews)
+			}
+		})
+	}
+}
+
+func TestReviewRetriesWhenFetchedHeadIsStale(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(*settings.Settings) {})
+	e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+	e.b.pollOnce(e.ctx)
+	e.push("aaa111", e.gh.patch, e.gh.content, clean, "2026-01-01T00:00:00Z")
 	drain(e.ctx, e.b)
 	pr, err := e.st.GetPR("acme/web", 7)
-	if err != nil || pr == nil || pr.HeadSHA != "ccc333" || pr.ReviewedSHA != "bbb222" || pr.Status != "pending" {
-		t.Fatalf("expected the webhook head to remain pending, got %+v (%v)", pr, err)
+	if err != nil || pr == nil || pr.HeadSHA != "bbb222" || pr.ReviewedSHA != "" || pr.Status != "pending" ||
+		pr.AttemptSHA != "bbb222" || pr.Attempts != 1 || pr.NotBefore <= time.Now().Unix() ||
+		!strings.Contains(pr.LastError, "fetched PR head aaa111 is older than the tracked head bbb222") {
+		t.Fatalf("expected a delayed retry of bbb222, got %+v (%v)", pr, err)
 	}
-	e.b.enqueueDue(e.cfg)
-	drain(e.ctx, e.b)
-	if len(e.gh.reviews) != 2 || e.gh.reviews[0].CommitID != "bbb222" || e.gh.reviews[1].CommitID != "ccc333" {
-		t.Fatalf("expected one review per head, got %+v", e.gh.reviews)
+	e.gh.mu.Lock()
+	defer e.gh.mu.Unlock()
+	if len(e.gh.reviews) != 0 {
+		t.Fatalf("expected no review for the stale fetch, got %+v", e.gh.reviews)
 	}
 }
 

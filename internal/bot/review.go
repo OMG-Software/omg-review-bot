@@ -168,9 +168,10 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		}
 	default:
 		head := fetchedPull.Head.SHA
-		if cur.HeadSHA != head && cur.HeadSHA == pr.HeadSHA && cur.GHUpdatedAt == pr.GHUpdatedAt {
-			// The worker may have seen a push before the poll or webhook did.
-			// Keep any changes the tracker recorded while the review ran.
+		if cur.HeadSHA != head && cur.HeadSHA == pr.HeadSHA &&
+			(cur.GHUpdatedAt == pr.GHUpdatedAt || newerOnGitHub(fetchedPull.UpdatedAt, cur.GHUpdatedAt)) {
+			// A poll or webhook may have updated PR metadata for the old head.
+			// Only replace that head if the worker has a newer snapshot.
 			cur.HeadSHA, cur.GHUpdatedAt = head, fetchedPull.UpdatedAt
 		}
 		cur.ReviewedSHA = head
