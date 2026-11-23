@@ -2300,3 +2300,44 @@ func TestDailyNoticeSkippedOnceReleased(t *testing.T) {
 		t.Fatalf("notices on a held PR = %d, want 1", n)
 	}
 }
+
+// TestDailyNoticeRetried: a daily-limit comment GitHub failed is posted at a
+// later wake-up while the PR is still held, once.
+func TestDailyNoticeRetried(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(cfg *settings.Settings) {})
+	gh, st, b, ctx := e.gh, e.st, e.b, e.ctx
+	b.dailyNoticeWait = 0
+	p := store.PR{Repo: "acme/web", Number: 7, AccountID: 500, InstallationID: 10, Open: true, Status: "daily", HeadSHA: "aaa111"}
+	if err := st.SavePR(&p); err != nil {
+		t.Fatal(err)
+	}
+	notices := func() int {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		n := 0
+		for _, c := range gh.posted {
+			if strings.Contains(c, "prbot:daily-limit") {
+				n++
+			}
+		}
+		return n
+	}
+	gh.mu.Lock()
+	gh.failList = true
+	gh.mu.Unlock()
+	b.announceDailyLimit(ctx, b.Settings(), &p, DailyQuota{Limit: 1, DailyUsage: store.DailyUsage{Posted: 1}})
+	if n := notices(); n != 0 {
+		t.Fatalf("notice posted though the comment list failed: %d", n)
+	}
+	gh.mu.Lock()
+	gh.failList = false
+	gh.mu.Unlock()
+	b.retryDailyNotices(b.Settings())
+	if n := notices(); n != 1 {
+		t.Fatalf("notices after the retry = %d, want 1", n)
+	}
+	b.retryDailyNotices(b.Settings())
+	if n := notices(); n != 1 {
+		t.Fatalf("notices after a second wake-up = %d, want still 1", n)
+	}
+}

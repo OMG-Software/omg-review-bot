@@ -182,20 +182,77 @@ func dailyBody(q DailyQuota, now time.Time) string {
 		q.Used(), q.Limit, kept(q), when, dailyMarker(now))
 }
 
+// prRef names a PR.
+type prRef struct {
+	repo   string
+	number int
+}
+
 // announceDailyLimit posts the daily-limit comment on pr, unless the bot
-// posted one there in the last 24 hours.
+// posted one there in the last 24 hours. If GitHub fails it, it's tried
+// again later (see retryDailyNotices).
 func (b *Bot) announceDailyLimit(ctx context.Context, st settings.Settings, pr *store.PR, q DailyQuota) {
+	ref := prRef{pr.Repo, pr.Number}
+	done := b.postDailyNotice(ctx, st, pr, q)
+	b.mu.Lock()
+	if done {
+		delete(b.dailyNotices, ref)
+	} else {
+		b.dailyNotices[ref] = time.Now().Add(b.dailyNoticeWait)
+	}
+	b.mu.Unlock()
+}
+
+// retryDailyNotices tries again to post the daily-limit comments GitHub
+// failed, on PRs still held, with the quota as it is now. It's called from
+// each wake-up; a try that's due is pushed back first, so a slow one isn't
+// started twice.
+func (b *Bot) retryDailyNotices(st settings.Settings) {
+	now := time.Now()
+	var due []prRef
+	b.mu.Lock()
+	for ref, at := range b.dailyNotices {
+		if !now.Before(at) {
+			due = append(due, ref)
+			b.dailyNotices[ref] = now.Add(b.dailyNoticeWait)
+		}
+	}
+	b.mu.Unlock()
+	for _, ref := range due {
+		pr, err := b.store.GetPR(ref.repo, ref.number)
+		if err != nil {
+			continue // tried again later
+		}
+		if pr == nil || pr.Status != "daily" {
+			b.mu.Lock()
+			delete(b.dailyNotices, ref)
+			b.mu.Unlock()
+			continue
+		}
+		q, err := b.DailyQuota(pr.AccountID, now)
+		if err != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), noticePostTimeout)
+		b.announceDailyLimit(ctx, b.settingsFor(st, pr.AccountID), pr, q)
+		cancel()
+	}
+}
+
+// postDailyNotice is announceDailyLimit's attempt. It reports whether
+// nothing is left to do: posted, posted already, or no longer held.
+func (b *Bot) postDailyNotice(ctx context.Context, st settings.Settings, pr *store.PR, q DailyQuota) bool {
 	app, err := b.getApp(ctx, st)
 	if err != nil {
 		b.logf("warn", pr.Repo, pr.Number, "could not post the daily-limit comment: %v", err)
-		return
+		return false
 	}
 	cl := app.Installation(pr.InstallationID)
 	cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number)
 	if err != nil {
 		// Without the list, a second notice could be posted; leave it out.
-		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier daily-limit comment, so none is posted: %v", err)
-		return
+		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier daily-limit comment, so none is posted yet: %v", err)
+		return false
 	}
 	now := time.Now()
 	for _, c := range cs {
@@ -204,7 +261,7 @@ func (b *Bot) announceDailyLimit(ctx context.Context, st settings.Settings, pr *
 		}
 		if m := lastMatch(dailyMarkerRE, c.Body); m != nil {
 			if at, err := strconv.ParseInt(m[1], 10, 64); err == nil && now.Sub(time.Unix(at, 0)) < dailyWindow {
-				return
+				return true
 			}
 		}
 	}
@@ -214,11 +271,13 @@ func (b *Bot) announceDailyLimit(ctx context.Context, st settings.Settings, pr *
 	// stall every other PR's update on GitHub.
 	if !b.stillHeld(pr) {
 		b.logf("info", pr.Repo, pr.Number, "the daily limit let this PR through before its comment was posted; none is")
-		return
+		return true
 	}
 	if _, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, dailyBody(q, now)); err != nil {
-		b.logf("warn", pr.Repo, pr.Number, "could not post the daily-limit comment: %v", err)
+		b.logf("warn", pr.Repo, pr.Number, "could not post the daily-limit comment; it will be tried again: %v", err)
+		return false
 	}
+	return true
 }
 
 // stillHeld reports whether pr is still held by the daily limit.

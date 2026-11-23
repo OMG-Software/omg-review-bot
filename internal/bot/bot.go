@@ -117,6 +117,11 @@ type Bot struct {
 	syncTried   time.Time // the last repository sync started, successful or not
 	syncPending bool      // a repository sync is scheduled for when the minute since the last one ends
 	lastSweep   time.Time
+	// dailyNotices holds the held PRs whose daily-limit comment couldn't be
+	// posted, with when to try again; dailyNoticeWait is the wait between
+	// tries (tests shorten it).
+	dailyNotices    map[prRef]time.Time
+	dailyNoticeWait time.Duration
 	// dailyWake is when a PR held by its organization's daily review limit
 	// may next be let through (zero if none waits on the clock).
 	dailyWake   time.Time
@@ -152,21 +157,23 @@ type Bot struct {
 
 func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 	return &Bot{
-		store:       st,
-		dataDir:     dataDir,
-		log:         log,
-		queued:      map[string]bool{},
-		upgrades:    map[string]job{},
-		notices:     map[string]*queuedNotice{},
-		running:     map[string]bool{},
-		after:       map[string]job{},
-		active:      map[string][]job{},
-		jobs:        make(chan job, 4096),
-		wake:        make(chan struct{}, 1),
-		kick:        make(chan struct{}, 1),
-		status:      Status{RateRemaining: -1},
-		syncGap:     time.Minute,
-		policyRetry: time.Minute,
+		store:           st,
+		dataDir:         dataDir,
+		log:             log,
+		queued:          map[string]bool{},
+		upgrades:        map[string]job{},
+		notices:         map[string]*queuedNotice{},
+		running:         map[string]bool{},
+		after:           map[string]job{},
+		active:          map[string][]job{},
+		jobs:            make(chan job, 4096),
+		wake:            make(chan struct{}, 1),
+		kick:            make(chan struct{}, 1),
+		status:          Status{RateRemaining: -1},
+		syncGap:         time.Minute,
+		policyRetry:     time.Minute,
+		dailyNotices:    map[prRef]time.Time{},
+		dailyNoticeWait: 5 * time.Minute,
 		// Deliveries are stored (only signed ones), so whether webhooks are
 		// arriving doesn't start over at every restart.
 		lastWebhook: st.LastDeliveryAt(),
