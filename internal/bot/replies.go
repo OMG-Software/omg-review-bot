@@ -338,7 +338,7 @@ func (b *Bot) freeText(ctx context.Context, lc llm.Client, st settings.Settings,
 	resp, err := lc.Chat(ctx, llm.Request{
 		Messages:    []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}},
 		Temperature: st.LLM.Temperature,
-		MaxTokens:   min(2048, st.LLM.MaxOutputTokens),
+		MaxTokens:   2048, // or less: the answering model's own cap (see tuned)
 	})
 	if err != nil {
 		return "", err

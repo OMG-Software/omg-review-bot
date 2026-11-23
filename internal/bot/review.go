@@ -805,8 +805,11 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 	at := inUse(lc)
 	for attempt := 1; attempt <= 2; attempt++ {
 		resp, err := lc.Chat(ctx, llm.Request{
+			// MaxTokens 0: the answering model's own output cap (see tuned).
+			// The prompt was sized for the tightest model's input budget,
+			// so it plus any model's own output fits that model's context.
 			Messages: msgs, Schema: schema, SchemaName: schemaName,
-			Temperature: st.LLM.Temperature, MaxTokens: st.LLM.MaxOutputTokens,
+			Temperature: st.LLM.Temperature,
 		})
 		if err != nil {
 			return total, err

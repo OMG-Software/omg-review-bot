@@ -534,3 +534,49 @@ func TestQueuedJobsCarryTheirOrg(t *testing.T) {
 		t.Errorf("queued job org = %d, want 500", j.org)
 	}
 }
+
+// TestEachModelItsOwnOutputCap: with several models, prompts are sized for
+// the tightest, but each model answers with its own output cap, not the
+// tightest one's.
+func TestEachModelItsOwnOutputCap(t *testing.T) {
+	var got atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			MaxTokens int64 `json:"max_tokens"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		got.Store(req.MaxTokens)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"content": `{"summary":"ok","comments":[]}`}, "finish_reason": "stop"}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	big, small := modelAt("big", srv.URL), modelAt("small", srv.URL)
+	big.ContextTokens, big.MaxOutputTokens = 131072, 8192
+	small.ContextTokens, small.MaxOutputTokens = 8192, 2048
+	cfg := settings.Defaults()
+	cfg.Models = settings.Models{Strategy: settings.StrategyRoundRobin, Configs: []settings.LLM{big, small}}
+	cfg.Normalize()
+	if cfg, err = b.modelSettings(cfg, 0); err != nil || cfg.LLM.Name != "small" {
+		t.Fatalf("sizing model = %q (%v), want small", cfg.LLM.Name, err)
+	}
+	for _, want := range []int64{8192, 2048} { // big's turn, then small's
+		lc, err := b.chatClient(cfg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out modelOutput
+		if _, _, err := b.chatJSON(t.Context(), lc, cfg, reviewSchema, "code_review", "sys", "user", &out); err != nil {
+			t.Fatal(err)
+		}
+		if got.Load() != want {
+			t.Errorf("%s answered with max_tokens %d, want its own %d", lc.Label(), got.Load(), want)
+		}
+	}
+}

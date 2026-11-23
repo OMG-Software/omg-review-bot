@@ -158,8 +158,9 @@ func newClient(cfg settings.LLM, own bool) (llm.Client, error) {
 	})
 }
 
-// tuned calls one model with its own temperature, and no more output than
-// it allows: callers size requests by st.LLM, which may be another model.
+// tuned calls one model with its own temperature and output cap: callers
+// size prompts by st.LLM, which may be another model. A request with no
+// MaxTokens gets the model's own cap; one with more is lowered to it.
 type tuned struct{ modelUse }
 
 func (t tuned) Chat(ctx context.Context, req llm.Request) (*llm.Response, error) {
