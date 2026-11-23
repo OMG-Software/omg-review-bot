@@ -730,7 +730,6 @@ func (s *Store) NextDue(after int64) int64 {
 	return n.Int64
 }
 
-// ReviewedOpenPRs returns open PRs the bot has reviewed (candidates for the reply sweep).
 // LimitedPRs returns the open PRs held at their review limit.
 func (s *Store) LimitedPRs() ([]PR, error) {
 	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='limit' AND open=1`)
@@ -742,8 +741,10 @@ func (s *Store) DailyCappedPRs() ([]PR, error) {
 	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='daily' AND open=1 ORDER BY held_at, repo, number`)
 }
 
+// ReviewedOpenPRs returns open PRs the bot has reviewed (candidates for the
+// reply sweep), including those held by the daily review limit, which still
+// get their replies.
 func (s *Store) ReviewedOpenPRs() ([]PR, error) {
-	// A PR held by the daily review limit still gets its replies.
 	return s.queryPRs(`SELECT * FROM pulls_v WHERE open=1 AND status IN ('reviewed','pending','daily')`)
 }
 
