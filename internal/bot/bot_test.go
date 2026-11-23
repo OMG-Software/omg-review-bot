@@ -58,7 +58,7 @@ type fakeGitHub struct {
 	failEdits     bool             // editing issue comments fails (a 502)
 	failList      bool             // listing the PR's conversation comments fails (a 502)
 	mainStatus    string           // main.go's status in the PR's files; "" = modified
-	onReview      func()           // runs once after a review is posted, with mu held
+	onReview      func()           // runs once after recording a review, before responding
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -83,7 +83,13 @@ func (f *fakeGitHub) id() int64 { f.nextID++; return f.nextID - 1 }
 func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		defer f.mu.Unlock()
+		var finishReview func()
+		defer func() {
+			f.mu.Unlock()
+			if finishReview != nil {
+				finishReview()
+			}
+		}()
 		auth := r.Header.Get("Authorization")
 		if strings.HasPrefix(r.URL.Path, "/app") && !strings.HasPrefix(auth, "Bearer ") {
 			t.Errorf("%s called without App JWT", r.URL.Path)
@@ -139,11 +145,14 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			state := map[string]string{"APPROVE": "APPROVED", "COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}[req.Event]
 			rid := 500 + int64(len(f.reviews))
 			f.reviewLog = append(f.reviewLog, map[string]any{"id": rid, "user": bot, "state": state, "commit_id": req.CommitID, "body": req.Body})
-			if f.onReview != nil {
-				f.onReview()
-				f.onReview = nil
+			hook := f.onReview
+			f.onReview = nil
+			finishReview = func() {
+				if hook != nil {
+					hook()
+				}
+				send(map[string]any{"id": rid, "html_url": fmt.Sprintf("https://github.example/review/%d", rid)})
 			}
-			send(map[string]any{"id": rid, "html_url": fmt.Sprintf("https://github.example/review/%d", rid)})
 		case strings.HasPrefix(p, "/repos/acme/web/pulls/7/reviews/") && strings.HasSuffix(p, "/dismissals"):
 			var rid int64
 			_, _ = fmt.Sscanf(strings.TrimPrefix(p, "/repos/acme/web/pulls/7/reviews/"), "%d", &rid)
@@ -444,7 +453,9 @@ func TestReviewCompletionReconcilesHeadWithWebhook(t *testing.T) {
 			e.gh.mu.Lock()
 			e.gh.onReview = func() {
 				if tc.action == "synchronize" {
+					e.gh.mu.Lock()
 					e.gh.head, e.gh.updatedAt = tc.webhookHead, tc.updatedAt
+					e.gh.mu.Unlock()
 				}
 				event := &github.WebhookEvent{
 					Action:     tc.action,
