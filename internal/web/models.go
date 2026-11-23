@@ -96,21 +96,28 @@ func (s *Server) modelsPage(w http.ResponseWriter, r *http.Request, sc modelScop
 		// Shown, not hidden: the owners can still remove what's stored.
 		p.Err = "The organization's own models couldn't be read: " + err.Error()
 	}
+	// Keys never go into the page's data, only whether one is saved.
+	shown := m
+	shown.Configs = make([]settings.LLM, len(m.Configs))
 	views := make([]modelView, len(m.Configs))
 	for i, c := range m.Configs {
 		key := c.APIKey != ""
 		c.APIKey = ""
+		shown.Configs[i] = c
 		views[i] = modelView{LLM: c, HasKey: key}
 	}
 	d := map[string]any{
-		"Base": sc.base, "Own": sc.own, "M": m, "Configs": views, "ReadOnly": readOnly,
+		"Base": sc.base, "Own": sc.own, "M": shown, "Configs": views, "ReadOnly": readOnly,
 		"Strategies": settings.Strategies, "Providers": settings.Providers, "New": settings.NewLLM(),
 		"Max": settings.MaxModels, "Full": len(m.Configs) >= settings.MaxModels, "Unreadable": err != nil,
 	}
 	if sc.org != nil {
-		inst := s.bot.Settings().Models
-		d["Instance"] = inst
-		d["InstanceInUse"] = inst.InUse()
+		// Only the names of the instance's models: members can see this page.
+		var names []string
+		for _, c := range s.bot.Settings().Models.InUse() {
+			names = append(names, c.Label())
+		}
+		d["InstanceInUse"] = names
 		d["DailyLimit"] = sc.org.DailyLimit()
 	} else {
 		d["SlotPercent"] = s.bot.Settings().Limits.OrgSlotPercent

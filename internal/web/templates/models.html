@@ -36,7 +36,7 @@
   <p class="lead">{{.Org.Login}} uses <strong>its own models</strong> below, with its own API keys. Its reviews and replies use only these, and the daily review limit doesn't apply.</p>
   {{else}}
   <p class="lead">{{.Org.Login}} uses the instance's models
-    ({{range $i, $c := $d.InstanceInUse}}{{if $i}}, {{end}}<code>{{$c.Label}}</code>{{end}}),
+    ({{range $i, $c := $d.InstanceInUse}}{{if $i}}, {{end}}<code>{{$c}}</code>{{end}}),
     with a limit of {{$d.DailyLimit}} reviews in any 24 hours.</p>
   <p class="hint">Add a model of your own (bring your own API key) and {{.Org.Login}} uses only its own models from the next review, with no daily review limit.
     Remove them all to go back to the instance's models and limit. Keys are stored encrypted and never shown again. The model server must be reachable at a public <code>https://</code> address.</p>

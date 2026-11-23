@@ -360,3 +360,41 @@ func TestOrgSlotHandoff(t *testing.T) {
 		t.Fatalf("busy %v held %v", b.orgBusy, b.orgHeld)
 	}
 }
+
+// TestJobClientKeptForTheJob: a reply job's calls share one client, so a
+// failover lasts the job and the job takes one round-robin turn, not one
+// per thread or mention.
+func TestJobClientKeptForTheJob(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := settings.Defaults()
+	cfg.Models = settings.Models{Strategy: settings.StrategyFailover,
+		Configs: []settings.LLM{modelAt("a", "http://a.example"), modelAt("b", "http://b.example")}}
+	cfg.Normalize()
+	mc := &jobClient{b: b, st: cfg}
+	first, err := mc.get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, ok := first.(*failover)
+	if !ok {
+		t.Fatalf("client is %T, want a failover", first)
+	}
+	f.skip(fmt.Errorf("down")) // a fails during the first thread
+	again, _ := mc.get()
+	if again != first || again.Label() != "b" {
+		t.Errorf("second call got %v (%s), want the same failover, now on b", again, again.Label())
+	}
+
+	cfg.Models.Strategy = settings.StrategyRoundRobin
+	rr := &jobClient{b: b, st: cfg}
+	x, _ := rr.get()
+	y, _ := rr.get()
+	if x.Label() != y.Label() || b.roundRobin[0] != 1 {
+		t.Errorf("round-robin turns taken: %d (%s, %s), want 1", b.roundRobin[0], x.Label(), y.Label())
+	}
+}

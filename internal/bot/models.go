@@ -328,6 +328,25 @@ func (b *Bot) chatClient(st settings.Settings, pr *store.PR) (modelClient, error
 	return uses[0], nil
 }
 
+// jobClient is the model client of a job that makes many separate calls (a
+// reply job: one per thread and mention). It's built on first use and kept
+// for the job, so a failover lasts the whole job, as it does in a review,
+// and a job that calls no model doesn't take a round-robin turn.
+type jobClient struct {
+	b  *Bot
+	st settings.Settings
+	pr *store.PR
+
+	once sync.Once
+	lc   modelClient
+	err  error
+}
+
+func (j *jobClient) get() (modelClient, error) {
+	j.once.Do(func() { j.lc, j.err = j.b.chatClient(j.st, j.pr) })
+	return j.lc, j.err
+}
+
 // reviewClients returns the clients a review runs its diff through: each
 // model for StrategyCollate, otherwise the one chatClient gives.
 func (b *Bot) reviewClients(st settings.Settings, pr *store.PR) ([]modelClient, error) {
