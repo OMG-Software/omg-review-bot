@@ -1832,6 +1832,11 @@ func TestDailyReviewLimit(t *testing.T) {
 	if len(gh.reviews) != 1 || status() != "daily" {
 		t.Fatalf("past the daily limit: %d reviews, status %q", len(gh.reviews), status())
 	}
+	held, _ := st.GetPR("acme/web", 7)
+	heldAt := held.HeldAt
+	if heldAt == 0 {
+		t.Fatal("held PR has no hold time")
+	}
 	ns := notices()
 	if len(ns) != 1 {
 		t.Fatalf("daily-limit notices = %q", ns)
@@ -1853,6 +1858,9 @@ func TestDailyReviewLimit(t *testing.T) {
 	push()
 	if len(gh.reviews) != 1 || len(notices()) != 1 || status() != "daily" {
 		t.Fatalf("second push: %d reviews, %d notices, status %q", len(gh.reviews), len(notices()), status())
+	}
+	if pr, _ := st.GetPR("acme/web", 7); pr.HeldAt != heldAt {
+		t.Errorf("a push moved the hold time from %d to %d", heldAt, pr.HeldAt)
 	}
 	if err := b.ReviewNow("acme/web", 7, 500); err == nil || !strings.Contains(err.Error(), "1 of its 1 reviews") {
 		t.Fatalf("ReviewNow past the daily limit = %v", err)
@@ -1885,7 +1893,9 @@ func TestDailyReviewLimit(t *testing.T) {
 }
 
 // TestDailyLimitReleasesOnlyWhatFits: PRs held by the daily limit are let
-// through longest held first, only as many as there's room for.
+// through longest held first, only as many as there's room for. Held first
+// means when the limit held it: a push to a held PR saves its row again,
+// but doesn't send it to the back.
 func TestDailyLimitReleasesOnlyWhatFits(t *testing.T) {
 	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(cfg *settings.Settings) {})
 	st, b := e.st, e.b
@@ -1895,8 +1905,11 @@ func TestDailyLimitReleasesOnlyWhatFits(t *testing.T) {
 	if err := st.SetOrgDailyReviews(500, 1); err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now().Unix()
+	// Saved in this order, so PR 3's row is the newest, but it was held first.
 	for _, n := range []int{1, 2, 3} {
-		p := store.PR{Repo: "acme/held", Number: n, AccountID: 500, Open: true, Status: "daily", HeadSHA: fmt.Sprintf("sha%d", n)}
+		p := store.PR{Repo: "acme/held", Number: n, AccountID: 500, Open: true, Status: "daily", HeadSHA: fmt.Sprintf("sha%d", n),
+			HeldAt: now - int64(100*n)}
 		if err := st.SavePR(&p); err != nil {
 			t.Fatal(err)
 		}
@@ -1907,12 +1920,15 @@ func TestDailyLimitReleasesOnlyWhatFits(t *testing.T) {
 		pr, _ := st.GetPR("acme/held", n)
 		got = append(got, pr.Status)
 	}
-	if fmt.Sprint(got) != "[pending daily daily]" {
-		t.Fatalf("statuses after release = %v, want only the first let through", got)
+	if fmt.Sprint(got) != "[daily daily pending]" {
+		t.Fatalf("statuses after release = %v, want only PR 3 (held first) let through", got)
+	}
+	if pr, _ := st.GetPR("acme/held", 3); pr.HeldAt != 0 {
+		t.Errorf("released PR keeps its hold time %d", pr.HeldAt)
 	}
 	// The released one now waits for its place, so nothing more is let go.
 	b.releaseDailyCapped(b.Settings())
 	if pr, _ := st.GetPR("acme/held", 2); pr.Status != "daily" {
-		t.Fatalf("second release let through PR 2 (%s) while PR 1 is due", pr.Status)
+		t.Fatalf("second release let through PR 2 (%s) while PR 3 is due", pr.Status)
 	}
 }

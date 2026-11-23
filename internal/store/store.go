@@ -162,6 +162,9 @@ var addedColumns = []struct{ table, column, alter string }{
 	{"activity", "account_given", `ALTER TABLE activity ADD COLUMN account_given INTEGER NOT NULL DEFAULT 0`},
 	// daily_reviews: the organization's daily review limit (0 = the default).
 	{"orgs", "daily_reviews", `ALTER TABLE orgs ADD COLUMN daily_reviews INTEGER NOT NULL DEFAULT 0`},
+	// held_at: when the daily review limit held the PR, so held PRs are let
+	// through in the order they were held (updated_at moves on every save).
+	{"pulls", "held_at", `ALTER TABLE pulls ADD COLUMN held_at INTEGER NOT NULL DEFAULT 0`},
 }
 
 // postMigrate indexes the added columns, so it runs after they exist.
@@ -191,7 +194,7 @@ CREATE VIEW repos_v AS SELECT id, installation_id, account_id, full_name, enable
 DROP VIEW IF EXISTS pulls_v;
 CREATE VIEW pulls_v AS SELECT repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
   head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
-  not_before, tracked_at, updated_at, account_id FROM pulls;
+  not_before, tracked_at, updated_at, account_id, held_at FROM pulls;
 DROP VIEW IF EXISTS reviews_v;
 CREATE VIEW reviews_v AS SELECT id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
   status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at,
@@ -636,6 +639,9 @@ type PR struct {
 	TrackedAt      int64
 	UpdatedAt      int64
 	AccountID      int64
+	// HeldAt is when the daily review limit last held the PR (0 if it
+	// isn't held). Unlike UpdatedAt, later saves (pushes) don't move it.
+	HeldAt int64
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -646,7 +652,7 @@ func scanPR(sc scanner) (*PR, error) {
 	var labels string
 	err := sc.Scan(&p.Repo, &p.Number, &p.InstallationID, &p.Title, &p.Author, &p.URL, &p.BaseRef, &p.HeadRef,
 		&draft, &open, &labels, &p.HeadSHA, &p.ReviewedSHA, &p.AttemptSHA, &p.Attempts, &p.GHUpdatedAt,
-		&p.CommentsSeen, &p.Status, &p.LastError, &skip, &p.NotBefore, &p.TrackedAt, &p.UpdatedAt, &p.AccountID)
+		&p.CommentsSeen, &p.Status, &p.LastError, &skip, &p.NotBefore, &p.TrackedAt, &p.UpdatedAt, &p.AccountID, &p.HeldAt)
 	if err != nil {
 		return nil, err
 	}
@@ -687,11 +693,11 @@ func (s *Store) SavePR(p *PR) error {
 	p.UpdatedAt = time.Now().Unix()
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO pulls(repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
   head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
-  not_before, tracked_at, updated_at, account_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  not_before, tracked_at, updated_at, account_id, held_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.Repo, p.Number, p.InstallationID, p.Title, p.Author, p.URL, p.BaseRef, p.HeadRef,
 		b2i(p.Draft), b2i(p.Open), strings.Join(p.Labels, "\n"), p.HeadSHA, p.ReviewedSHA, p.AttemptSHA,
 		p.Attempts, p.GHUpdatedAt, p.CommentsSeen, p.Status, p.LastError, b2i(p.Skip), p.NotBefore,
-		p.TrackedAt, p.UpdatedAt, p.AccountID)
+		p.TrackedAt, p.UpdatedAt, p.AccountID, p.HeldAt)
 	return err
 }
 
@@ -730,7 +736,7 @@ func (s *Store) LimitedPRs() ([]PR, error) {
 // DailyCappedPRs returns the open PRs held by their organization's daily
 // review limit, longest held first.
 func (s *Store) DailyCappedPRs() ([]PR, error) {
-	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='daily' AND open=1 ORDER BY updated_at, repo, number`)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='daily' AND open=1 ORDER BY held_at, repo, number`)
 }
 
 func (s *Store) ReviewedOpenPRs() ([]PR, error) {

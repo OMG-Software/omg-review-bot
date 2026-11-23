@@ -105,7 +105,7 @@ func (b *Bot) releaseDailyCapped(st settings.Settings) {
 		}
 		b.prMu.Lock()
 		if cur, err := b.store.GetPR(p.Repo, p.Number); err == nil && cur != nil && cur.Status == "daily" {
-			cur.Status = "" // recompute keeps "daily" as it is: decide afresh
+			cur.Status, cur.HeldAt = "", 0 // recompute keeps "daily" as it is: decide afresh
 			b.recompute(cur, b.settingsFor(st, cur.AccountID))
 			if cur.Status == "pending" {
 				free[p.AccountID]--
@@ -132,7 +132,7 @@ func (b *Bot) nextDailyRelease() time.Time {
 // holdForDailyLimit parks pr at the "daily" status. The caller holds prMu
 // and releases it after.
 func (b *Bot) holdForDailyLimit(pr *store.PR, q DailyQuota) {
-	pr.Status = "daily"
+	pr.Status, pr.HeldAt = "daily", time.Now().Unix()
 	_ = b.store.SavePR(pr)
 	b.logf("info", pr.Repo, pr.Number, "not reviewing %s: the organization has had %d of its %d reviews in the last 24 hours",
 		short(pr.HeadSHA), q.Used(), q.Limit)
