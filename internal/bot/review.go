@@ -427,6 +427,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		return nil, fmt.Errorf("fetched PR head %s is older than the tracked head %s", short(head), short(pr.HeadSHA))
 	}
 	if !force && head == pr.ReviewedSHA {
+		b.logf("info", pr.Repo, pr.Number, "skipping automatic review of %s: commit already reviewed", short(head))
 		return gp, errAlreadyReviewed
 	}
 	sk := b.loadSkill(st)
