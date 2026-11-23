@@ -94,7 +94,7 @@ func (s *Server) modelsPage(w http.ResponseWriter, r *http.Request, sc modelScop
 	m, err := s.loadModels(sc)
 	if err != nil {
 		// Shown, not hidden: the owners can still remove what's stored.
-		p.Err = "The organization's own models couldn't be read: " + err.Error()
+		p.Err = upperFirst(err.Error())
 	}
 	// Keys never go into the page's data, only whether one is saved.
 	shown := m
@@ -157,6 +157,13 @@ func parseLLM(r *http.Request, cur settings.LLM) settings.LLM {
 	v.StructuredOutput = r.FormValue("structured") != ""
 	v.TimeoutSeconds = num("timeout", v.TimeoutSeconds)
 	v.Normalize()
+	// A saved key is only kept for the server it was entered for: with the
+	// address or provider changed, it has to be entered again, so whoever
+	// edits a model can't send a key they never saw somewhere else (saving,
+	// testing or listing models alike).
+	if f("api_key") == "" && (v.BaseURL != cur.BaseURL || v.Provider != cur.Provider) {
+		v.APIKey = ""
+	}
 	return v
 }
 

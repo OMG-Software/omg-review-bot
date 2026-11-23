@@ -47,18 +47,24 @@ func modelsContext(accountID int64) string { return "org-models:" + strconv.Form
 // the instance's).
 func (b *Bot) OrgModels(accountID int64) (settings.Models, error) {
 	sealed, err := b.store.OrgModels(accountID)
-	if err != nil || sealed == "" {
-		return settings.Models{}, err
+	if err != nil {
+		// Said as what it is: the organization may have no models of its own.
+		return settings.Models{}, fmt.Errorf("couldn't read the database: %w", err)
+	}
+	if sealed == "" {
+		return settings.Models{}, nil
 	}
 	box, err := b.secretBox()
-	if err != nil {
-		return settings.Models{}, err
+	if err == nil {
+		var raw []byte
+		if raw, err = box.Open(sealed, modelsContext(accountID)); err == nil {
+			var m settings.Models
+			if m, err = settings.ParseModels(raw); err == nil {
+				return m, nil
+			}
+		}
 	}
-	raw, err := box.Open(sealed, modelsContext(accountID))
-	if err != nil {
-		return settings.Models{}, err
-	}
-	return settings.ParseModels(raw)
+	return settings.Models{}, fmt.Errorf("the organization's own models can't be read: %w", err)
 }
 
 // SetOrgModels stores the organization's own models. With none left, it
@@ -100,7 +106,7 @@ func (b *Bot) modelSettings(st settings.Settings, accountID int64) (settings.Set
 	if accountID != 0 {
 		own, err := b.OrgModels(accountID)
 		if err != nil {
-			return st, fmt.Errorf("couldn't read the organization's own models: %w", err)
+			return st, fmt.Errorf("couldn't load the organization's models: %w", err)
 		}
 		if len(own.Configs) > 0 {
 			st = st.WithOwnModels(accountID, own)

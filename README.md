@@ -260,8 +260,9 @@ folder, or `PRBOT_SECRET_KEY` (64 hex characters) if set. Back the key up with t
 it, orgs have to enter their keys again.
 
 **Sharing the review slots.** The bot runs four jobs at once. One org's jobs may hold at most 50%
-of them (two) at a time; its others wait for one of its own to finish. Change the share in
-**Settings → Sharing the review slots**.
+of them (two) at a time; its others wait for one of its own to finish, even when no other org has
+work. Change the share in **Settings → Sharing the review slots**. If the bot only serves one
+org, set it to 100% so all four slots are used.
 
 ### Adding more organizations
 

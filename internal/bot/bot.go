@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
@@ -167,6 +168,10 @@ type Bot struct {
 	// its share of the workers (see claimPR), oldest first.
 	orgBusy map[int64]int
 	orgHeld map[int64][]job
+	// slotLimit is how many workers one organization may hold (orgSlots),
+	// kept by the run loop from the settings it reads each pass (a save
+	// wakes it), so a worker taking a job reads it without the database.
+	slotLimit atomic.Int64
 
 	jobs chan job
 	wake chan struct{} // poll GitHub now
@@ -213,6 +218,7 @@ func (b *Bot) Run(ctx context.Context) {
 	pollNow := true
 	for {
 		st := b.Settings()
+		b.setSlotLimit(st)
 		interval := b.pollInterval(st)
 		if pollNow || time.Since(b.lastPollTime()) >= interval {
 			b.pollOnce(ctx)
@@ -491,9 +497,6 @@ func (b *Bot) worker(ctx context.Context, slot int) { b.work(ctx, slot, b.runJob
 func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)) {
 	ctx = context.WithValue(ctx, workerSlot{}, slot)
 	for {
-		// Read before taking the lock, which every worker's take waits on:
-		// it's a settings read, and the share changes rarely.
-		limit := b.orgSlots()
 		// A job is taken and its PR claimed in one step, so a PR's jobs are
 		// claimed in queue order and run in it. Its organization is normally
 		// stamped when it was queued, so the take is in memory only.
@@ -508,7 +511,7 @@ func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)
 		if j.org == 0 { // stamped when queued; looked up only if it wasn't
 			j.org = b.jobOrg(j)
 		}
-		ok := b.claimPR(j, limit)
+		ok := b.claimPR(j, b.orgSlots()) // read now, so the share is the current one
 		b.takeMu.Unlock()
 		for ok {
 			if ctx.Err() != nil {
@@ -540,7 +543,19 @@ func (b *Bot) jobOrg(j job) int64 {
 }
 
 // orgSlots is how many workers one organization's jobs may hold at once.
-func (b *Bot) orgSlots() int { return b.Settings().Limits.OrgSlots(workers) }
+func (b *Bot) orgSlots() int {
+	if n := b.slotLimit.Load(); n > 0 {
+		return int(n)
+	}
+	return b.setSlotLimit(b.Settings())
+}
+
+// setSlotLimit keeps st's slot share for orgSlots, and returns it.
+func (b *Bot) setSlotLimit(st settings.Settings) int {
+	n := st.Limits.OrgSlots(workers)
+	b.slotLimit.Store(int64(n))
+	return n
+}
 
 // claimPR makes the calling worker the one running j's PR's jobs, and reports
 // whether it may run j now. If another worker has the PR, j waits for that

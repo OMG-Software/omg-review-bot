@@ -56,7 +56,7 @@
   <div class="row">
     <label class="grow">One organization may use at most (% of the {{.D.Workers}} review slots)
       <input name="lim_org_slot_percent" type="number" min="1" max="100" value="{{$s.Limits.OrgSlotPercent}}">
-      <small>Now {{$s.Limits.OrgSlots .D.Workers}} of {{.D.Workers}} at once. Its other reviews and replies wait for one of its own to finish, so one busy organization can't hold up the rest. At least one is always allowed.</small></label>
+      <small>Now {{$s.Limits.OrgSlots .D.Workers}} of {{.D.Workers}} at once. Its other reviews and replies wait for one of its own to finish, so one busy organization can't hold up the rest, even when no other has work. At least one is always allowed. Serving only one organization? Use 100%.</small></label>
   </div>
 </section>
 

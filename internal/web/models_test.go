@@ -88,6 +88,12 @@ func TestOrgOwnModels(t *testing.T) {
 	if m, _ := s.b.OrgModels(acmeID); len(m.Configs) != 2 || m.Configs[1].APIKey != "ok-cloud-key" {
 		t.Errorf("after Ollama Cloud update: %+v", m.Configs)
 	}
+	// Pointed at another server without the key entered again, the saved key
+	// isn't carried along: it would go to a server it wasn't entered for.
+	s.post("/orgs/acme/models/m2/update", url.Values{"provider": {"openai"}, "base_url": {"https://other.example.com/v1"}, "model": {"big"}})
+	if m, _ := s.b.OrgModels(acmeID); len(m.Configs) != 2 || m.Configs[1].APIKey != "" || m.Configs[1].BaseURL != "https://other.example.com/v1" {
+		t.Errorf("saved key kept for another server: %+v", m.Configs)
+	}
 	s.post("/orgs/acme/models/m2/delete", url.Values{})
 
 	// A member sees them but can't change them.

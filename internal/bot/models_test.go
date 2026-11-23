@@ -580,3 +580,22 @@ func TestEachModelItsOwnOutputCap(t *testing.T) {
 		}
 	}
 }
+
+// TestSlotLimitFollowsSettings: the share a worker admits a job under is
+// the one the run loop last read, and changes when the settings do.
+func TestSlotLimitFollowsSettings(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := settings.Defaults()
+	for _, c := range []struct{ percent, want int }{{100, workers}, {25, 1}, {50, workers / 2}} {
+		cfg.Limits.OrgSlotPercent = c.percent
+		b.setSlotLimit(cfg)
+		if got := b.orgSlots(); got != c.want {
+			t.Errorf("at %d%%: orgSlots = %d, want %d", c.percent, got, c.want)
+		}
+	}
+}
