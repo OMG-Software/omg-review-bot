@@ -243,6 +243,17 @@ func TestModelMaximums(t *testing.T) {
 		t.Errorf("context only: limits %d/%d, redirect %s; want 40960/4096, the output not mentioned", c.ContextTokens, c.MaxOutputTokens, loc)
 	}
 
+	// A full set refuses at once, without asking the model's server.
+	for len(func() settings.Models { st, _ := settings.Load(s.st); return st.Models }().Configs) < settings.MaxModels {
+		addWith("ollama", ollamaSrv.URL, "8192", "1024")
+	}
+	asked := 0
+	countSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { asked++; http.NotFound(w, r) }))
+	t.Cleanup(countSrv.Close)
+	if loc := add("ollama", countSrv.URL); asked != 0 || !strings.Contains(loc, "at most") {
+		t.Errorf("adding to a full set: server asked %d times, redirect %s; want no request and the capacity error", asked, loc)
+	}
+
 	form := url.Values{"provider": {"ollama"}, "base_url": {ollamaSrv.URL}, "model": {"qwen3"}}
 	req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/settings/models/limits", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

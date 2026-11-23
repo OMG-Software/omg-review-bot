@@ -231,10 +231,17 @@ func (s *Server) modelsAction(w http.ResponseWriter, r *http.Request, sc modelSc
 			return fmt.Sprintf("set %s to %q", where, m.StrategyInfo().Label), nil
 		})
 	case "add":
+		full := fmt.Errorf("a set can hold at most %d models", settings.MaxModels)
+		// A full set fails at once, without waiting on the model's server
+		// for its limits; the change checks again under the lock.
+		if cur, err := s.loadModels(sc); err == nil && len(cur.Configs) >= settings.MaxModels {
+			redirectErr(w, r, sc.base, full)
+			return
+		}
 		mx := s.formMaximums(r, sc, settings.NewLLM())
 		s.modelsChange(w, r, sc, func(m *settings.Models) (string, error) {
 			if len(m.Configs) >= settings.MaxModels {
-				return "", fmt.Errorf("a set can hold at most %d models", settings.MaxModels)
+				return "", full
 			}
 			c := parseLLM(r, settings.NewLLM())
 			c.ID = ""
