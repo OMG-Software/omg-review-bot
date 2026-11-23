@@ -2267,3 +2267,36 @@ func TestDailyLimitKeepsReleasedPlace(t *testing.T) {
 		t.Fatalf("held again: status %q, held at %d (want daily, %d)", again.Status, again.HeldAt, heldAt)
 	}
 }
+
+// TestDailyNoticeSkippedOnceReleased: the daily-limit comment isn't posted
+// on a PR the limit let through while the comment was being prepared.
+func TestDailyNoticeSkippedOnceReleased(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(cfg *settings.Settings) {})
+	gh, st, b, ctx := e.gh, e.st, e.b, e.ctx
+	p := store.PR{Repo: "acme/web", Number: 7, AccountID: 500, InstallationID: 10, Open: true, Status: "pending", HeadSHA: "aaa111"}
+	if err := st.SavePR(&p); err != nil {
+		t.Fatal(err)
+	}
+	notices := func() int {
+		n := 0
+		for _, c := range gh.posted {
+			if strings.Contains(c, "prbot:daily-limit") {
+				n++
+			}
+		}
+		return n
+	}
+	q := DailyQuota{Limit: 1, DailyUsage: store.DailyUsage{Posted: 1}}
+	b.announceDailyLimit(ctx, b.Settings(), &p, q)
+	if n := notices(); n != 0 {
+		t.Fatalf("notice posted on a PR no longer held: %d", n)
+	}
+	p.Status = "daily"
+	if err := st.SavePR(&p); err != nil {
+		t.Fatal(err)
+	}
+	b.announceDailyLimit(ctx, b.Settings(), &p, q)
+	if n := notices(); n != 1 {
+		t.Fatalf("notices on a held PR = %d, want 1", n)
+	}
+}

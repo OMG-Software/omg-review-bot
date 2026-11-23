@@ -208,9 +208,25 @@ func (b *Bot) announceDailyLimit(ctx context.Context, st settings.Settings, pr *
 			}
 		}
 	}
+	// The lookups above take a while, and a raised limit may have let the PR
+	// through meanwhile: then the comment would be wrong, and would hold back
+	// the next one for a day. prMu isn't held across the post, which would
+	// stall every other PR's update on GitHub.
+	if !b.stillHeld(pr) {
+		b.logf("info", pr.Repo, pr.Number, "the daily limit let this PR through before its comment was posted; none is")
+		return
+	}
 	if _, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, dailyBody(q, now)); err != nil {
 		b.logf("warn", pr.Repo, pr.Number, "could not post the daily-limit comment: %v", err)
 	}
+}
+
+// stillHeld reports whether pr is still held by the daily limit.
+func (b *Bot) stillHeld(pr *store.PR) bool {
+	b.prMu.Lock()
+	defer b.prMu.Unlock()
+	cur, err := b.store.GetPR(pr.Repo, pr.Number)
+	return err == nil && cur != nil && cur.Status == "daily" && cur.AccountID == pr.AccountID
 }
 
 // kept says how many of the places left are kept for released PRs, if any.
