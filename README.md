@@ -468,7 +468,9 @@ event checks it for replies, so polling only catches anything missed.
    `daily` and gets one comment saying the limit is reached and when reviews resume. After that
    nothing more is reviewed on it, new pushes included, and **Review now** is refused for the
    whole org, until a place frees up 24 hours after the oldest review in the window. Then held
-   PRs are let through automatically, longest held first, only as many as there's room for.
+   PRs are let through automatically, longest held first, only as many as there's room for. A
+   place freed for a held PR is kept for it until its review starts, so **Review now** on another
+   PR can't take it, and a PR held again keeps its place in line.
    Replies in the bot's review threads go on as usual. Only an administrator can change an org's
    limit, under **Organizations → *org* → Settings → Daily review limit** (1 to 100,000, or back
    to the default). Raising it lets held PRs through as soon as it's saved.

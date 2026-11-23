@@ -2133,8 +2133,9 @@ func TestDailyLimitReleasesOnlyWhatFits(t *testing.T) {
 	if fmt.Sprint(got) != "[daily daily pending]" {
 		t.Fatalf("statuses after release = %v, want only PR 3 (held first) let through", got)
 	}
-	if pr, _ := st.GetPR("acme/held", 3); pr.HeldAt != 0 {
-		t.Errorf("released PR keeps its hold time %d", pr.HeldAt)
+	// It keeps its hold time while it waits: that keeps its place.
+	if pr, _ := st.GetPR("acme/held", 3); pr.HeldAt != now-300 {
+		t.Errorf("released PR's hold time = %d, want %d", pr.HeldAt, now-300)
 	}
 	// The released one now waits for its place, so nothing more is let go.
 	b.releaseDailyCapped(b.Settings())
@@ -2216,5 +2217,53 @@ func TestDailyLimitKeepsManualReview(t *testing.T) {
 	drain(ctx, b)
 	if p := pr(); len(gh.reviews) != 2 || gh.reviews[1].CommitID != "ccc333" || p.Status != "reviewed" || p.ForceRetry {
 		t.Fatalf("after release: %d reviews, status %q, force retry %v", len(gh.reviews), p.Status, p.ForceRetry)
+	}
+}
+
+// TestDailyLimitKeepsReleasedPlace: the place freed for a held PR is kept
+// for it, so a review asked for by hand on another PR can't take it, and a
+// PR held again keeps its place in the release order.
+func TestDailyLimitKeepsReleasedPlace(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(cfg *settings.Settings) {})
+	st, b := e.st, e.b
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetOrgDailyReviews(500, 1); err != nil {
+		t.Fatal(err)
+	}
+	heldAt := time.Now().Unix() - 3600
+	for _, p := range []store.PR{
+		{Repo: "acme/held", Number: 1, AccountID: 500, Open: true, Status: "daily", HeadSHA: "sha1", HeldAt: heldAt},
+		{Repo: "acme/other", Number: 2, AccountID: 500, Open: true, Status: "reviewed", HeadSHA: "sha2", ReviewedSHA: "sha2"},
+	} {
+		if err := st.SavePR(&p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.releaseDailyCapped(b.Settings())
+	held, _ := st.GetPR("acme/held", 1)
+	if held.Status != "pending" || held.HeldAt != heldAt {
+		t.Fatalf("released PR: status %q, held at %d (want pending, %d)", held.Status, held.HeldAt, heldAt)
+	}
+
+	// The one place left is kept for it: Review now elsewhere is refused...
+	err := b.ReviewNow("acme/other", 2, 500)
+	if err == nil || !strings.Contains(err.Error(), "1 more are kept for pull requests that were waiting") {
+		t.Fatalf("Review now on another PR with the place kept = %v", err)
+	}
+	// ...while the released PR itself may take it.
+	if q, full := b.dailyCapped(held); full {
+		t.Fatalf("released PR refused its own place: %+v", q)
+	}
+
+	// Held again (its place taken some other way), it keeps its hold time,
+	// so it's still first to be let through.
+	q, _ := b.DailyQuota(500, time.Now())
+	b.prMu.Lock()
+	b.holdForDailyLimit(held, q)
+	b.prMu.Unlock()
+	if again, _ := st.GetPR("acme/held", 1); again.Status != "daily" || again.HeldAt != heldAt {
+		t.Fatalf("held again: status %q, held at %d (want daily, %d)", again.Status, again.HeldAt, heldAt)
 	}
 }

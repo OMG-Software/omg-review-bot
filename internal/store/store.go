@@ -874,7 +874,10 @@ type DailyUsage struct {
 	Posted    int   // reviews posted since the window began
 	Oldest    int64 // when the oldest of them started (0 if none)
 	Reviewing int   // reviews under way now
-	Due       int   // PRs waiting for a review that is due now (as DuePRs counts them)
+	Due       int   // PRs waiting for a review that is due now (as DuePRs counts them), and released ones
+	// Reserved counts the PRs the daily limit held and has let through, still
+	// waiting to be reviewed: their places are kept for them.
+	Reserved int
 }
 
 // DailyReviewUsage counts accountID's reviews posted since since (a Unix
@@ -890,8 +893,9 @@ func (s *Store) DailyReviewUsage(accountID, since, now int64) (DailyUsage, error
 	}
 	u.Oldest = oldest.Int64
 	err = s.db.QueryRow(`SELECT COALESCE(SUM(status='reviewing'), 0),
-  COALESCE(SUM(status='pending' AND (skip=0 OR force_retry=1) AND not_before<=?), 0) FROM pulls WHERE account_id=? AND open=1`,
-		now, accountID).Scan(&u.Reviewing, &u.Due)
+  COALESCE(SUM(status='pending' AND (skip=0 OR force_retry=1) AND (held_at>0 OR not_before<=?)), 0),
+  COALESCE(SUM(status='pending' AND (skip=0 OR force_retry=1) AND held_at>0), 0) FROM pulls WHERE account_id=? AND open=1`,
+		now, accountID).Scan(&u.Reviewing, &u.Due, &u.Reserved)
 	return u, err
 }
 

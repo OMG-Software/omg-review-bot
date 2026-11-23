@@ -129,6 +129,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	}
 	pr.Status = "reviewing"
 	pr.LastError = ""
+	pr.HeldAt = 0 // any place the daily limit kept for it is taken now
 	_ = b.store.SavePR(pr)
 	b.prMu.Unlock()
 

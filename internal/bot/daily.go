@@ -37,8 +37,9 @@ type DailyQuota struct {
 // Used counts the posted reviews and those under way.
 func (q DailyQuota) Used() int { return q.Posted + q.Reviewing }
 
-// Full reports whether no review can start now.
-func (q DailyQuota) Full() bool { return q.Used() >= q.Limit }
+// Full reports whether no review can start now: the places left are taken,
+// or kept for PRs the limit held and has let through.
+func (q DailyQuota) Full() bool { return q.Used()+q.Reserved >= q.Limit }
 
 // Free is how many held PRs can be let through now: the places left, less
 // the PRs already waiting for one.
@@ -70,7 +71,17 @@ func (b *Bot) dailyCapped(pr *store.PR) (DailyQuota, bool) {
 		b.logf("warn", pr.Repo, pr.Number, "could not count the organization's reviews today: %v", err)
 		return q, false
 	}
+	if released(pr) {
+		q.Reserved-- // the place kept is this PR's own
+	}
 	return q, q.Full()
+}
+
+// released reports whether the daily limit held pr and has let it through:
+// a place is kept for it until its review starts. (A PR the limit holds again
+// keeps its HeldAt, and so its place in the release order.)
+func released(pr *store.PR) bool {
+	return pr.Status == "pending" && pr.HeldAt > 0 && (!pr.Skip || pr.ForceRetry)
 }
 
 // releaseDailyCapped lets PRs held by the daily review limit be reviewed
@@ -105,10 +116,13 @@ func (b *Bot) releaseDailyCapped(st settings.Settings) {
 		}
 		b.prMu.Lock()
 		if cur, err := b.store.GetPR(p.Repo, p.Number); err == nil && cur != nil && cur.Status == "daily" {
-			cur.Status, cur.HeldAt = "", 0 // recompute keeps "daily" as it is: decide afresh
-			b.recompute(cur, b.settingsFor(st, cur.AccountID))
-			if cur.Status == "pending" {
-				free[p.AccountID]--
+			cur.Status = "" // recompute keeps "daily" as it is: decide afresh
+			cst := b.settingsFor(st, cur.AccountID)
+			b.recompute(cur, cst)
+			if cur.Status == "pending" && (cur.ForceRetry || cst.Review.Enabled) {
+				free[p.AccountID]-- // HeldAt stays: the place is kept for it
+			} else {
+				cur.HeldAt = 0 // nothing will be reviewed, so no place is kept
 			}
 			if err := b.store.SavePR(cur); err == nil && cur.Status == "pending" {
 				b.logf("info", cur.Repo, cur.Number, "the organization's daily review limit has room again; reviewing")
@@ -132,7 +146,10 @@ func (b *Bot) nextDailyRelease() time.Time {
 // holdForDailyLimit parks pr at the "daily" status. The caller holds prMu
 // and releases it after.
 func (b *Bot) holdForDailyLimit(pr *store.PR, q DailyQuota) {
-	pr.Status, pr.HeldAt = "daily", time.Now().Unix()
+	pr.Status = "daily"
+	if pr.HeldAt == 0 { // held again after its release: it keeps its place
+		pr.HeldAt = time.Now().Unix()
+	}
 	_ = b.store.SavePR(pr)
 	b.logf("info", pr.Repo, pr.Number, "not reviewing %s: the organization has had %d of its %d reviews in the last 24 hours",
 		short(pr.HeadSHA), q.Used(), q.Limit)
@@ -159,10 +176,10 @@ func dailyBody(q DailyQuota, now time.Time) string {
 	if !q.ResetAt.IsZero() {
 		when = "from about " + q.ResetAt.UTC().Format("2006-01-02 15:04 UTC")
 	}
-	return fmt.Sprintf("🛑 **Daily review limit reached.** This organization has had %d of its %d reviews for the last 24 hours, "+
+	return fmt.Sprintf("🛑 **Daily review limit reached.** This organization has had %d of its %d reviews for the last 24 hours%s, "+
 		"so I won't review this pull request, or further pushes to it, for now. Reviews resume automatically %s. "+
 		"I'll still answer replies in my review threads. The limit is set by the bot's administrator.\n%s",
-		q.Used(), q.Limit, when, dailyMarker(now))
+		q.Used(), q.Limit, kept(q), when, dailyMarker(now))
 }
 
 // announceDailyLimit posts the daily-limit comment on pr, unless the bot
@@ -196,9 +213,17 @@ func (b *Bot) announceDailyLimit(ctx context.Context, st settings.Settings, pr *
 	}
 }
 
+// kept says how many of the places left are kept for released PRs, if any.
+func kept(q DailyQuota) string {
+	if q.Reserved <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (and %d more are kept for pull requests that were waiting)", q.Reserved)
+}
+
 // dailyLimitError explains a review asked for by hand that the limit refuses.
 func dailyLimitError(q DailyQuota) error {
-	msg := fmt.Sprintf("this organization has had %d of its %d reviews for the last 24 hours", q.Used(), q.Limit)
+	msg := fmt.Sprintf("this organization has had %d of its %d reviews for the last 24 hours", q.Used(), q.Limit) + kept(q)
 	if !q.ResetAt.IsZero() {
 		// With the date: the next place can be nearly a day away.
 		msg += "; the next can start from about " + q.ResetAt.UTC().Format("2006-01-02 15:04 UTC")

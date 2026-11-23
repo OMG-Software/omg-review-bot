@@ -956,6 +956,8 @@ func TestDailyReviewUsage(t *testing.T) {
 		{Repo: "a/r", Number: 3, AccountID: 1, Open: true, Status: "pending", NotBefore: now + 600}, // not due yet
 		{Repo: "a/r", Number: 4, AccountID: 1, Open: true, Status: "pending", Skip: true},
 		{Repo: "a/r", Number: 5, AccountID: 1, Open: true, Status: "daily"},
+		// Released by the daily limit, waiting out a push's delay: its place is kept.
+		{Repo: "a/r", Number: 6, AccountID: 1, Open: true, Status: "pending", HeldAt: now - 10, NotBefore: now + 600},
 		{Repo: "b/r", Number: 1, AccountID: 2, Open: true, Status: "reviewing"},
 	} {
 		if err := st.SavePR(&p); err != nil {
@@ -966,7 +968,7 @@ func TestDailyReviewUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u != (DailyUsage{Posted: 2, Oldest: now - 7200, Reviewing: 1, Due: 1}) {
+	if u != (DailyUsage{Posted: 2, Oldest: now - 7200, Reviewing: 1, Due: 2, Reserved: 1}) {
 		t.Fatalf("usage = %+v", u)
 	}
 	if held, _ := st.DailyCappedPRs(); len(held) != 1 || held[0].Number != 5 {

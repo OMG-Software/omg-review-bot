@@ -340,7 +340,7 @@ func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 	switch {
 	case !pr.Open:
 		pr.Status = "closed"
-		pr.ForceRetry = false
+		pr.ForceRetry, pr.HeldAt = false, 0
 	case pr.Status == "reviewing":
 		// the worker owns it until it finishes
 	case pr.Status == "daily":
