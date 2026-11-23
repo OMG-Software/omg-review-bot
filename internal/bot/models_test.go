@@ -443,3 +443,46 @@ func TestBadJSONRetriesPerModel(t *testing.T) {
 		t.Errorf("summary %q, b calls %d, label %q", out.Summary, bCalls.Load(), lc.Label())
 	}
 }
+
+// TestRoundRobin: each job takes the next model in turn, cycling through
+// the set; the instance's set and each organization's own keep separate
+// turns, and a shorter set still gives a model in range.
+func TestRoundRobin(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	set := func(own int64, names ...string) settings.Settings {
+		cfg := settings.Defaults()
+		cfg.Models = settings.Models{Strategy: settings.StrategyRoundRobin}
+		for _, n := range names {
+			cfg.Models.Configs = append(cfg.Models.Configs, modelAt(n, "https://"+n+".example"))
+		}
+		cfg.Normalize()
+		if own != 0 {
+			cfg = cfg.WithOwnModels(own, cfg.Models)
+		}
+		return cfg
+	}
+	turn := func(cfg settings.Settings) string {
+		lc, err := b.chatClient(cfg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return lc.Label()
+	}
+	inst, acme := set(0, "a", "b", "c"), set(500, "x", "y")
+	var got []string
+	for range 4 {
+		got = append(got, turn(inst), turn(acme))
+	}
+	if want := "a x b y c x a y"; strings.Join(got, " ") != want {
+		t.Errorf("turns = %v, want %s", got, want)
+	}
+	// The instance's set shrinks to two after seven turns: still in range.
+	if l := turn(set(0, "a", "b")); l != "a" && l != "b" {
+		t.Errorf("shorter set gave %q", l)
+	}
+}

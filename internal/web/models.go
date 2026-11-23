@@ -119,6 +119,8 @@ func (s *Server) modelsPage(w http.ResponseWriter, r *http.Request, sc modelScop
 		}
 		d["InstanceInUse"] = names
 		d["DailyLimit"] = sc.org.DailyLimit()
+		// Unset: its reviews wait (see bot.modelsUnset); no model is named.
+		d["InstanceUnset"] = len(s.bot.Settings().Models.Issues()) > 0
 	} else {
 		d["SlotPercent"] = s.bot.Settings().Limits.OrgSlotPercent
 	}

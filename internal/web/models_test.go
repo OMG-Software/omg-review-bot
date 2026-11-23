@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
@@ -124,5 +125,22 @@ func TestModelEditsDontUndoEachOther(t *testing.T) {
 	wg.Wait()
 	if m, err := s.b.OrgModels(acmeID); err != nil || len(m.Configs) != n {
 		t.Fatalf("after %d adds at once, %d models (%v)", n, len(m.Configs), err)
+	}
+}
+
+// TestOrgModelsPageInstanceUnset: with the instance's models not set up, an
+// organization's page says so instead of naming a model that isn't one.
+func TestOrgModelsPageInstanceUnset(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	cfg := s.b.Settings()
+	cfg.Models.Configs[0].Model = ""
+	if err := settings.Save(s.st, cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := s.get("/orgs/acme/models")
+	if !strings.Contains(body, "aren't set up yet") || strings.Contains(body, "uses the instance's models") {
+		t.Errorf("org models page with unset instance models:\n%s", body)
 	}
 }

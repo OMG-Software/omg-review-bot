@@ -34,6 +34,11 @@
 {{if .Org}}
   {{if $d.M.Configs}}
   <p class="lead">{{.Org.Login}} uses <strong>its own models</strong> below, with its own API keys. Its reviews and replies use only these, and the daily review limit doesn't apply.</p>
+  {{else if $d.InstanceUnset}}
+  <p class="lead">The instance's models aren't set up yet, so {{.Org.Login}}'s pull requests aren't being reviewed.
+    An administrator can set them up, or you can add a model of your own below.</p>
+  <p class="hint">With a model of its own (bring your own API key), {{.Org.Login}} uses only its own models from the next review, with no daily review limit.
+    Keys are stored encrypted and never shown again. The model server must be reachable at a public <code>https://</code> address.</p>
   {{else}}
   <p class="lead">{{.Org.Login}} uses the instance's models
     ({{range $i, $c := $d.InstanceInUse}}{{if $i}}, {{end}}<code>{{$c}}</code>{{end}}),
