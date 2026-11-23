@@ -47,12 +47,12 @@
 
 <h2 class="section">Repositories</h2>
 {{if $d.Repos}}
-<div class="card"><figure class="chart"><figcaption><b>Most active repositories</b> <span class="muted">· reviews posted</span></figcaption>
+<div class="card"><figure class="chart"><figcaption><b>Most active repositories</b> <span class="muted">· reviews posted{{if and (eq (len $d.RepoReviewRows) $d.RepoChartRows) (gt $d.RepoCount $d.RepoChartRows)}} · the top {{len $d.RepoReviewRows}} of {{$d.RepoCount}} repositories{{end}}</span></figcaption>
     {{if $d.RepoReviewRows}}{{rankChart "Most active repositories by reviews posted" $d.RepoReviewRows}}{{else}}<p class="muted">No reviews posted in this period; the table shows the failed ones.</p>{{end}}</figure></div>
-<div class="card"><figure class="chart"><figcaption><b>Findings by repository and level</b></figcaption>
+<div class="card"><figure class="chart"><figcaption><b>Findings by repository and level</b>{{if and (eq (len $d.RepoSevRows) $d.RepoChartRows) (gt $d.RepoCount $d.RepoChartRows)}} <span class="muted">· the top {{len $d.RepoSevRows}} of {{$d.RepoCount}} repositories, by findings</span>{{end}}</figcaption>
     {{if $d.RepoSevRows}}{{sevStackChart "Findings by repository and level" $d.RepoSevRows}}{{else}}<p class="muted">No findings in this period.</p>{{end}}</figure></div>
 <div class="card">
-  {{if gt $d.RepoCount (len $d.Repos)}}<p class="hint">The {{len $d.Repos}} most reviewed of {{$d.RepoCount}} repositories; the charts cover them all.</p>{{end}}
+  {{if gt $d.RepoCount (len $d.Repos)}}<p class="hint">The {{len $d.Repos}} most reviewed of {{$d.RepoCount}} repositories.</p>{{end}}
   <div class="table-scroll">
   <table class="num">
     <thead><tr><th>Repository</th>{{if $d.All}}<th>Organization</th>{{end}}<th class="n">Reviews</th><th class="n">PRs</th><th class="n">Findings</th>

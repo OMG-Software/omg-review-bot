@@ -59,6 +59,10 @@ func byWeek(days []store.DayStats) []store.DayStats {
 // reviewed first.
 const repoTableRows = 50
 
+// repoChartRows is how many repositories each repository chart shows, the
+// top of its own ranking.
+const repoChartRows = 15
+
 // hideInstanceModelNames keeps the instance's models from an organization's
 // members: each is shown as "Instance model" (numbered, when there are
 // several), as its label is its model name when it has no name of its own,
@@ -142,10 +146,10 @@ func (s *Server) metricsData(accountID int64, days int) map[string]any {
 	d := map[string]any{
 		"Range": days, "Ranges": metricsRanges, "All": all,
 		"Stats": stats, "Days": perDay, "Repos": repos[:min(len(repos), repoTableRows)], "RepoCount": len(repos),
-		"RepoTableRows": repoTableRows, "Models": models, "ModelTotals": tot,
+		"RepoTableRows": repoTableRows, "RepoChartRows": repoChartRows, "Models": models, "ModelTotals": tot,
 		"Replies": replies, "Latency": latency,
 		"Commented":      max(0, stats.Posted-stats.Approvals-stats.ChangesRequested),
-		"RepoReviewRows": repoReviewRows(repos, 15), "RepoSevRows": repoSevRows(repos, 15),
+		"RepoReviewRows": repoReviewRows(repos, repoChartRows), "RepoSevRows": repoSevRows(repos, repoChartRows),
 		"ModelRows": modelRows(models, all),
 	}
 	if all {

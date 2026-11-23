@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -78,6 +79,33 @@ func TestMetricsPages(t *testing.T) {
 	}
 	if _, body, _ := s.get("/"); !strings.Contains(body, "Most active repositories") || !strings.Contains(body, `href="/metrics"`) {
 		t.Error("the dashboard has no chart of the most active repositories, or no link to the metrics")
+	}
+}
+
+// TestRepoChartCaptions: a repository chart cut to its top rows says so,
+// and the table's hint doesn't claim the charts cover every repository.
+func TestRepoChartCaptions(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	now := time.Now().Unix()
+	for i := range repoChartRows + 2 {
+		repo := fmt.Sprintf("acme/r%02d", i)
+		id, err := s.st.CreateReview(&store.Review{Repo: repo, Number: 1, AccountID: acmeID, Status: "running", StartedAt: now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.st.UpdateReview(&store.Review{ID: id, Repo: repo, Number: 1, Status: "posted", Comments: 1, Sev: [5]int{0, 0, 1, 0, 0}, FinishedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.signIn()
+	code, body, _ := s.get("/orgs/acme/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("metrics = %d", code)
+	}
+	top := fmt.Sprintf("the top %d of", repoChartRows)
+	if strings.Count(body, top) != 2 || strings.Contains(body, "cover them all") {
+		t.Errorf("captions: %d with %q, want 2 (one per chart), and no claim the charts cover all", strings.Count(body, top), top)
 	}
 }
 
