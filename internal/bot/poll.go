@@ -14,12 +14,14 @@ import (
 func (b *Bot) pollOnce(ctx context.Context) {
 	start := time.Now()
 	st := b.Settings()
-	issues := st.Issues()
+	// Without GitHub set up there's nothing to watch. The instance's models
+	// are reported too, but organizations with their own don't wait for them.
+	gh := st.GitHubIssues()
 	b.mu.Lock()
-	b.status.Configured = len(issues) == 0
-	b.status.ConfigIssues = issues
+	b.status.Configured = len(gh) == 0
+	b.status.ConfigIssues = st.Issues()
 	b.mu.Unlock()
-	if len(issues) > 0 {
+	if len(gh) > 0 {
 		return
 	}
 	err := b.poll(ctx, st)
@@ -409,7 +411,8 @@ func (b *Bot) enqueueDue(st settings.Settings) {
 		return
 	}
 	for _, p := range prs {
-		if !allowedRepo(st, p.Repo) || (!p.ForceRetry && !b.settingsFor(st, p.AccountID).Review.Enabled) {
+		if !allowedRepo(st, p.Repo) || (!p.ForceRetry && !b.settingsFor(st, p.AccountID).Review.Enabled) ||
+			b.modelsUnset(st, p.AccountID) {
 			continue
 		}
 		b.enqueue(job{kind: jobReview, repo: p.Repo, number: p.Number})
@@ -434,7 +437,7 @@ func (b *Bot) maybeSweep(st settings.Settings) {
 	}
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 	for _, p := range prs {
-		if !conversationsOn(b.settingsFor(st, p.AccountID)) || !allowedRepo(st, p.Repo) {
+		if !conversationsOn(b.settingsFor(st, p.AccountID)) || !allowedRepo(st, p.Repo) || b.modelsUnset(st, p.AccountID) {
 			continue
 		}
 		// Quiet PRs are skipped to save API calls; activity there changes the ETag anyway.

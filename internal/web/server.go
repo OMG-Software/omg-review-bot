@@ -38,6 +38,12 @@ type Server struct {
 	// other.
 	secretMu sync.Mutex
 	mux      *http.ServeMux
+	// settingsMu makes each change to the instance's settings, from reading
+	// them to saving them, one step, so two can't undo each other's.
+	settingsMu sync.Mutex
+	// modelLocks holds a *sync.Mutex per organization, doing the same for
+	// changes to its own models (see modelsLock).
+	modelLocks sync.Map
 
 	// unreconciled holds the IDs of people whose access sign-in couldn't
 	// update: none of their sessions count until a sign-in does. It's kept

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
@@ -150,9 +151,23 @@ func parseLLM(r *http.Request, cur settings.LLM) settings.LLM {
 	return v
 }
 
+// modelsLock returns the lock a change to sc's models holds from reading
+// them to saving them, so two changes can't undo each other's. The
+// instance's models are part of its settings, so they share settingsMu.
+func (s *Server) modelsLock(sc modelScope) *sync.Mutex {
+	if sc.org == nil {
+		return &s.settingsMu
+	}
+	mu, _ := s.modelLocks.LoadOrStore(sc.org.ID, new(sync.Mutex))
+	return mu.(*sync.Mutex)
+}
+
 // modelsChange loads the scope's models, applies change and saves them,
 // then redirects back with msg or the error.
 func (s *Server) modelsChange(w http.ResponseWriter, r *http.Request, sc modelScope, change func(*settings.Models) (string, error)) {
+	mu := s.modelsLock(sc)
+	mu.Lock()
+	defer mu.Unlock()
 	m, err := s.loadModels(sc)
 	if err != nil && sc.org != nil && r.PathValue("action") != "delete" {
 		redirectErr(w, r, sc.base, err)
@@ -192,10 +207,8 @@ func (s *Server) modelsAction(w http.ResponseWriter, r *http.Request, sc modelSc
 			}
 			c := parseLLM(r, settings.NewLLM())
 			c.ID = ""
-			if sc.own {
-				if err := settings.CheckOwn(c); err != nil {
-					return "", err
-				}
+			if err := sc.check(c); err != nil {
+				return "", err
 			}
 			m.Configs = append(m.Configs, c)
 			msg := fmt.Sprintf("added %s to %s", c.Label(), where)
@@ -209,10 +222,8 @@ func (s *Server) modelsAction(w http.ResponseWriter, r *http.Request, sc modelSc
 			for i := range m.Configs {
 				if m.Configs[i].ID == id {
 					c := parseLLM(r, m.Configs[i])
-					if sc.own {
-						if err := settings.CheckOwn(c); err != nil {
-							return "", err
-						}
+					if err := sc.check(c); err != nil {
+						return "", err
 					}
 					m.Configs[i] = c
 					return fmt.Sprintf("changed %s in %s", c.Label(), where), nil
@@ -318,4 +329,14 @@ func upperFirst(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// check reports what's wrong with c as one of sc's models: an organization's
+// own must be at a public https address (settings.CheckOwn); the instance's
+// need a well-formed one, as a malformed address would fail every job.
+func (sc modelScope) check(c settings.LLM) error {
+	if sc.own {
+		return settings.CheckOwn(c)
+	}
+	return settings.CheckBaseURL(c.BaseURL)
 }

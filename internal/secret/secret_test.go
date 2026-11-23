@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -54,5 +55,36 @@ func TestKeyFromEnv(t *testing.T) {
 	t.Setenv(EnvKey, "not-hex")
 	if _, err := Load(dir); err == nil {
 		t.Error("a malformed key was accepted")
+	}
+}
+
+// TestLoadConcurrent: processes starting together on one data directory all
+// end up with the same key; none sees a half-written key file.
+func TestLoadConcurrent(t *testing.T) {
+	t.Setenv(EnvKey, "")
+	dir := t.TempDir()
+	const n = 16
+	boxes := make([]*Box, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() { defer wg.Done(); boxes[i], errs[i] = Load(dir) }()
+	}
+	wg.Wait()
+	sealed, err := boxes[0].Seal([]byte("x"), "c")
+	if errs[0] != nil || err != nil {
+		t.Fatal(errs[0], err)
+	}
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("load %d: %v", i, errs[i])
+		}
+		if got, err := boxes[i].Open(sealed, "c"); err != nil || string(got) != "x" {
+			t.Fatalf("load %d has another key: %v", i, err)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".*")); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
 	}
 }

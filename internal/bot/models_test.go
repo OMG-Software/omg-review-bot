@@ -245,3 +245,118 @@ func TestOrgSlotShare(t *testing.T) {
 		t.Error("an untracked PR's job was held")
 	}
 }
+
+// TestFailoverPastBadJSONAndBrokenModels: a model that answers, but never
+// with the JSON asked for, fails over to the next once its tries are used
+// up; one that can't be built at all (a malformed address) is left out and
+// doesn't stop the others.
+func TestFailoverPastBadJSONAndBrokenModels(t *testing.T) {
+	chatty := &fakeLLM{review: "Sure! Here is my review, in prose."}
+	chattySrv := httptest.NewServer(chatty.handler(t))
+	t.Cleanup(chattySrv.Close)
+	e := newReviewEnv(t, `{"summary":"Looks fine.","comments":[]}`, func(cfg *settings.Settings) {
+		good := cfg.LLM
+		malformed := modelAt("malformed", "https://[broken")
+		cfg.Models = settings.Models{Strategy: settings.StrategyFailover,
+			Configs: []settings.LLM{malformed, modelAt("chatty", chattySrv.URL), good}}
+	})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || chatty.count() != 2 || e.lm.count() == 0 {
+		t.Fatalf("reviews %d, chatty calls %d (want its 2 tries), good calls %d", len(e.gh.reviews), chatty.count(), e.lm.count())
+	}
+	if r := lastReview(t, e.st); r.Model != "chatty → test-model" {
+		t.Errorf("review recorded model %q", r.Model)
+	}
+}
+
+// TestOwnModelsWithoutInstanceModels: the instance's models aren't set up,
+// yet an organization with its own is watched and reviewed; one without is
+// left until the instance's are.
+func TestOwnModelsWithoutInstanceModels(t *testing.T) {
+	ownPublicOnly = false
+	t.Cleanup(func() { ownPublicOnly = true })
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.LLM.Model = ""
+	})
+	if err := e.st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if e.b.pollOnce(e.ctx); !e.b.Status().Configured || len(e.b.Status().ConfigIssues) == 0 {
+		t.Fatalf("status = %+v: GitHub is set up, and the instance's model issue should still be listed", e.b.Status())
+	}
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 0 || e.lm.count() != 0 {
+		t.Fatalf("reviewed on unset instance models: reviews %d, calls %d", len(e.gh.reviews), e.lm.count())
+	}
+	own := &fakeLLM{review: clean}
+	ownSrv := httptest.NewServer(own.handler(t))
+	t.Cleanup(ownSrv.Close)
+	box, err := e.b.secretBox() // stored as the web UI would, without its public-address check
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(settings.Models{Configs: []settings.LLM{modelAt("own", ownSrv.URL)}})
+	sealed, _ := box.Seal(raw, modelsContext(500))
+	if err := e.st.SetOrgModels(500, sealed); err != nil {
+		t.Fatal(err)
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || own.count() == 0 || e.lm.count() != 0 {
+		t.Fatalf("reviews %d, own calls %d, instance calls %d", len(e.gh.reviews), own.count(), e.lm.count())
+	}
+}
+
+// TestOrgSlotHandoff: a job that waited for its PR keeps the worker's place
+// in the share it was claimed in, even if the PR has moved to another
+// account; and a held PR's jobs run in the order they were taken.
+func TestOrgSlotHandoff(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	pr := func(n int, kind jobKind, org int64) job {
+		return job{kind: kind, repo: "acme/web", number: n, org: org}
+	}
+
+	// #1 runs for acme (500); a job for it arrives as the repo moves to 600.
+	first := pr(1, jobReview, 500)
+	if !b.claimPR(first, 1) || b.claimPR(pr(1, jobReplies, 600), 1) {
+		t.Fatal("claims")
+	}
+	next, ok := b.nextForPR(first)
+	if !ok || next.org != 500 {
+		t.Fatalf("waiting job = %+v %v, want it counted to acme's place", next, ok)
+	}
+	if _, ok := b.nextForPR(next); ok || len(b.orgBusy) != 0 {
+		t.Fatalf("places left taken: %v", b.orgBusy)
+	}
+
+	// acme is at its one place with #2; #3's reply then review are held, in
+	// that order. When #2 finishes, #3's reply runs, and a newer reply for #3
+	// must wait behind the held review.
+	two := pr(2, jobReview, 500)
+	reply, review, later := pr(3, jobReplies, 500), pr(3, jobReview, 500), pr(3, jobReplies, 500)
+	later.force = true // tells it apart from the first reply
+	if !b.claimPR(two, 1) || b.claimPR(reply, 1) || b.claimPR(review, 1) {
+		t.Fatal("claims")
+	}
+	got, ok := b.nextForPR(two)
+	if !ok || got.kind != jobReplies || got.number != 3 {
+		t.Fatalf("handed %+v", got)
+	}
+	b.claimPR(later, 1)
+	if got, ok = b.nextForPR(got); !ok || got.kind != jobReview {
+		t.Fatalf("after the held reply came %+v, want the held review", got)
+	}
+	if got, ok = b.nextForPR(got); !ok || got.kind != jobReplies || !got.force {
+		t.Fatalf("then %+v, want the later reply", got)
+	}
+	if _, ok = b.nextForPR(got); ok || len(b.orgBusy) != 0 || len(b.orgHeld) != 0 {
+		t.Fatalf("busy %v held %v", b.orgBusy, b.orgHeld)
+	}
+}

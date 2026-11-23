@@ -114,6 +114,7 @@ func TestPagesRender(t *testing.T) {
 	}
 	post("/settings/models/add", url.Values{"name": {"Hosted"}, "provider": {"openai"}, "base_url": {"http://10.1.2.3:8000/v1"},
 		"model": {"big"}, "api_key": {"k2"}, "context": {"16384"}, "max_output": {"2048"}}, ts.URL)
+	post("/settings/models/add", url.Values{"provider": {"openai"}, "base_url": {"https://[broken"}, "model": {"x"}}, ts.URL)
 	post("/settings/models/strategy", url.Values{"strategy": {"roundrobin"}}, ts.URL)
 	got, _ = settings.Load(st)
 	if m := got.Models; len(m.Configs) != 2 || m.Strategy != settings.StrategyRoundRobin || m.Configs[1].Model != "big" ||

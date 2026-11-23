@@ -32,7 +32,7 @@ func (b *Bot) HandleWebhook(event string, body []byte) (accountID int64, result 
 		return accountID, "pong", nil
 	}
 	st := b.Settings()
-	if len(st.Issues()) > 0 {
+	if len(st.GitHubIssues()) > 0 {
 		return accountID, "ignored: the bot isn't configured yet", nil
 	}
 	switch event {
@@ -138,6 +138,9 @@ func (b *Bot) webhookConversation(st settings.Settings, event string, ev *github
 	}
 	if !conversationsOn(b.settingsFor(st, pr.AccountID)) {
 		return "ignored: conversations and approvals are off"
+	}
+	if b.modelsUnset(st, pr.AccountID) {
+		return "ignored: no model is set up for this organization"
 	}
 	if !b.enqueue(job{kind: jobReplies, repo: pr.Repo, number: pr.Number}) {
 		return fmt.Sprintf("%s#%d: reply check already queued", pr.Repo, pr.Number)

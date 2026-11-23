@@ -365,8 +365,16 @@ func (s *Settings) Normalize() {
 	s.Poll.WebhookIntervalSeconds = clamp(s.Poll.WebhookIntervalSeconds, s.Poll.IntervalSeconds, 86400)
 }
 
-// Issues lists what still has to be configured before the bot can run.
+// Issues lists what still has to be configured: GitHubIssues, then the
+// instance models' issues.
 func (s Settings) Issues() []string {
+	return append(s.GitHubIssues(), s.Models.Issues()...)
+}
+
+// GitHubIssues lists what has to be configured before the bot can watch
+// GitHub at all. The instance's models aren't among them: organizations with
+// their own models don't need them (see Models.Issues for those).
+func (s Settings) GitHubIssues() []string {
 	var out []string
 	if s.GitHub.AppID == 0 {
 		out = append(out, "GitHub App ID is not set")
@@ -374,7 +382,7 @@ func (s Settings) Issues() []string {
 	if s.GitHub.PrivateKey == "" {
 		out = append(out, "GitHub App private key is not set")
 	}
-	return append(out, s.Models.Issues()...)
+	return out
 }
 
 func Load(st *store.Store) (Settings, error) {

@@ -1,7 +1,7 @@
 {{define "content"}}
 <h1>Dashboard</h1>
 {{with .Status}}
-{{if not .Configured}}
+{{if or (not .Configured) .ConfigIssues}}
 <div class="card warn">
   <h3>Setup needed</h3>
   <ul>{{range .ConfigIssues}}<li>{{.}}</li>{{end}}</ul>

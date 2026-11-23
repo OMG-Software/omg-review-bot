@@ -25,14 +25,19 @@ import (
 // are reached only over https at public addresses (llm.Config.PublicOnly).
 
 // secretBox returns the box that seals organizations' own models, loading
-// (or creating) its key on first use.
+// (or creating) its key on first use. A failure isn't kept: the next call
+// tries again, so a passing problem doesn't last until a restart.
 func (b *Bot) secretBox() (*secret.Box, error) {
-	b.boxOnce.Do(func() {
-		if b.box == nil {
-			b.box, b.boxErr = secret.Load(b.dataDir)
+	b.boxMu.Lock()
+	defer b.boxMu.Unlock()
+	if b.box == nil {
+		box, err := secret.Load(b.dataDir)
+		if err != nil {
+			return nil, err
 		}
-	})
-	return b.box, b.boxErr
+		b.box = box
+	}
+	return b.box, nil
 }
 
 // modelsContext binds an organization's sealed models to it.
@@ -101,8 +106,25 @@ func (b *Bot) modelSettings(st settings.Settings, accountID int64) (settings.Set
 			st = st.WithOwnModels(accountID, own)
 		}
 	}
+	if issues := st.Models.Issues(); len(issues) > 0 {
+		return st, fmt.Errorf("the models aren't set up: %s", strings.Join(issues, "; "))
+	}
 	st.LLM = settings.Tightest(st.Models.InUse())
 	return st, nil
+}
+
+// modelsUnset reports whether accountID's jobs would use the instance's
+// models while those aren't set up. They then aren't started (they'd only
+// fail) until the instance's are, or the organization adds its own.
+func (b *Bot) modelsUnset(st settings.Settings, accountID int64) bool {
+	if len(st.Models.Configs) == 0 {
+		st.Normalize() // settings not read through Load: their model is in st.LLM
+	}
+	if len(st.Models.Issues()) == 0 {
+		return false
+	}
+	own, err := b.store.OrgHasOwnModels(accountID)
+	return err == nil && !own
 }
 
 // modelUse is one model configuration and its client.
@@ -215,21 +237,58 @@ func (f *failover) Label() string {
 	return strings.Join(f.used, " → ")
 }
 
-// modelUses builds the clients for st's models in use, in order.
-func modelUses(st settings.Settings) ([]tuned, error) {
+// skip gives up on the model in use after its answers couldn't be used
+// (they weren't the JSON asked for, say), and reports whether the next one
+// takes over.
+func (f *failover) skip(err error) bool {
+	f.mu.Lock()
+	i := f.cur
+	if i+1 >= len(f.uses) {
+		f.mu.Unlock()
+		return false
+	}
+	f.cur = i + 1
+	f.mu.Unlock()
+	if f.onSwitch != nil {
+		f.onSwitch(f.uses[i].Label(), f.uses[i+1].Label(), err)
+	}
+	return true
+}
+
+// modelUses builds the clients for st's models in use, in order. One that
+// can't be built (a malformed address, say) is left out, and named in
+// skipped, so the others still serve: it's an error only if none can be.
+func modelUses(st settings.Settings) (uses []tuned, skipped, err error) {
 	cfgs := st.Models.InUse()
 	if len(cfgs) == 0 {
-		return nil, errors.New("no model is configured")
+		return nil, nil, errors.New("no model is configured")
 	}
-	out := make([]tuned, 0, len(cfgs))
+	var errs []error
 	for _, c := range cfgs {
 		lc, err := newClient(c, st.OwnModels != 0)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", c.Label(), err)
+			errs = append(errs, fmt.Errorf("%s: %w", c.Label(), err))
+			continue
 		}
-		out = append(out, tuned{modelUse{cfg: c, lc: lc}})
+		uses = append(uses, tuned{modelUse{cfg: c, lc: lc}})
 	}
-	return out, nil
+	if len(uses) == 0 {
+		return nil, nil, errors.Join(errs...)
+	}
+	return uses, errors.Join(errs...), nil
+}
+
+// usableModels is modelUses, logging the models left out.
+func (b *Bot) usableModels(st settings.Settings, pr *store.PR) ([]tuned, error) {
+	uses, skipped, err := modelUses(st)
+	if skipped != nil {
+		if pr != nil {
+			b.logf("warn", pr.Repo, pr.Number, "model left out: %v", skipped)
+		} else {
+			b.log.Warn("model left out", "err", skipped)
+		}
+	}
+	return uses, err
 }
 
 // nextRoundRobin returns the index of the next model in turn for the set
@@ -247,7 +306,7 @@ func (b *Bot) nextRoundRobin(st settings.Settings, n int) int {
 // order as the one before fails (failover and collate). pr, if not nil, is
 // the PR the job is for, which a failover is logged against.
 func (b *Bot) chatClient(st settings.Settings, pr *store.PR) (modelClient, error) {
-	uses, err := modelUses(st)
+	uses, err := b.usableModels(st, pr)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +332,7 @@ func (b *Bot) chatClient(st settings.Settings, pr *store.PR) (modelClient, error
 // model for StrategyCollate, otherwise the one chatClient gives.
 func (b *Bot) reviewClients(st settings.Settings, pr *store.PR) ([]modelClient, error) {
 	if st.Models.Strategy == settings.StrategyCollate && len(st.Models.InUse()) > 1 {
-		uses, err := modelUses(st)
+		uses, err := b.usableModels(st, pr)
 		if err != nil {
 			return nil, err
 		}

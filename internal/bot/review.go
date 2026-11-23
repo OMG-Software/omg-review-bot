@@ -773,11 +773,34 @@ func verdictLine(st settings.Settings, event string, blocking, requesting int) s
 }
 
 // chatJSON asks for structured output, retrying once with a nudge if the
-// model's reply isn't valid JSON.
+// model's reply isn't valid JSON. If it still isn't and lc fails over, the
+// next model takes over, with the same tries.
 func (b *Bot) chatJSON(ctx context.Context, lc llm.Client, st settings.Settings, schema map[string]any, schemaName, system, user string, out any) (llm.Response, string, error) {
-	msgs := []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}}
 	var total llm.Response
 	var rawAll strings.Builder
+	for {
+		usage, err := b.chatJSONOnce(ctx, lc, st, schema, schemaName, system, user, out, &rawAll)
+		total.PromptTokens += usage.PromptTokens
+		total.CompletionTokens += usage.CompletionTokens
+		var bad badJSON
+		if f, ok := lc.(*failover); ok && errors.As(err, &bad) && ctx.Err() == nil && f.skip(err) {
+			rawAll.WriteString("\n----- next model -----\n")
+			continue
+		}
+		return total, rawAll.String(), err
+	}
+}
+
+// badJSON is a model's answers not being the JSON asked for, after its tries.
+type badJSON struct{ err error }
+
+func (e badJSON) Error() string { return "model did not return valid JSON: " + e.err.Error() }
+func (e badJSON) Unwrap() error { return e.err }
+
+// chatJSONOnce is chatJSON's tries with the model in use.
+func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Settings, schema map[string]any, schemaName, system, user string, out any, rawAll *strings.Builder) (llm.Response, error) {
+	msgs := []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}}
+	var total llm.Response
 	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
 		resp, err := lc.Chat(ctx, llm.Request{
@@ -785,13 +808,13 @@ func (b *Bot) chatJSON(ctx context.Context, lc llm.Client, st settings.Settings,
 			Temperature: st.LLM.Temperature, MaxTokens: st.LLM.MaxOutputTokens,
 		})
 		if err != nil {
-			return total, rawAll.String(), err
+			return total, err
 		}
 		total.PromptTokens += resp.PromptTokens
 		total.CompletionTokens += resp.CompletionTokens
 		rawAll.WriteString(resp.Content)
 		if lastErr = llm.DecodeJSON(resp.Content, out); lastErr == nil {
-			return total, rawAll.String(), nil
+			return total, nil
 		}
 		hint := "Your reply was not a valid JSON object in the required format."
 		if resp.Truncated {
@@ -802,7 +825,7 @@ func (b *Bot) chatJSON(ctx context.Context, lc llm.Client, st settings.Settings,
 			llm.Message{Role: "user", Content: hint + " Respond again with ONLY the JSON object, nothing else."})
 		rawAll.WriteString("\n----- retry -----\n")
 	}
-	return total, rawAll.String(), fmt.Errorf("model did not return valid JSON: %w", lastErr)
+	return total, badJSON{lastErr}
 }
 
 func (b *Bot) synthesizeSummary(ctx context.Context, lc llm.Client, st settings.Settings, gp *github.PullRequest, parts []string, fs []finding) string {

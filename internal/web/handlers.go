@@ -501,6 +501,8 @@ func parseSettings(r *http.Request, cur settings.Settings) settings.Settings {
 }
 
 func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	v := parseSettings(r, s.bot.Settings())
 	if err := settings.CheckPublicURL(v.GitHub.PublicURL); err != nil {
 		redirectErr(w, r, "/settings", err)
@@ -601,6 +603,8 @@ func (s *Server) skillUpload(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, "/skill", err)
 		return
 	}
+	s.settingsMu.Lock() // it may change the settings it reads here
+	defer s.settingsMu.Unlock()
 	st := s.bot.Settings()
 	dir := s.bot.SkillDir(st)
 	// A Skill folder the user pointed at a git clone is theirs to manage

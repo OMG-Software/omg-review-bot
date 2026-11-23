@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/OMG-Software/omg-review-bot/internal/netguard"
@@ -205,6 +206,25 @@ func CheckOwn(l LLM) error {
 	}
 	if err := netguard.CheckURL(l.BaseURL); err != nil {
 		return fmt.Errorf("the base URL must be a public https address: %w", err)
+	}
+	return nil
+}
+
+// CheckBaseURL reports what's wrong with raw as a model server's base URL:
+// it must be an http or https address with a host. Organizations' own
+// models must also pass CheckOwn.
+func CheckBaseURL(raw string) error {
+	if raw == "" {
+		return errors.New("enter the model server's base URL")
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%q isn't a valid address: %w", raw, err)
+	case u.Scheme != "http" && u.Scheme != "https":
+		return fmt.Errorf("%q must start with http:// or https://", raw)
+	case u.Hostname() == "":
+		return fmt.Errorf("%q has no host name", raw)
 	}
 	return nil
 }

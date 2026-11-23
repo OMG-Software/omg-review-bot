@@ -157,9 +157,8 @@ type Bot struct {
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
 
 	// box seals organizations' own models (see secretBox; tests may set it).
-	boxOnce sync.Once
-	box     *secret.Box
-	boxErr  error
+	boxMu sync.Mutex
+	box   *secret.Box
 	// roundRobin counts the jobs each set of models has started (key: the
 	// organization whose own set it is, 0 for the instance's).
 	roundRobin map[int64]int
@@ -220,7 +219,7 @@ func (b *Bot) Run(ctx context.Context) {
 			b.mu.Lock()
 			b.lastPoll = time.Now()
 			b.mu.Unlock()
-		} else if len(st.Issues()) == 0 {
+		} else if len(st.GitHubIssues()) == 0 {
 			b.enqueueDue(st)
 			b.maybeSweep(st)
 		}
@@ -565,13 +564,20 @@ func (b *Bot) claimPR(j job, limit int) bool {
 // while j ran. With none, it releases the PR, and the worker takes a job its
 // organization's share held back, if any: the worker stays the
 // organization's, so its share isn't exceeded.
+//
+// The worker's place in a share is j.org's, the account its PR was claimed
+// for, and every job it runs until it's free counts there: a job that waited
+// for the PR takes j.org even if its PR has since moved to another account
+// (a transferred repository), so the place it gives back is the one it took.
 func (b *Bot) nextForPR(j job) (job, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	k := prKey(j)
 	if waiting := b.active[k]; len(waiting) > 0 {
 		b.active[k] = waiting[1:]
-		return waiting[0], true
+		next := waiting[0]
+		next.org = j.org
+		return next, true
 	}
 	delete(b.active, k)
 	for j.org != 0 && len(b.orgHeld[j.org]) > 0 {
@@ -582,7 +588,18 @@ func (b *Bot) nextForPR(j job) (job, bool) {
 			b.active[hk] = append(waiting, h) // its PR's worker runs it next
 			continue
 		}
-		b.active[hk] = nil
+		// The PR's other held jobs wait for this worker now, ahead of any
+		// that come later, so they run in the order they were taken.
+		var rest, same []job
+		for _, o := range b.orgHeld[j.org] {
+			if prKey(o) == hk {
+				same = append(same, o)
+			} else {
+				rest = append(rest, o)
+			}
+		}
+		b.orgHeld[j.org] = rest
+		b.active[hk] = same
 		return h, true
 	}
 	b.orgDone(j.org)

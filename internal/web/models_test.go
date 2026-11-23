@@ -1,9 +1,11 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,5 +97,32 @@ func TestOrgOwnModels(t *testing.T) {
 	}
 	if q, _ := s.b.DailyQuota(acmeID, time.Now()); q.Own {
 		t.Error("the daily limit is still lifted after the own models were removed")
+	}
+}
+
+// TestModelEditsDontUndoEachOther: changes to one set of models made at the
+// same time all land; none is lost by another saving what it read before.
+func TestModelEditsDontUndoEachOther(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice owns acme
+	const n = 6
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			form := url.Values{"provider": {"openai"}, "base_url": {"https://api.example.com/v1"}, "model": {fmt.Sprintf("m%d", i)}}
+			req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/orgs/acme/models/add", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Origin", s.ts.URL)
+			if resp, err := s.cl.Do(req); err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+	if m, err := s.b.OrgModels(acmeID); err != nil || len(m.Configs) != n {
+		t.Fatalf("after %d adds at once, %d models (%v)", n, len(m.Configs), err)
 	}
 }

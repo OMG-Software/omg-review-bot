@@ -65,23 +65,14 @@ func Load(dataDir string) (*Box, error) {
 		if _, err := rand.Read(key); err != nil {
 			return nil, err
 		}
-		// O_EXCL: if another process made one meanwhile, that one is used.
-		f, ferr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if ferr == nil {
-			_, werr := f.WriteString(hex.EncodeToString(key) + "\n")
-			if cerr := f.Close(); werr == nil {
-				werr = cerr
-			}
-			if werr != nil {
-				_ = os.Remove(path)
-				return nil, fmt.Errorf("write %s: %w", path, werr)
-			}
+		lerr := publish(path, []byte(hex.EncodeToString(key)+"\n"))
+		if lerr == nil {
 			return New(key)
 		}
-		if !errors.Is(ferr, os.ErrExist) {
-			return nil, fmt.Errorf("create %s: %w", path, ferr)
+		if !errors.Is(lerr, os.ErrExist) {
+			return nil, lerr
 		}
-		data, err = os.ReadFile(path)
+		data, err = os.ReadFile(path) // another process made one meanwhile: that one is used
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -91,6 +82,38 @@ func Load(dataDir string) (*Box, error) {
 		return nil, fmt.Errorf("%s isn't a hex key: %w", path, err)
 	}
 	return New(key)
+}
+
+// publish writes data to path only if path doesn't exist yet (an error
+// matching os.ErrExist if it does). The file appears complete or not at
+// all: it's written in full under another name first, then linked into
+// place, so another process never reads it half written.
+func publish(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer os.Remove(tmp.Name())
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), 0o600)
+	}
+	if err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := os.Link(tmp.Name(), path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return err
+		}
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	return nil
 }
 
 // Seal encrypts plain. context binds it to where it's stored (an
