@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/llm"
@@ -27,10 +28,13 @@ func withCallTag(ctx context.Context, t callTag) context.Context {
 	return context.WithValue(ctx, callTagKey{}, t)
 }
 
-// meterCall records one model call. A call cut short because its job ended
-// (a shutdown, say) isn't the model failing, so it isn't recorded.
+// meterCall records one model call. A call cut short because its job was
+// cancelled (a shutdown, say) isn't the model failing, so it isn't
+// recorded. A call that timed out is: the model's own timeout is the HTTP
+// client's, which leaves ctx alone, and the job running out of time during
+// a call means the model was too slow.
 func (b *Bot) meterCall(ctx context.Context, u modelUse, resp *llm.Response, err error, took time.Duration) {
-	if err != nil && ctx.Err() != nil {
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
 	t, _ := ctx.Value(callTagKey{}).(callTag)

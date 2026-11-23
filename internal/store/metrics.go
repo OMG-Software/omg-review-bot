@@ -245,12 +245,21 @@ type Latency struct {
 // everyone's, with AllAccounts) whose first review was posted at or after
 // since, the time from the bot first seeing the PR to that review. It
 // includes the wait after a push and any queueing: what an author waits.
+//
+// Only the period's reviews are read (by start, with a day's margin, as a
+// job runs at most 45 minutes), and a PR with a posted review before the
+// period is dropped by an indexed lookup, so the cost follows the period
+// rather than the whole history.
 func (s *Store) FirstReviewLatency(accountID, since int64) (Latency, error) {
 	rows, err := s.db.Query(`SELECT f.first-p.tracked_at FROM
   (SELECT account_id, repo, number, MIN(finished_at) AS first FROM reviews
-   WHERE status='posted' AND finished_at>0 AND (?=-1 OR account_id=?) GROUP BY account_id, repo, number) f
+   WHERE status='posted' AND finished_at>0 AND finished_at>=? AND started_at>=? AND (?=-1 OR account_id=?)
+   GROUP BY account_id, repo, number) f
   JOIN pulls p ON p.repo=f.repo AND p.number=f.number AND p.account_id=f.account_id
-WHERE f.first>=? AND p.tracked_at>0 AND f.first>=p.tracked_at`, accountID, accountID, since)
+WHERE p.tracked_at>0 AND f.first>=p.tracked_at
+  AND NOT EXISTS (SELECT 1 FROM reviews e WHERE e.repo=f.repo AND e.number=f.number AND e.account_id=f.account_id
+    AND e.status='posted' AND e.finished_at>0 AND e.finished_at<?)`,
+		since, since-86400, accountID, accountID, since)
 	if err != nil {
 		return Latency{}, err
 	}

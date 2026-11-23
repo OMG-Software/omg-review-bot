@@ -244,8 +244,13 @@ func TestModelMaximums(t *testing.T) {
 	}
 
 	// A full set refuses at once, without asking the model's server.
-	for len(func() settings.Models { st, _ := settings.Load(s.st); return st.Models }().Configs) < settings.MaxModels {
-		addWith("ollama", ollamaSrv.URL, "8192", "1024")
+	for tries := 0; len(func() settings.Models { st, _ := settings.Load(s.st); return st.Models }().Configs) < settings.MaxModels; tries++ {
+		if tries == settings.MaxModels {
+			t.Fatal("the set didn't fill up")
+		}
+		if loc := addWith("ollama", ollamaSrv.URL, "8192", "1024"); strings.Contains(loc, "err=") {
+			t.Fatalf("adding a model to fill the set failed: %s", loc)
+		}
 	}
 	asked := 0
 	countSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { asked++; http.NotFound(w, r) }))
