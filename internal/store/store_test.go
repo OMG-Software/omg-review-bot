@@ -922,3 +922,77 @@ func TestBackfillKeepsGivenActivity(t *testing.T) {
 		t.Errorf("unassigned entries after the backfill = %d, want 2", len(acts))
 	}
 }
+
+// TestDailyReviewUsage counts an organization's posted reviews in the window,
+// its reviews under way and its PRs due for one, and nothing else.
+func TestDailyReviewUsage(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().Unix()
+	since := now - 24*3600
+	add := func(acct, started int64, status string) {
+		id, err := st.CreateReview(&Review{Repo: "a/r", Number: 1, AccountID: acct, Status: "running", StartedAt: started})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status != "running" {
+			if err := st.UpdateReview(&Review{ID: id, Status: status, FinishedAt: started}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	add(1, now-3600, "posted")
+	add(1, now-7200, "posted")
+	add(1, since-60, "posted")          // before the window
+	add(1, now-60, "error")             // not posted
+	add(1, now-60, "nothing to review") // not posted
+	add(2, now-60, "posted")            // another organization
+	for _, p := range []PR{
+		{Repo: "a/r", Number: 1, AccountID: 1, Open: true, Status: "reviewing"},
+		{Repo: "a/r", Number: 2, AccountID: 1, Open: true, Status: "pending"},
+		{Repo: "a/r", Number: 3, AccountID: 1, Open: true, Status: "pending", NotBefore: now + 600}, // not due yet
+		{Repo: "a/r", Number: 4, AccountID: 1, Open: true, Status: "pending", Skip: true},
+		{Repo: "a/r", Number: 5, AccountID: 1, Open: true, Status: "daily"},
+		// Released by the daily limit, waiting out a push's delay: its place is kept.
+		{Repo: "a/r", Number: 6, AccountID: 1, Open: true, Status: "pending", HeldAt: now - 10, NotBefore: now + 600},
+		{Repo: "b/r", Number: 1, AccountID: 2, Open: true, Status: "reviewing"},
+	} {
+		if err := st.SavePR(&p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u, err := st.DailyReviewUsage(1, since, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u != (DailyUsage{Posted: 2, Oldest: now - 7200, Reviewing: 1, Due: 2, Reserved: 1}) {
+		t.Fatalf("usage = %+v", u)
+	}
+	if held, _ := st.DailyCappedPRs(); len(held) != 1 || held[0].Number != 5 {
+		t.Fatalf("held PRs = %+v", held)
+	}
+
+	// The limit: the default until an administrator sets one, within bounds.
+	if err := st.UpsertOrg(1, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[int64]int{1: DefaultDailyReviews, 99: DefaultDailyReviews} {
+		if n, err := st.OrgDailyLimit(id); err != nil || n != want {
+			t.Errorf("OrgDailyLimit(%d) = %d, %v; want %d", id, n, err, want)
+		}
+	}
+	if err := st.SetOrgDailyReviews(1, 7); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := st.OrgDailyLimit(1); n != 7 {
+		t.Errorf("limit = %d, want 7", n)
+	}
+	for _, bad := range []int{-1, MaxDailyReviews + 1} {
+		if err := st.SetOrgDailyReviews(1, bad); err == nil {
+			t.Errorf("limit %d accepted", bad)
+		}
+	}
+}

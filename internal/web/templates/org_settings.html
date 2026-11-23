@@ -18,6 +18,22 @@
 {{end}}
 </fieldset>
 </form>
+<section class="card">
+  <h2>Daily review limit</h2>
+  <p>{{.Org.Login}} can have up to <strong>{{.D.DailyLimit}}</strong> reviews in any 24 hours{{if not .Org.DailyReviews}} (the default){{end}}.
+  {{if .D.DailyKnown}}Used in the last 24 hours: {{.D.Daily.Used}}.{{else}}How many were used in the last 24 hours couldn't be read just now.{{end}}
+  Pull requests that reach the limit wait, with a comment saying so, until there's room again.</p>
+  {{if .D.Admin}}
+  <form method="post" action="{{orgPath .Org.Login}}/daily-limit" class="inline">
+    <label>Reviews per 24 hours <input type="number" name="daily_reviews" min="1" max="{{.D.DailyMax}}" value="{{.D.DailyLimit}}" required></label>
+    <button class="primary">Save limit</button>
+  </form>
+  {{if .Org.DailyReviews}}<form method="post" action="{{orgPath .Org.Login}}/daily-limit" class="inline">
+    <input type="hidden" name="default" value="1"><button>Use the default ({{.D.DailyDefault}})</button>
+  </form>{{end}}
+  <p class="hint">Only administrators can change this; the organization's owners see it here but can't edit it.</p>
+  {{else}}<p class="hint">Set by the bot's administrators.</p>{{end}}
+</section>
 {{if and .D.Custom (not .D.ReadOnly)}}
 <form method="post" action="{{orgPath .Org.Login}}/settings" data-confirm="Throw away {{.Org.Login}}'s own review settings and use the instance's defaults?">
   <input type="hidden" name="inherit" value="1"><button>Use instance defaults instead</button>

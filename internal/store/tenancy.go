@@ -121,6 +121,22 @@ type Org struct {
 	AutoJoin       bool // members of the GitHub org get access when they sign in
 	Policy         string
 	CreatedAt      int64
+	DailyReviews   int // the daily review limit an administrator set; 0 = DefaultDailyReviews
+}
+
+// DefaultDailyReviews is how many reviews an organization gets in any 24
+// hours unless an administrator sets its own limit.
+const DefaultDailyReviews = 100
+
+// MaxDailyReviews is the highest daily review limit an administrator can set.
+const MaxDailyReviews = 100000
+
+// DailyLimit is the most reviews the organization gets in any 24 hours.
+func (o Org) DailyLimit() int {
+	if o.DailyReviews > 0 {
+		return o.DailyReviews
+	}
+	return DefaultDailyReviews
 }
 
 // Personal reports whether the account is a user, not an organization.
@@ -129,7 +145,7 @@ func (o Org) Personal() bool { return o.Type == "User" }
 func scanOrg(sc scanner) (*Org, error) {
 	var o Org
 	var active, auto int
-	if err := sc.Scan(&o.ID, &o.Login, &o.Type, &o.InstallationID, &active, &auto, &o.Policy, &o.CreatedAt); err != nil {
+	if err := sc.Scan(&o.ID, &o.Login, &o.Type, &o.InstallationID, &active, &auto, &o.Policy, &o.CreatedAt, &o.DailyReviews); err != nil {
 		return nil, err
 	}
 	o.Active, o.AutoJoin = active == 1, auto == 1
@@ -228,6 +244,30 @@ func (s *Store) ListOrgs() ([]Org, error) {
 func (s *Store) SetOrgAutoJoin(id int64, on bool) error {
 	_, err := s.db.Exec(`UPDATE orgs SET auto_join=? WHERE id=?`, b2i(on), id)
 	return err
+}
+
+// SetOrgDailyReviews sets the organization's daily review limit (0 = the
+// default). Only administrators may change it.
+func (s *Store) SetOrgDailyReviews(id int64, n int) error {
+	if n < 0 || n > MaxDailyReviews {
+		return fmt.Errorf("the daily review limit must be between 1 and %d", MaxDailyReviews)
+	}
+	_, err := s.db.Exec(`UPDATE orgs SET daily_reviews=? WHERE id=?`, n, id)
+	return err
+}
+
+// OrgDailyLimit returns the organization's daily review limit. An
+// organization that isn't stored (account 0, say) gets the default.
+func (s *Store) OrgDailyLimit(id int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT daily_reviews FROM orgs WHERE id=?`, id).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DefaultDailyReviews, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return Org{DailyReviews: n}.DailyLimit(), nil
 }
 
 // SetOrgPolicy stores the organization's review policy as JSON ("" = use the instance defaults).

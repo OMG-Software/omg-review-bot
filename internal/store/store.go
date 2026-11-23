@@ -115,7 +115,8 @@ CREATE TABLE IF NOT EXISTS orgs (
   active          INTEGER NOT NULL DEFAULT 1,
   auto_join       INTEGER NOT NULL DEFAULT 0,
   policy          TEXT NOT NULL DEFAULT '',
-  created_at      INTEGER NOT NULL DEFAULT 0
+  created_at      INTEGER NOT NULL DEFAULT 0,
+  daily_reviews   INTEGER NOT NULL DEFAULT 0 -- 0 = DefaultDailyReviews; set only by administrators
 );
 CREATE TABLE IF NOT EXISTS memberships (
   org_id     INTEGER NOT NULL,
@@ -160,6 +161,11 @@ var addedColumns = []struct{ table, column, alter string }{
 	// account_given: the entry's account came from its caller (LogAs), even
 	// 0, so BackfillAccounts leaves it. 0 for earlier entries.
 	{"activity", "account_given", `ALTER TABLE activity ADD COLUMN account_given INTEGER NOT NULL DEFAULT 0`},
+	// daily_reviews: the organization's daily review limit (0 = the default).
+	{"orgs", "daily_reviews", `ALTER TABLE orgs ADD COLUMN daily_reviews INTEGER NOT NULL DEFAULT 0`},
+	// held_at: when the daily review limit held the PR, so held PRs are let
+	// through in the order they were held (updated_at moves on every save).
+	{"pulls", "held_at", `ALTER TABLE pulls ADD COLUMN held_at INTEGER NOT NULL DEFAULT 0`},
 }
 
 // postMigrate indexes the added columns, so it runs after they exist.
@@ -189,7 +195,7 @@ CREATE VIEW repos_v AS SELECT id, installation_id, account_id, full_name, enable
 DROP VIEW IF EXISTS pulls_v;
 CREATE VIEW pulls_v AS SELECT repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
   head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
-  not_before, tracked_at, updated_at, account_id, force_retry FROM pulls;
+  not_before, tracked_at, updated_at, account_id, force_retry, held_at FROM pulls;
 DROP VIEW IF EXISTS reviews_v;
 CREATE VIEW reviews_v AS SELECT id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
   status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at,
@@ -197,7 +203,7 @@ CREATE VIEW reviews_v AS SELECT id, repo, number, head_sha, gh_review_id, url, s
 DROP VIEW IF EXISTS users_v;
 CREATE VIEW users_v AS SELECT id, login, name, avatar_url, is_admin, disabled, session_epoch, created_at, last_login FROM users;
 DROP VIEW IF EXISTS orgs_v;
-CREATE VIEW orgs_v AS SELECT id, login, type, installation_id, active, auto_join, policy, created_at FROM orgs;
+CREATE VIEW orgs_v AS SELECT id, login, type, installation_id, active, auto_join, policy, created_at, daily_reviews FROM orgs;
 `
 
 // AllAccounts, passed as an account ID, selects the rows of every
@@ -635,6 +641,9 @@ type PR struct {
 	UpdatedAt      int64
 	AccountID      int64
 	ForceRetry     bool // retry a failed manual review with its original authorization
+	// HeldAt is when the daily review limit last held the PR (0 if it
+	// isn't held). Unlike UpdatedAt, later saves (pushes) don't move it.
+	HeldAt int64
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -645,7 +654,7 @@ func scanPR(sc scanner) (*PR, error) {
 	var labels string
 	err := sc.Scan(&p.Repo, &p.Number, &p.InstallationID, &p.Title, &p.Author, &p.URL, &p.BaseRef, &p.HeadRef,
 		&draft, &open, &labels, &p.HeadSHA, &p.ReviewedSHA, &p.AttemptSHA, &p.Attempts, &p.GHUpdatedAt,
-		&p.CommentsSeen, &p.Status, &p.LastError, &skip, &p.NotBefore, &p.TrackedAt, &p.UpdatedAt, &p.AccountID, &forceRetry)
+		&p.CommentsSeen, &p.Status, &p.LastError, &skip, &p.NotBefore, &p.TrackedAt, &p.UpdatedAt, &p.AccountID, &forceRetry, &p.HeldAt)
 	if err != nil {
 		return nil, err
 	}
@@ -687,11 +696,11 @@ func (s *Store) SavePR(p *PR) error {
 	p.UpdatedAt = time.Now().Unix()
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO pulls(repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
   head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
-  not_before, tracked_at, updated_at, account_id, force_retry) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  not_before, tracked_at, updated_at, account_id, force_retry, held_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.Repo, p.Number, p.InstallationID, p.Title, p.Author, p.URL, p.BaseRef, p.HeadRef,
 		b2i(p.Draft), b2i(p.Open), strings.Join(p.Labels, "\n"), p.HeadSHA, p.ReviewedSHA, p.AttemptSHA,
 		p.Attempts, p.GHUpdatedAt, p.CommentsSeen, p.Status, p.LastError, b2i(p.Skip), p.NotBefore,
-		p.TrackedAt, p.UpdatedAt, p.AccountID, b2i(p.ForceRetry))
+		p.TrackedAt, p.UpdatedAt, p.AccountID, b2i(p.ForceRetry), p.HeldAt)
 	return err
 }
 
@@ -721,14 +730,22 @@ func (s *Store) NextDue(after int64) int64 {
 	return n.Int64
 }
 
-// ReviewedOpenPRs returns open PRs the bot has reviewed (candidates for the reply sweep).
 // LimitedPRs returns the open PRs held at their review limit.
 func (s *Store) LimitedPRs() ([]PR, error) {
 	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='limit' AND open=1`)
 }
 
+// DailyCappedPRs returns the open PRs held by their organization's daily
+// review limit, longest held first.
+func (s *Store) DailyCappedPRs() ([]PR, error) {
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='daily' AND open=1 ORDER BY held_at, repo, number`)
+}
+
+// ReviewedOpenPRs returns open PRs the bot has reviewed (candidates for the
+// reply sweep), including those held by the daily review limit, which still
+// get their replies.
 func (s *Store) ReviewedOpenPRs() ([]PR, error) {
-	return s.queryPRs(`SELECT * FROM pulls_v WHERE open=1 AND status IN ('reviewed','pending')`)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE open=1 AND status IN ('reviewed','pending','daily')`)
 }
 
 // ResetReviewing re-queues reviews interrupted by a shutdown.
@@ -850,6 +867,36 @@ func (s *Store) PostedReviews(accountID int64, repo string, number int) (int, er
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM reviews WHERE account_id=? AND repo=? AND number=? AND status='posted'`,
 		accountID, repo, number).Scan(&n)
 	return n, err
+}
+
+// DailyUsage is how much of an organization's daily review limit is taken.
+type DailyUsage struct {
+	Posted    int   // reviews posted since the window began
+	Oldest    int64 // when the oldest of them started (0 if none)
+	Reviewing int   // reviews under way now
+	Due       int   // PRs waiting for a review that is due now (as DuePRs counts them), and released ones
+	// Reserved counts the PRs the daily limit held and has let through, still
+	// waiting to be reviewed: their places are kept for them.
+	Reserved int
+}
+
+// DailyReviewUsage counts accountID's reviews posted since since (a Unix
+// time), the reviews under way and the PRs due for one at now. A review
+// counts from when it started, so it holds its place for 24 hours from then.
+func (s *Store) DailyReviewUsage(accountID, since, now int64) (DailyUsage, error) {
+	var u DailyUsage
+	var oldest sql.NullInt64
+	err := s.db.QueryRow(`SELECT COUNT(*), MIN(started_at) FROM reviews WHERE account_id=? AND status='posted' AND started_at>=?`,
+		accountID, since).Scan(&u.Posted, &oldest)
+	if err != nil {
+		return u, err
+	}
+	u.Oldest = oldest.Int64
+	err = s.db.QueryRow(`SELECT COALESCE(SUM(status='reviewing'), 0),
+  COALESCE(SUM(status='pending' AND (skip=0 OR force_retry=1) AND (held_at>0 OR not_before<=?)), 0),
+  COALESCE(SUM(status='pending' AND (skip=0 OR force_retry=1) AND held_at>0), 0) FROM pulls WHERE account_id=? AND open=1`,
+		now, accountID).Scan(&u.Reviewing, &u.Due, &u.Reserved)
+	return u, err
 }
 
 // ReviewFilter selects reviews for the review history pages.

@@ -26,6 +26,8 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
 - **Knows when to stop.** Each review says its number on the PR ("Bot review number 3 of 10").
   After the last one (10 by default, 5 to 30 per org), new pushes aren't reviewed and the PR gets
   a comment saying the limit is reached. **Review now** still works.
+- **Caps each org's daily reviews.** An org gets at most 100 reviews in any 24 hours by default.
+  Administrators can change that per org; org owners can see the limit but not change it.
 - **Follows your project's rules.** It reads the repository's own docs (`CLAUDE.md`, `AGENTS.md`,
   `CONTRIBUTING.md`, style guides) from the base branch and reviews against them, citing the rule.
 - **Conversations.** It replies when someone answers one of its comments, and answers when
@@ -460,6 +462,19 @@ event checks it for replies, so polling only catches anything missed.
    as soon as the new limit is saved. **Review now** goes past the limit, and that review counts
    as a round too. Failed reviews, reviews with nothing to review and approvals between pushes
    don't count.
+9. Each org also has a **daily review limit**: at most that many posted reviews in any 24 hours
+   (100 by default). A review counts from when it started, and reviews under way count too, so
+   no two workers can take the last place. A review past the limit isn't run: the PR shows
+   `daily` and gets one comment saying the limit is reached and when reviews resume (tried again
+   every few minutes if GitHub fails it, and brought up to date if the PR is held again before it
+   was reviewed). After that nothing more is reviewed on it, new pushes
+   included, and **Review now** is refused for the whole org, until a place frees up 24 hours after the oldest review in the window. Then held
+   PRs are let through automatically, longest held first, only as many as there's room for. A
+   place freed for a held PR is kept for it until its review starts, so **Review now** on another
+   PR can't take it, and a PR held again keeps its place in line.
+   Replies in the bot's review threads go on as usual. Only an administrator can change an org's
+   limit, under **Organizations → *org* → Settings → Daily review limit** (1 to 100,000, or back
+   to the default). Raising it lets held PRs through as soon as it's saved.
 
 **PR statuses** on the Pull requests page:
 
@@ -473,6 +488,7 @@ event checks it for replies, so polling only catches anything missed.
 | `skipped` | Has a skip label, or automatic reviews were stopped on its page |
 | `error` | Review failed 3 times; see the PR page for the error |
 | `limit` | The bot has posted as many reviews as *Most reviews per PR* allows; new pushes aren't reviewed until the limit is raised or someone clicks **Review now** |
+| `daily` | The org has had its daily review limit; the PR is reviewed automatically once there's room |
 | `closed` | Closed or merged |
 
 **Conversations.** When someone replies in a thread the bot started, the bot answers in that

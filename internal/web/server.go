@@ -158,6 +158,7 @@ func (s *Server) routes() {
 	a("POST /admin/users/{id}/admin", s.userSetAdmin)
 	a("POST /admin/users/{id}/disable", s.userSetDisabled)
 	a("GET /admin/webhooks", s.webhooksPage)
+	a("POST /orgs/{org}/daily-limit", s.orgDailyLimit)
 	a("POST /api/test/github", s.apiTestGitHub)
 	a("POST /api/test/llm", s.apiTestLLM)
 	a("POST /api/models", s.apiModels)

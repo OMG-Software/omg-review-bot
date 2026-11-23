@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
@@ -335,10 +336,45 @@ func (s *Server) orgSettings(w http.ResponseWriter, r *http.Request) {
 	} else {
 		p = base.Policy()
 	}
+	// The limit comes from the org row already loaded, so it shows (and the
+	// admin's form starts from it) even if the usage can't be read.
+	q, qerr := s.bot.DailyQuota(org.ID, time.Now())
+	if qerr != nil {
+		s.log.Warn("daily review usage", "org", org.Login, "err", qerr)
+	}
 	s.render(w, r, "org_settings.html", page{Title: org.Login + " · Settings", Nav: "orgs", Org: org, Tab: "settings", D: map[string]any{
 		"P": p, "Custom": custom, "Severities": settings.Severities,
 		"ReadOnly": !me(r).CanManage(org.ID),
+		"Admin":    me(r).Admin, "DailyLimit": org.DailyLimit(), "Daily": q, "DailyKnown": qerr == nil,
+		"DailyDefault": store.DefaultDailyReviews, "DailyMax": store.MaxDailyReviews,
 	}})
+}
+
+// orgDailyLimit sets the organization's daily review limit. It's routed
+// through adminOnly: the limit is the instance's, so owners can't change it.
+func (s *Server) orgDailyLimit(w http.ResponseWriter, r *http.Request) {
+	org := s.orgFor(w, r, true)
+	if org == nil {
+		return
+	}
+	back := orgBase(org) + "/settings"
+	n := 0 // the default
+	if r.FormValue("default") != "1" {
+		v, err := strconv.Atoi(strings.TrimSpace(r.FormValue("daily_reviews")))
+		if err != nil || v < 1 || v > store.MaxDailyReviews {
+			redirectErr(w, r, back, fmt.Errorf("the daily review limit must be a whole number from 1 to %d", store.MaxDailyReviews))
+			return
+		}
+		n = v
+	}
+	if err := s.store.SetOrgDailyReviews(org.ID, n); err != nil {
+		redirectErr(w, r, back, err)
+		return
+	}
+	limit := store.Org{DailyReviews: n}.DailyLimit()
+	s.store.LogFor(org.ID, "info", "", 0, fmt.Sprintf("%s set %s's daily review limit to %d", me(r).Display(), org.Login, limit))
+	s.bot.Wake() // a raised limit lets held PRs through now
+	redirectMsg(w, r, back, fmt.Sprintf("%s can now have up to %d reviews in any 24 hours.", org.Login, limit))
 }
 
 func (s *Server) orgSettingsSubmit(w http.ResponseWriter, r *http.Request) {

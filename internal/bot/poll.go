@@ -340,9 +340,13 @@ func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 	switch {
 	case !pr.Open:
 		pr.Status = "closed"
-		pr.ForceRetry = false
+		pr.ForceRetry, pr.HeldAt = false, 0
 	case pr.Status == "reviewing":
 		// the worker owns it until it finishes
+	case pr.Status == "daily":
+		// the organization's daily review limit stopped it: only
+		// releaseDailyCapped lets it go, once there's room. Ahead of the
+		// cases below, so a push or a manual retry doesn't let it out early.
 	case pr.ForceRetry:
 		pr.Status = "pending"
 	case pr.Skip:
@@ -397,6 +401,8 @@ func (b *Bot) releaseLimited(st settings.Settings) {
 
 func (b *Bot) enqueueDue(st settings.Settings) {
 	b.releaseLimited(st) // first, so a PR it frees is queued now
+	b.releaseDailyCapped(st)
+	go b.retryDailyNotices(st) // off the run loop: it calls GitHub
 	prs, err := b.store.DuePRs(time.Now().Unix())
 	if err != nil {
 		b.log.Warn("due PRs", "err", err)

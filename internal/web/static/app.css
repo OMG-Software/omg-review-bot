@@ -65,7 +65,7 @@ td.title { max-width: 380px; }
 .s-reviewed, .s-posted { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
 .s-pending, .s-reviewing, .s-running, .s-new { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
 .s-error { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
-.s-draft, .s-skipped, .s-baseline, .s-limit { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.s-draft, .s-skipped, .s-baseline, .s-limit, .s-daily { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 
 dl.kv { display: grid; grid-template-columns: 160px 1fr; gap: 6px 16px; margin: 0; }
