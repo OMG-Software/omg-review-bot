@@ -32,7 +32,7 @@ func (b *Bot) HandleWebhook(event string, body []byte) (accountID int64, result 
 		return accountID, "pong", nil
 	}
 	st := b.Settings()
-	if len(st.Issues()) > 0 {
+	if len(st.GitHubIssues()) > 0 {
 		return accountID, "ignored: the bot isn't configured yet", nil
 	}
 	switch event {
@@ -101,7 +101,9 @@ func (b *Bot) webhookPull(st settings.Settings, ev *github.WebhookEvent) string 
 		b.logf("info", r.FullName, ev.PullRequest.Number, "new pull request (webhook)")
 	}
 	// Any change can make a review due now (a push, a new PR, a draft marked
-	// ready, a skip label removed); the run loop decides, and it's cheap.
+	// ready, a skip label removed); the run loop decides, and it's cheap. It
+	// starts nothing itself: enqueueDue also skips an organization whose
+	// models aren't set up (see modelsUnset).
 	b.kickDue()
 	if u.stale {
 		return fmt.Sprintf("%s#%d %s: ignored, older than the state already recorded", r.FullName, ev.PullRequest.Number, ev.Action)
@@ -139,7 +141,10 @@ func (b *Bot) webhookConversation(st settings.Settings, event string, ev *github
 	if !conversationsOn(b.settingsFor(st, pr.AccountID)) {
 		return "ignored: conversations and approvals are off"
 	}
-	if !b.enqueue(job{kind: jobReplies, repo: pr.Repo, number: pr.Number}) {
+	if b.modelsUnset(st, pr.AccountID) {
+		return "ignored: no model is set up for this organization"
+	}
+	if !b.enqueue(job{kind: jobReplies, repo: pr.Repo, number: pr.Number, org: pr.AccountID}) {
 		return fmt.Sprintf("%s#%d: reply check already queued", pr.Repo, pr.Number)
 	}
 	return fmt.Sprintf("%s#%d: reply check queued (%s %s)", pr.Repo, pr.Number, event, ev.Action)

@@ -12,7 +12,7 @@
   <h2>Conversations</h2>
   {{template "policy-replies" .D}}
 </section>
-<p class="hint">The model, the review skill and how often GitHub is checked are set for the whole bot by its administrators.</p>
+<p class="hint">The review skill and how often GitHub is checked are set for the whole bot by its administrators. The models are the instance's unless {{.Org.Login}} adds its own on the <a href="{{orgPath .Org.Login}}/models">Models</a> page.</p>
 {{if not .D.ReadOnly}}
 <div class="savebar"><button class="primary">Save review settings</button></div>
 {{end}}
@@ -20,6 +20,7 @@
 </form>
 <section class="card">
   <h2>Daily review limit</h2>
+  {{if .Org.OwnModels}}<div class="flash ok">{{.Org.Login}} uses <a href="{{orgPath .Org.Login}}/models">its own models</a>, so this limit doesn't apply: reviews run on them don't count towards it. It applies again if they're all removed.</div>{{end}}
   <p>{{.Org.Login}} can have up to <strong>{{.D.DailyLimit}}</strong> reviews in any 24 hours{{if not .Org.DailyReviews}} (the default){{end}}.
   {{if .D.DailyKnown}}Used in the last 24 hours: {{.D.Daily.Used}}.{{else}}How many were used in the last 24 hours couldn't be read just now.{{end}}
   Pull requests that reach the limit wait, with a comment saying so, until there's room again.</p>

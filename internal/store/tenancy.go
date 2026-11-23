@@ -122,6 +122,9 @@ type Org struct {
 	Policy         string
 	CreatedAt      int64
 	DailyReviews   int // the daily review limit an administrator set; 0 = DefaultDailyReviews
+	// OwnModels: the organization uses its own models (bring your own key),
+	// so the daily review limit doesn't apply to it.
+	OwnModels bool
 }
 
 // DefaultDailyReviews is how many reviews an organization gets in any 24
@@ -145,7 +148,8 @@ func (o Org) Personal() bool { return o.Type == "User" }
 func scanOrg(sc scanner) (*Org, error) {
 	var o Org
 	var active, auto int
-	if err := sc.Scan(&o.ID, &o.Login, &o.Type, &o.InstallationID, &active, &auto, &o.Policy, &o.CreatedAt, &o.DailyReviews); err != nil {
+	if err := sc.Scan(&o.ID, &o.Login, &o.Type, &o.InstallationID, &active, &auto, &o.Policy, &o.CreatedAt, &o.DailyReviews,
+		&o.OwnModels); err != nil {
 		return nil, err
 	}
 	o.Active, o.AutoJoin = active == 1, auto == 1
@@ -285,6 +289,40 @@ func (s *Store) OrgPolicy(id int64) (string, error) {
 		return "", nil
 	}
 	return p, err
+}
+
+// SetOrgModels stores the organization's own models, already sealed by the
+// caller ("" = it uses the instance's again).
+func (s *Store) SetOrgModels(id int64, sealed string) error {
+	res, err := s.db.Exec(`UPDATE orgs SET models=? WHERE id=?`, sealed, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("organization %d isn't known", id)
+	}
+	return nil
+}
+
+// OrgModels returns the organization's own models as stored (sealed), or ""
+// when it uses the instance's or isn't stored.
+func (s *Store) OrgModels(id int64) (string, error) {
+	var m string
+	err := s.db.QueryRow(`SELECT models FROM orgs WHERE id=?`, id).Scan(&m)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return m, err
+}
+
+// OrgHasOwnModels reports whether the organization uses its own models.
+func (s *Store) OrgHasOwnModels(id int64) (bool, error) {
+	var own bool
+	err := s.db.QueryRow(`SELECT models<>'' FROM orgs WHERE id=?`, id).Scan(&own)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return own, err
 }
 
 // ---------- memberships ----------

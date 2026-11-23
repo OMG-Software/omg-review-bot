@@ -44,33 +44,20 @@
 </section>
 
 <section class="card">
-  <h2>Model</h2>
+  <h2>Models</h2>
+  <p>{{len $s.Models.Configs}} model{{if ne (len $s.Models.Configs) 1}}s{{end}} configured, used as <strong>{{$s.Models.StrategyInfo.Label}}</strong>:
+    {{range $i, $c := $s.Models.InUse}}{{if $i}}, {{end}}<code>{{$c.Label}}</code>{{end}}.</p>
+  <p class="hint">Organizations without models of their own use these. An organization's owners can add their own models (with their own API keys) on its <i>Models</i> page; it then uses only those, and its daily review limit no longer applies.</p>
+  <div class="actions"><a class="button" href="/settings/models">Manage models →</a></div>
+</section>
+
+<section class="card">
+  <h2>Sharing the review slots</h2>
   <div class="row">
-    <label>Provider
-      <select name="llm_provider" id="llm-provider">
-        {{range .D.Providers}}<option value="{{.ID}}" data-base="{{.Base}}" {{if eq .ID $s.LLM.Provider}}selected{{end}}>{{.Label}}</option>{{end}}
-      </select></label>
-    <label class="grow">Base URL <input name="llm_base_url" id="llm-base" value="{{$s.LLM.BaseURL}}"></label>
+    <label class="grow">One organization may use at most (% of the {{.D.Workers}} review slots)
+      <input name="lim_org_slot_percent" type="number" min="1" max="100" value="{{$s.Limits.OrgSlotPercent}}">
+      <small>Now {{$s.Limits.OrgSlots .D.Workers}} of {{.D.Workers}} at once. Its other reviews and replies wait for one of its own to finish, so one busy organization can't hold up the rest, even when no other has work. At least one is always allowed. Serving only one organization? Use 100%.</small></label>
   </div>
-  <div class="row">
-    <label class="grow">API key {{if .D.HasAPIKey}}<span class="pill s-reviewed">saved</span>{{end}}
-      <input name="llm_api_key" type="password" autocomplete="off" placeholder="{{if .D.HasAPIKey}}Leave empty to keep the saved key{{else}}Only needed for Ollama Cloud or hosted APIs{{end}}"></label>
-    {{if .D.HasAPIKey}}<label class="check"><input type="checkbox" name="llm_api_key_clear"> Remove saved key</label>{{end}}
-  </div>
-  <div class="row">
-    <label class="grow">Model <input name="llm_model" list="models" value="{{$s.LLM.Model}}" placeholder="e.g. qwen2.5-coder:32b"><datalist id="models"></datalist></label>
-    <div class="actions end"><button type="button" data-test="/api/models" data-out="model-result">Load models</button></div>
-  </div>
-  <span id="model-result" class="result"></span>
-  <div class="row">
-    <label>Context tokens <input name="llm_context" type="number" min="4096" step="1024" value="{{$s.LLM.ContextTokens}}">
-      <small>Must match the model's loaded context. For Ollama this sets <code>num_ctx</code>; in LM Studio set it when loading the model.</small></label>
-    <label>Max output tokens <input name="llm_max_output" type="number" min="512" step="256" value="{{$s.LLM.MaxOutputTokens}}"></label>
-    <label>Temperature <input name="llm_temperature" type="number" min="0" max="2" step="0.05" value="{{$s.LLM.Temperature}}"></label>
-    <label>Timeout (s) <input name="llm_timeout" type="number" min="30" value="{{$s.LLM.TimeoutSeconds}}"></label>
-  </div>
-  <label class="check"><input type="checkbox" name="llm_structured" {{if $s.LLM.StructuredOutput}}checked{{end}}> Enforce JSON schema output (recommended; turn off if your server rejects <code>response_format</code>/<code>format</code>)</label>
-  <div class="actions"><button type="button" data-test="/api/test/llm" data-out="llm-result">Test model</button><span id="llm-result" class="result"></span></div>
 </section>
 
 <section class="card">

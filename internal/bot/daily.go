@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -31,6 +32,9 @@ type DailyQuota struct {
 	// ResetAt is when the oldest review in the window drops out of it,
 	// freeing a place (zero if no review was posted in the window).
 	ResetAt time.Time
+	// Own: the organization uses its own models, so the limit doesn't apply
+	// (and reviews run on them don't count towards it).
+	Own bool
 }
 
 // Used counts the posted reviews and those under way.
@@ -38,11 +42,16 @@ func (q DailyQuota) Used() int { return q.Posted + q.Reviewing }
 
 // Full reports whether no review can start now: the places left are taken,
 // or kept for PRs the limit held and has let through.
-func (q DailyQuota) Full() bool { return q.Used()+q.Reserved >= q.Limit }
+func (q DailyQuota) Full() bool { return !q.Own && q.Used()+q.Reserved >= q.Limit }
 
 // Free is how many held PRs can be let through now: the places left, less
 // the PRs already waiting for one.
-func (q DailyQuota) Free() int { return q.Limit - q.Used() - q.Due }
+func (q DailyQuota) Free() int {
+	if q.Own {
+		return math.MaxInt
+	}
+	return q.Limit - q.Used() - q.Due
+}
 
 // DailyQuota returns accountID's daily review limit and usage at now.
 func (b *Bot) DailyQuota(accountID int64, now time.Time) (DailyQuota, error) {
@@ -54,7 +63,11 @@ func (b *Bot) DailyQuota(accountID int64, now time.Time) (DailyQuota, error) {
 	if err != nil {
 		return DailyQuota{}, err
 	}
-	q := DailyQuota{Limit: limit, DailyUsage: u}
+	own, err := b.store.OrgHasOwnModels(accountID)
+	if err != nil {
+		return DailyQuota{}, err
+	}
+	q := DailyQuota{Limit: limit, DailyUsage: u, Own: own}
 	if u.Oldest > 0 {
 		q.ResetAt = time.Unix(u.Oldest, 0).Add(dailyWindow)
 	}

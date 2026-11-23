@@ -414,11 +414,11 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	st := s.bot.Settings()
 	base := s.publicURL(r)
 	s.render(w, r, "settings.html", page{Title: "Settings", Nav: "settings", D: map[string]any{
-		"S": st, "P": st.Policy(), "HasKey": st.GitHub.PrivateKey != "", "HasAPIKey": st.LLM.APIKey != "",
+		"S": st, "P": st.Policy(), "HasKey": st.GitHub.PrivateKey != "",
 		"HasClientSecret": st.GitHub.ClientSecret != "", "HasWebhookSecret": st.GitHub.WebhookSecret != "",
 		"CallbackURL": base + "/auth/github/callback", "WebhookURL": base + "/webhooks/github",
 		"Providers": settings.Providers, "Severities": settings.Severities,
-		"SkillDir": s.bot.SkillDir(st), "Instance": true,
+		"SkillDir": s.bot.SkillDir(st), "Instance": true, "Workers": bot.Workers,
 	}})
 }
 
@@ -488,23 +488,6 @@ func parseSettings(r *http.Request, cur settings.Settings) settings.Settings {
 	}
 	v.GitHub.PublicURL = f("gh_public_url")
 
-	v.LLM.Provider = f("llm_provider")
-	v.LLM.BaseURL = f("llm_base_url")
-	if k := f("llm_api_key"); k != "" {
-		v.LLM.APIKey = k
-	}
-	if on("llm_api_key_clear") {
-		v.LLM.APIKey = ""
-	}
-	v.LLM.Model = f("llm_model")
-	if t, err := strconv.ParseFloat(f("llm_temperature"), 64); err == nil {
-		v.LLM.Temperature = t
-	}
-	v.LLM.ContextTokens = num("llm_context", v.LLM.ContextTokens)
-	v.LLM.MaxOutputTokens = num("llm_max_output", v.LLM.MaxOutputTokens)
-	v.LLM.StructuredOutput = on("llm_structured")
-	v.LLM.TimeoutSeconds = num("llm_timeout", v.LLM.TimeoutSeconds)
-
 	p := parsePolicy(r, v.Policy())
 	v.Review, v.Replies = p.Review, p.Replies
 	v.Review.SkillDir = f("rv_skill_dir")
@@ -512,11 +495,14 @@ func parseSettings(r *http.Request, cur settings.Settings) settings.Settings {
 	v.Poll.IntervalSeconds = num("poll_interval", v.Poll.IntervalSeconds)
 	v.Poll.RepoRefreshMinutes = num("poll_refresh", v.Poll.RepoRefreshMinutes)
 	v.Poll.WebhookIntervalSeconds = num("poll_webhook_interval", v.Poll.WebhookIntervalSeconds)
+	v.Limits.OrgSlotPercent = num("lim_org_slot_percent", v.Limits.OrgSlotPercent)
 	v.Normalize()
 	return v
 }
 
 func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	v := parseSettings(r, s.bot.Settings())
 	if err := settings.CheckPublicURL(v.GitHub.PublicURL); err != nil {
 		redirectErr(w, r, "/settings", err)
@@ -526,7 +512,7 @@ func (s *Server) settingsSubmit(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, "/settings", err)
 		return
 	}
-	s.bot.Wake()
+	s.bot.SettingsSaved()
 	redirectMsg(w, r, "/settings", "Settings saved.")
 }
 
@@ -574,25 +560,6 @@ func (s *Server) apiTestGitHub(w http.ResponseWriter, r *http.Request) {
 	respond(w, msg, err, nil)
 }
 
-func (s *Server) apiTestLLM(w http.ResponseWriter, r *http.Request) {
-	st := parseSettings(r, s.bot.Settings())
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(st.LLM.TimeoutSeconds)*time.Second)
-	defer cancel()
-	msg, err := s.bot.TestLLM(ctx, st)
-	respond(w, msg, err, nil)
-}
-
-func (s *Server) apiModels(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
-	models, err := s.bot.Models(ctx, parseSettings(r, s.bot.Settings()))
-	msg := fmt.Sprintf("%d models available.", len(models))
-	if err == nil && len(models) == 0 {
-		msg = "The server returned no models. Load or pull one first."
-	}
-	respond(w, msg, err, models)
-}
-
 func respond(w http.ResponseWriter, msg string, err error, models []string) {
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error()})
@@ -636,6 +603,8 @@ func (s *Server) skillUpload(w http.ResponseWriter, r *http.Request) {
 		redirectErr(w, r, "/skill", err)
 		return
 	}
+	s.settingsMu.Lock() // it may change the settings it reads here
+	defer s.settingsMu.Unlock()
 	st := s.bot.Settings()
 	dir := s.bot.SkillDir(st)
 	// A Skill folder the user pointed at a git clone is theirs to manage

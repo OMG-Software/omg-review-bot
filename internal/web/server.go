@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -37,6 +38,12 @@ type Server struct {
 	// other.
 	secretMu sync.Mutex
 	mux      *http.ServeMux
+	// settingsMu makes each change to the instance's settings, from reading
+	// them to saving them, one step, so two can't undo each other's.
+	settingsMu sync.Mutex
+	// modelLocks holds a *sync.Mutex per organization, doing the same for
+	// changes to its own models (see modelsLock).
+	modelLocks sync.Map
 
 	// unreconciled holds the IDs of people whose access sign-in couldn't
 	// update: none of their sessions count until a sign-in does. It's kept
@@ -132,6 +139,9 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /orgs/{org}/autojoin", s.orgAutoJoin)
 	m.HandleFunc("GET /orgs/{org}/settings", s.orgSettings)
 	m.HandleFunc("POST /orgs/{org}/settings", s.orgSettingsSubmit)
+	m.HandleFunc("GET /orgs/{org}/models", s.orgModelsPage)
+	m.HandleFunc("POST /orgs/{org}/models/{action}", s.orgModelsAction)
+	m.HandleFunc("POST /orgs/{org}/models/{id}/{action}", s.orgModelsAction)
 	m.HandleFunc("GET /orgs/{org}/activity", s.orgActivity)
 	m.HandleFunc("GET /prs/{owner}/{repo}/{number}", s.prPage)
 	m.HandleFunc("POST /prs/{owner}/{repo}/{number}/review", s.prReview)
@@ -150,6 +160,9 @@ func (s *Server) routes() {
 	a("POST /repos/{id}/toggle", s.repoToggle)
 	a("GET /settings", s.settingsPage)
 	a("POST /settings", s.settingsSubmit)
+	a("GET /settings/models", s.instanceModelsPage)
+	a("POST /settings/models/{action}", s.instanceModelsAction)
+	a("POST /settings/models/{id}/{action}", s.instanceModelsAction)
 	a("GET /skill", s.skillPage)
 	a("POST /skill/upload", s.skillUpload)
 	a("POST /skill/save", s.skillSave)
@@ -160,8 +173,6 @@ func (s *Server) routes() {
 	a("GET /admin/webhooks", s.webhooksPage)
 	a("POST /orgs/{org}/daily-limit", s.orgDailyLimit)
 	a("POST /api/test/github", s.apiTestGitHub)
-	a("POST /api/test/llm", s.apiTestLLM)
-	a("POST /api/models", s.apiModels)
 	s.mux = m
 }
 
@@ -349,8 +360,23 @@ var funcs = template.FuncMap{
 		}
 		return (time.Duration(n) * time.Second).String()
 	},
-	"div":      func(a, b int) int { return a / max(1, b) },
-	"add":      func(a, b int) int { return a + b },
+	"div": func(a, b int) int { return a / max(1, b) },
+	"add": func(a, b int) int { return a + b },
+	// dict builds a map from key, value pairs, to pass several values to a template.
+	"dict": func(kv ...any) (map[string]any, error) {
+		if len(kv)%2 != 0 {
+			return nil, errors.New("dict needs key, value pairs")
+		}
+		m := make(map[string]any, len(kv)/2)
+		for i := 0; i < len(kv); i += 2 {
+			k, ok := kv[i].(string)
+			if !ok {
+				return nil, fmt.Errorf("dict key %v isn't a string", kv[i])
+			}
+			m[k] = kv[i+1]
+		}
+		return m, nil
+	},
 	"sub":      func(a, b int) int { return a - b },
 	"num":      humanNum,
 	"num64":    func(n int64) string { return humanNum(int(n)) },

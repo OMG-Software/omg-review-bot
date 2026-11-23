@@ -17,8 +17,8 @@
       const j = await res.json();
       out.textContent = j.message;
       out.className = "result " + (j.ok ? "ok" : "bad");
-      if (j.models) {
-        const dl = document.getElementById("models");
+      const dl = btn.dataset.list && document.getElementById(btn.dataset.list);
+      if (j.models && dl) {
         dl.replaceChildren(...j.models.map((m) => Object.assign(document.createElement("option"), { value: m })));
       }
     } catch (err) {
@@ -29,16 +29,16 @@
     }
   });
 
-  // Switching provider fills in its default URL unless a custom one was typed.
-  const provider = document.getElementById("llm-provider");
-  const base = document.getElementById("llm-base");
-  if (provider && base) {
+  // Switching provider fills in its default URL unless a custom one was
+  // typed (each model form has its own pair).
+  document.addEventListener("change", (e) => {
+    const provider = e.target.closest("select[data-provider]");
+    const base = provider && provider.form && provider.form.querySelector("input[data-base]");
+    if (!base) return;
     const defaults = new Set([...provider.options].map((o) => o.dataset.base).filter(Boolean));
-    provider.addEventListener("change", () => {
-      const def = provider.selectedOptions[0].dataset.base;
-      if (!base.value || defaults.has(base.value)) base.value = def || "";
-    });
-  }
+    const def = provider.selectedOptions[0].dataset.base;
+    if (!base.value || defaults.has(base.value)) base.value = def || "";
+  });
 
   // "Generate" fills a secret field with a random value and shows it, so it
   // can be copied into the GitHub App's settings before saving.
@@ -52,9 +52,9 @@
     field.select();
   });
 
-  // Confirmation for destructive forms.
+  // Confirmation for destructive forms, or destructive buttons in a form.
   document.addEventListener("submit", (e) => {
-    const msg = e.target.dataset.confirm;
+    const msg = (e.submitter && e.submitter.dataset.confirm) || e.target.dataset.confirm;
     if (msg && !confirm(msg)) e.preventDefault();
   });
 

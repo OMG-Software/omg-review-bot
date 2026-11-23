@@ -33,13 +33,22 @@ func (b *Bot) handleReplies(ctx context.Context, j job) {
 		return
 	}
 	cl := app.Installation(pr.InstallationID)
-	if st.Replies.Enabled {
-		if err := b.replyThreads(ctx, st, cl, pr, login); err != nil {
+	mst, err := b.modelSettings(st, pr.AccountID)
+	if err != nil {
+		// Not answered with the instance's models instead: an organization
+		// with its own uses only those.
+		b.logf("error", pr.Repo, pr.Number, "not replying: %v", err)
+	} else {
+		st = mst
+	}
+	mc := &jobClient{b: b, st: st, pr: pr}
+	if st.Replies.Enabled && err == nil {
+		if err := b.replyThreads(ctx, st, mc, cl, pr, login); err != nil {
 			b.logf("error", pr.Repo, pr.Number, "replying to review threads: %v", err)
 		}
 	}
-	if st.Replies.Mentions {
-		if err := b.replyMentions(ctx, st, cl, pr, login); err != nil {
+	if st.Replies.Mentions && err == nil {
+		if err := b.replyMentions(ctx, st, mc, cl, pr, login); err != nil {
 			b.logf("error", pr.Repo, pr.Number, "replying to mentions: %v", err)
 		}
 	}
@@ -60,7 +69,7 @@ func isBotUser(u github.User) bool {
 }
 
 // replyThreads answers people who replied in review threads the bot started.
-func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, cl *github.Client, pr *store.PR, login string) error {
+func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, mc *jobClient, cl *github.Client, pr *store.PR, login string) error {
 	comments, err := cl.ReviewComments(ctx, pr.Repo, pr.Number)
 	if err != nil {
 		return err
@@ -145,7 +154,7 @@ func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, cl *github
 			continue
 		}
 		b.setCurrent(ctx, pr, "Replying to @%s on %s#%d", last.User.Login, pr.Repo, pr.Number)
-		text, resolved, err := b.threadReply(ctx, st, cl, pr, root, list, login, last)
+		text, resolved, err := b.threadReply(ctx, st, mc, cl, pr, root, list, login, last)
 		if err != nil {
 			return err
 		}
@@ -174,7 +183,7 @@ var threadSchema = map[string]any{
 	},
 }
 
-func (b *Bot) threadReply(ctx context.Context, st settings.Settings, cl *github.Client, pr *store.PR,
+func (b *Bot) threadReply(ctx context.Context, st settings.Settings, mc *jobClient, cl *github.Client, pr *store.PR,
 	root *github.ReviewComment, thread []*github.ReviewComment, login string, last *github.ReviewComment) (text string, resolved bool, err error) {
 	sk := b.loadSkill(st)
 	totalChars := (st.LLM.ContextTokens - st.LLM.MaxOutputTokens - 256) * charsPerToken
@@ -217,7 +226,7 @@ func (b *Bot) threadReply(ctx context.Context, st settings.Settings, cl *github.
 	guide, _ := b.guidelinesFor(ctx, st, cl, pr.Repo, pr.Number, pr.BaseRef, pr.BaseRef, []string{root.Path}, 10)
 	system := threadSystemPrompt(sk.Name, skillText, guide)
 
-	lc, err := llm.New(llmConfig(st))
+	lc, err := mc.get()
 	if err != nil {
 		return "", false, err
 	}
@@ -232,7 +241,7 @@ func (b *Bot) threadReply(ctx context.Context, st settings.Settings, cl *github.
 	}
 	// The model couldn't produce the JSON: still answer, but don't resolve.
 	b.logf("warn", pr.Repo, pr.Number, "model gave no structured thread reply; answering in plain text")
-	text, err = b.freeText(ctx, st, system+"\n\nIgnore the JSON format: output only the reply text.", sb.String())
+	text, err = b.freeText(ctx, lc, st, system+"\n\nIgnore the JSON format: output only the reply text.", sb.String())
 	return text, false, err
 }
 
@@ -241,7 +250,7 @@ func mentionRE(slug string) *regexp.Regexp {
 }
 
 // replyMentions answers PR conversation comments that @mention the bot.
-func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, cl *github.Client, pr *store.PR, login string) error {
+func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, mc *jobClient, cl *github.Client, pr *store.PR, login string) error {
 	slug := b.botSlug()
 	if slug == "" {
 		return nil
@@ -260,7 +269,7 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, cl *githu
 			continue
 		}
 		b.setCurrent(ctx, pr, "Answering @%s on %s#%d", c.User.Login, pr.Repo, pr.Number)
-		text, err := b.mentionReply(ctx, st, cl, pr, ics[:i+1], login)
+		text, err := b.mentionReply(ctx, st, mc, cl, pr, ics[:i+1], login)
 		if err != nil {
 			return err
 		}
@@ -274,7 +283,7 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, cl *githu
 	return nil
 }
 
-func (b *Bot) mentionReply(ctx context.Context, st settings.Settings, cl *github.Client, pr *store.PR, convo []github.IssueComment, login string) (string, error) {
+func (b *Bot) mentionReply(ctx context.Context, st settings.Settings, mc *jobClient, cl *github.Client, pr *store.PR, convo []github.IssueComment, login string) (string, error) {
 	files, filesErr := cl.PullFiles(ctx, pr.Repo, pr.Number)
 	var paths []string // nil (all references) if the file list is unavailable
 	if filesErr == nil {
@@ -318,18 +327,18 @@ func (b *Bot) mentionReply(ctx context.Context, st settings.Settings, cl *github
 		changed = append(changed, f.Filename)
 	}
 	guide, _ := b.guidelinesFor(ctx, st, cl, pr.Repo, pr.Number, pr.BaseRef, pr.BaseRef, changed, 10)
-	return b.freeText(ctx, st, mentionSystemPrompt(sk.Name, skillText, guide), sb.String())
-}
-
-func (b *Bot) freeText(ctx context.Context, st settings.Settings, system, user string) (string, error) {
-	lc, err := llm.New(llmConfig(st))
+	lc, err := mc.get()
 	if err != nil {
 		return "", err
 	}
+	return b.freeText(ctx, lc, st, mentionSystemPrompt(sk.Name, skillText, guide), sb.String())
+}
+
+func (b *Bot) freeText(ctx context.Context, lc llm.Client, st settings.Settings, system, user string) (string, error) {
 	resp, err := lc.Chat(ctx, llm.Request{
 		Messages:    []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}},
 		Temperature: st.LLM.Temperature,
-		MaxTokens:   min(2048, st.LLM.MaxOutputTokens),
+		MaxTokens:   2048, // or less: the answering model's own cap (see tuned)
 	})
 	if err != nil {
 		return "", err

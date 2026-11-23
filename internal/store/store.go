@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS orgs (
   auto_join       INTEGER NOT NULL DEFAULT 0,
   policy          TEXT NOT NULL DEFAULT '',
   created_at      INTEGER NOT NULL DEFAULT 0,
-  daily_reviews   INTEGER NOT NULL DEFAULT 0 -- 0 = DefaultDailyReviews; set only by administrators
+  daily_reviews   INTEGER NOT NULL DEFAULT 0, -- 0 = DefaultDailyReviews; set only by administrators
+  models          TEXT NOT NULL DEFAULT ''    -- the organization's own models, sealed (see SetOrgModels); '' = the instance's
 );
 CREATE TABLE IF NOT EXISTS memberships (
   org_id     INTEGER NOT NULL,
@@ -166,6 +167,12 @@ var addedColumns = []struct{ table, column, alter string }{
 	// held_at: when the daily review limit held the PR, so held PRs are let
 	// through in the order they were held (updated_at moves on every save).
 	{"pulls", "held_at", `ALTER TABLE pulls ADD COLUMN held_at INTEGER NOT NULL DEFAULT 0`},
+	// models: the organization's own model configurations (bring your own
+	// key), sealed; '' = it uses the instance's.
+	{"orgs", "models", `ALTER TABLE orgs ADD COLUMN models TEXT NOT NULL DEFAULT ''`},
+	// own_model: the review ran on the organization's own models, so it
+	// doesn't count against the daily review limit.
+	{"reviews", "own_model", `ALTER TABLE reviews ADD COLUMN own_model INTEGER NOT NULL DEFAULT 0`},
 }
 
 // postMigrate indexes the added columns, so it runs after they exist.
@@ -199,11 +206,12 @@ CREATE VIEW pulls_v AS SELECT repo, number, installation_id, title, author, url,
 DROP VIEW IF EXISTS reviews_v;
 CREATE VIEW reviews_v AS SELECT id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
   status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at,
-  account_id, event, fixed, sev_p1, sev_p2, sev_p3, sev_p4, sev_p5, detailed FROM reviews;
+  account_id, event, fixed, sev_p1, sev_p2, sev_p3, sev_p4, sev_p5, detailed, own_model FROM reviews;
 DROP VIEW IF EXISTS users_v;
 CREATE VIEW users_v AS SELECT id, login, name, avatar_url, is_admin, disabled, session_epoch, created_at, last_login FROM users;
 DROP VIEW IF EXISTS orgs_v;
-CREATE VIEW orgs_v AS SELECT id, login, type, installation_id, active, auto_join, policy, created_at, daily_reviews FROM orgs;
+CREATE VIEW orgs_v AS SELECT id, login, type, installation_id, active, auto_join, policy, created_at, daily_reviews,
+  models<>'' AS own_models FROM orgs;
 `
 
 // AllAccounts, passed as an account ID, selects the rows of every
@@ -799,6 +807,7 @@ type Review struct {
 	Fixed            int    // earlier findings this review confirmed fixed and resolved
 	Sev              [5]int // findings posted (inline and notes) at P1..P5
 	Detailed         bool   // Sev and Fixed were recorded; false for reviews from before they were
+	OwnModel         bool   // run on the organization's own models, so not counted against its daily limit
 }
 
 func scanReview(sc scanner) (*Review, error) {
@@ -806,13 +815,14 @@ func scanReview(sc scanner) (*Review, error) {
 	err := sc.Scan(&r.ID, &r.Repo, &r.Number, &r.HeadSHA, &r.GHReviewID, &r.URL, &r.Summary, &r.Comments,
 		&r.Notes, &r.Model, &r.Skill, &r.Status, &r.Error, &r.Raw, &r.Batches, &r.PromptTokens,
 		&r.CompletionTokens, &r.StartedAt, &r.FinishedAt,
-		&r.AccountID, &r.Event, &r.Fixed, &r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.Detailed)
+		&r.AccountID, &r.Event, &r.Fixed, &r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.Detailed, &r.OwnModel)
 	return &r, err
 }
 
 func (s *Store) CreateReview(r *Review) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO reviews(repo, number, head_sha, model, skill, status, started_at, account_id, detailed) VALUES(?,?,?,?,?,?,?,?,1)`,
-		r.Repo, r.Number, r.HeadSHA, r.Model, r.Skill, r.Status, r.StartedAt, r.AccountID)
+	res, err := s.db.Exec(`INSERT INTO reviews(repo, number, head_sha, model, skill, status, started_at, account_id, detailed, own_model)
+VALUES(?,?,?,?,?,?,?,?,1,?)`,
+		r.Repo, r.Number, r.HeadSHA, r.Model, r.Skill, r.Status, r.StartedAt, r.AccountID, r.OwnModel)
 	if err != nil {
 		return 0, err
 	}
@@ -886,7 +896,9 @@ type DailyUsage struct {
 func (s *Store) DailyReviewUsage(accountID, since, now int64) (DailyUsage, error) {
 	var u DailyUsage
 	var oldest sql.NullInt64
-	err := s.db.QueryRow(`SELECT COUNT(*), MIN(started_at) FROM reviews WHERE account_id=? AND status='posted' AND started_at>=?`,
+	// Reviews run on the organization's own models don't count: the limit
+	// shares out the instance's models.
+	err := s.db.QueryRow(`SELECT COUNT(*), MIN(started_at) FROM reviews WHERE account_id=? AND status='posted' AND own_model=0 AND started_at>=?`,
 		accountID, since).Scan(&u.Posted, &oldest)
 	if err != nil {
 		return u, err
