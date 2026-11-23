@@ -19,6 +19,7 @@ import (
 )
 
 var errSkip = errors.New("review skipped")
+var errAlreadyReviewed = errors.New("commit already reviewed")
 
 // Conservative estimate: code tokenizes denser than prose.
 const charsPerToken = 3
@@ -117,7 +118,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	b.prMu.Unlock()
 
 	b.setCurrent(ctx, pr, "Reviewing %s#%d", pr.Repo, pr.Number)
-	sha, err := b.reviewPR(ctx, st, pr, qn)
+	fetchedPull, err := b.reviewPR(ctx, st, pr, qn, j.force)
 	if qn != nil && !qn.claimed {
 		// The review stopped before it could take the comment over (GitHub
 		// unreachable, say, or the PR closed); the status below says whether
@@ -126,6 +127,8 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 			switch cur, getErr := b.store.GetPR(j.repo, j.number); {
 			case errors.Is(err, errSkip):
 				b.closeQueued(qn, "The pull request was closed before the review started.")
+			case errors.Is(err, errAlreadyReviewed):
+				b.closeQueued(qn, "This commit has already been reviewed.")
 			case getErr != nil:
 				// Whether it will be retried isn't known, so it isn't said.
 				b.closeQueued(qn, "The review couldn't start.")
@@ -149,7 +152,7 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 	switch {
 	case errors.Is(err, errSkip):
 		b.recompute(cur, st)
-	case err != nil:
+	case err != nil && !errors.Is(err, errAlreadyReviewed):
 		cur.LastError = err.Error()
 		if cur.AttemptSHA != cur.HeadSHA {
 			cur.AttemptSHA, cur.Attempts = cur.HeadSHA, 0
@@ -164,7 +167,13 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 			b.logf("error", cur.Repo, cur.Number, "review failed after %d attempts: %v", cur.Attempts, err)
 		}
 	default:
-		cur.ReviewedSHA = sha
+		head := fetchedPull.Head.SHA
+		if cur.HeadSHA != head && cur.HeadSHA == pr.HeadSHA && cur.GHUpdatedAt == pr.GHUpdatedAt {
+			// The worker may have seen a push before the poll or webhook did.
+			// Keep any changes the tracker recorded while the review ran.
+			cur.HeadSHA, cur.GHUpdatedAt = head, fetchedPull.UpdatedAt
+		}
+		cur.ReviewedSHA = head
 		cur.Attempts = 0
 		cur.LastError = ""
 		cur.Status = "reviewed"
@@ -392,23 +401,33 @@ func listOrNone(ss []string) string {
 	return strings.Join(ss, ", ")
 }
 
-// reviewPR runs one full review and posts it. It returns the head SHA reviewed.
+// reviewPR fetches the current PR and reviews it. Automatic reviews skip an
+// already reviewed head and return the fetch so the tracker can catch up.
 // qn is the review's queued comment (nil if none): reviewPR claims it once it
 // can see the review through, and turns it into the review notice.
-func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, qn *queuedNotice) (sha string, err error) {
+func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, qn *queuedNotice, force bool) (reviewed *github.PullRequest, err error) {
 	app, err := b.getApp(ctx, st)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	cl := app.Installation(pr.InstallationID)
 	gp, err := cl.Pull(ctx, pr.Repo, pr.Number)
 	if err != nil {
-		return "", fmt.Errorf("fetch PR: %w", err)
+		return nil, fmt.Errorf("fetch PR: %w", err)
 	}
 	if gp.State != "open" {
-		return "", errSkip
+		return nil, errSkip
 	}
 	head := gp.Head.SHA
+	if head == "" {
+		return nil, errors.New("fetched PR has no head SHA")
+	}
+	if head != pr.HeadSHA && newerOnGitHub(pr.GHUpdatedAt, gp.UpdatedAt) {
+		return nil, fmt.Errorf("fetched PR head %s is older than the tracked head %s", short(head), short(pr.HeadSHA))
+	}
+	if !force && head == pr.ReviewedSHA {
+		return gp, errAlreadyReviewed
+	}
 	sk := b.loadSkill(st)
 
 	rec := &store.Review{Repo: pr.Repo, Number: pr.Number, HeadSHA: head, Model: st.LLM.Model, Skill: sk.Name,
@@ -459,15 +478,15 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 
 	files, err := cl.PullFiles(ctx, pr.Repo, pr.Number)
 	if err != nil {
-		return "", fmt.Errorf("list PR files: %w", err)
+		return nil, fmt.Errorf("list PR files: %w", err)
 	}
 	lc, err := llm.New(llmConfig(st))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	existing, err := cl.ReviewComments(ctx, pr.Repo, pr.Number)
 	if err != nil {
-		return "", fmt.Errorf("list review comments: %w", err)
+		return nil, fmt.Errorf("list review comments: %w", err)
 	}
 	login := b.BotLogin()
 	mine := botRoots(existing, login)
@@ -496,7 +515,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	header := prHeader(gp)
 	budget := totalChars - len(system) - len(header) - 3000
 	if budget < 2000 {
-		return "", fmt.Errorf("model context (%d tokens) is too small for the skill and PR description; raise 'Context tokens' in Settings or shorten the skill", st.LLM.ContextTokens)
+		return nil, fmt.Errorf("model context (%d tokens) is too small for the skill and PR description; raise 'Context tokens' in Settings or shorten the skill", st.LLM.ContextTokens)
 	}
 	p := buildPlan(st, files, budget)
 	rec.Batches = len(p.batches)
@@ -535,7 +554,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 				liftRequest: countOpen(st.Review.RequestChangesLevel, threads) == 0 && pr.ReviewedSHA != "",
 			}, nil)
 		}
-		return head, nil
+		return gp, nil
 	}
 
 	var all []finding
@@ -551,7 +570,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		rec.PromptTokens += usage.PromptTokens
 		rec.CompletionTokens += usage.CompletionTokens
 		if err != nil {
-			return "", fmt.Errorf("model (part %d/%d): %w", i+1, len(p.batches), err)
+			return nil, fmt.Errorf("model (part %d/%d): %w", i+1, len(p.batches), err)
 		}
 		if s := strings.TrimSpace(out.Summary); s != "" {
 			summaries = append(summaries, s)
@@ -611,7 +630,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		rv, drafts, err = post(ri, event)
 	}
 	if err != nil {
-		return "", fmt.Errorf("post review: %w", err)
+		return nil, fmt.Errorf("post review: %w", err)
 	}
 	// A change request can only be standing if the bot reviewed the PR before,
 	// so a first review skips listing the reviews just to find none.
@@ -629,7 +648,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	}
 	b.logf("info", pr.Repo, pr.Number, "posted review of %s (%s): %d inline comments, %d notes, %d earlier findings resolved as fixed (%d parts, %d+%d tokens)",
 		short(head), strings.ToLower(event), len(drafts), len(ri.notes), fixed, len(p.batches), rec.PromptTokens, rec.CompletionTokens)
-	return head, nil
+	return gp, nil
 }
 
 // reviewEvent picks the review's event from the open findings: blocking at

@@ -58,6 +58,7 @@ type fakeGitHub struct {
 	failEdits     bool             // editing issue comments fails (a 502)
 	failList      bool             // listing the PR's conversation comments fails (a 502)
 	mainStatus    string           // main.go's status in the PR's files; "" = modified
+	onReview      func()           // runs once after a review is posted, with mu held
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -138,6 +139,10 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			state := map[string]string{"APPROVE": "APPROVED", "COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}[req.Event]
 			rid := 500 + int64(len(f.reviews))
 			f.reviewLog = append(f.reviewLog, map[string]any{"id": rid, "user": bot, "state": state, "commit_id": req.CommitID, "body": req.Body})
+			if f.onReview != nil {
+				f.onReview()
+				f.onReview = nil
+			}
 			send(map[string]any{"id": rid, "html_url": fmt.Sprintf("https://github.example/review/%d", rid)})
 		case strings.HasPrefix(p, "/repos/acme/web/pulls/7/reviews/") && strings.HasSuffix(p, "/dismissals"):
 			var rid int64
@@ -369,6 +374,89 @@ func (e *reviewEnv) push(sha, patch, content, review, updatedAt string) {
 	e.lm.mu.Lock()
 	e.lm.review = review
 	e.lm.mu.Unlock()
+}
+
+func TestAutomaticReviewUsesFreshHeadOnce(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+	})
+	e.b.pollOnce(e.ctx)
+	original, err := e.st.GetPR("acme/web", 7)
+	if err != nil || original == nil || original.Status != "pending" {
+		t.Fatalf("expected a queued PR, got %+v (%v)", original, err)
+	}
+
+	// GitHub sees the push before the worker's fetch, but the tracker still has
+	// the head from the first poll. Let the scheduler run again without polling.
+	e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+	drain(e.ctx, e.b)
+	e.b.enqueueDue(e.cfg)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || e.gh.reviews[0].CommitID != "bbb222" {
+		t.Fatalf("expected one review of bbb222, got %+v", e.gh.reviews)
+	}
+	pr, err := e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.HeadSHA != "bbb222" || pr.ReviewedSHA != "bbb222" || pr.Status != "reviewed" {
+		t.Fatalf("expected the new head to be tracked and reviewed, got %+v (%v)", pr, err)
+	}
+
+	// Repair a pending record left by the old behavior without calling the model.
+	pr.HeadSHA, pr.GHUpdatedAt, pr.Status = original.HeadSHA, original.GHUpdatedAt, "pending"
+	if err := e.st.SavePR(pr); err != nil {
+		t.Fatal(err)
+	}
+	e.b.enqueueDue(e.cfg)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || len(e.lm.prompts["code_review"]) != 1 {
+		t.Fatalf("already-reviewed head ran again: %d posts, %d model reviews", len(e.gh.reviews), len(e.lm.prompts["code_review"]))
+	}
+	pr, err = e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.HeadSHA != "bbb222" || pr.Status != "reviewed" {
+		t.Fatalf("expected the stale record to be repaired, got %+v (%v)", pr, err)
+	}
+
+	if err := e.b.ReviewNow(pr.Repo, pr.Number, pr.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 2 || e.gh.reviews[1].CommitID != "bbb222" {
+		t.Fatalf("expected a manual re-review of bbb222, got %+v", e.gh.reviews)
+	}
+}
+
+func TestReviewCompletionPreservesHeadFromWebhook(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+	})
+	e.b.pollOnce(e.ctx)
+	e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+	e.gh.mu.Lock()
+	e.gh.onReview = func() {
+		e.gh.head, e.gh.updatedAt = "ccc333", "2026-01-01T00:20:00Z"
+		event := &github.WebhookEvent{
+			Action:     "synchronize",
+			Repository: &github.Repo{ID: 100, FullName: "acme/web"},
+			PullRequest: &github.PullRequest{
+				Number: 7, State: "open", UpdatedAt: e.gh.updatedAt, Head: github.Ref{SHA: e.gh.head},
+			},
+		}
+		if got := e.b.webhookPull(e.cfg, event); got != "acme/web#7 synchronize: reviewing" {
+			t.Errorf("unexpected webhook result: %s", got)
+		}
+	}
+	e.gh.mu.Unlock()
+	drain(e.ctx, e.b)
+	pr, err := e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.HeadSHA != "ccc333" || pr.ReviewedSHA != "bbb222" || pr.Status != "pending" {
+		t.Fatalf("expected the webhook head to remain pending, got %+v (%v)", pr, err)
+	}
+	e.b.enqueueDue(e.cfg)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 2 || e.gh.reviews[0].CommitID != "bbb222" || e.gh.reviews[1].CommitID != "ccc333" {
+		t.Fatalf("expected one review per head, got %+v", e.gh.reviews)
+	}
 }
 
 func TestReviewResolveAndApproveEndToEnd(t *testing.T) {
