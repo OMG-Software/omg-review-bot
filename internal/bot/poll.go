@@ -340,8 +340,11 @@ func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 	switch {
 	case !pr.Open:
 		pr.Status = "closed"
+		pr.ForceRetry = false
 	case pr.Status == "reviewing":
 		// the worker owns it until it finishes
+	case pr.ForceRetry:
+		pr.Status = "pending"
 	case pr.Skip:
 		pr.Status = "skipped"
 	case st.Review.SkipDrafts && pr.Draft:
@@ -400,7 +403,7 @@ func (b *Bot) enqueueDue(st settings.Settings) {
 		return
 	}
 	for _, p := range prs {
-		if !b.settingsFor(st, p.AccountID).Review.Enabled || !allowedRepo(st, p.Repo) {
+		if !allowedRepo(st, p.Repo) || (!p.ForceRetry && !b.settingsFor(st, p.AccountID).Review.Enabled) {
 			continue
 		}
 		b.enqueue(job{kind: jobReview, repo: p.Repo, number: p.Number})
