@@ -450,12 +450,36 @@ func (o *ollama) Limits(ctx context.Context) (Limits, error) {
 	if err := doJSON(ctx, o.hc, http.MethodPost, o.base+"/api/show", o.cfg.APIKey, map[string]any{"model": o.cfg.Model}, &out); err != nil {
 		return Limits{}, err
 	}
-	for k, v := range out.ModelInfo {
-		if f, ok := v.(float64); ok && f > 0 && strings.HasSuffix(k, ".context_length") {
-			return Limits{Context: int(f)}, nil
+	return ollamaLimits(out.ModelInfo)
+}
+
+// ollamaLimits reads the context window from /api/show's model_info. A
+// model with more than one part (a vision model's projector, say) has more
+// than one "*.context_length", so the main architecture's is read first,
+// and failing that the first by name, never whichever a map gives first.
+func ollamaLimits(info map[string]any) (Limits, error) {
+	num := func(k string) int {
+		if f, ok := info[k].(float64); ok && f > 0 {
+			return int(f)
+		}
+		return 0
+	}
+	if arch, ok := info["general.architecture"].(string); ok && arch != "" {
+		if n := num(arch + ".context_length"); n > 0 {
+			return Limits{Context: n}, nil
 		}
 	}
-	return Limits{}, errNoLimits
+	var keys []string
+	for k := range info {
+		if strings.HasSuffix(k, ".context_length") && num(k) > 0 {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return Limits{}, errNoLimits
+	}
+	sort.Strings(keys)
+	return Limits{Context: num(keys[0])}, nil
 }
 
 // ---------- output helpers ----------

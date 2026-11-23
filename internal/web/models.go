@@ -117,7 +117,7 @@ func (s *Server) modelsPage(w http.ResponseWriter, r *http.Request, sc modelScop
 		key := c.APIKey != ""
 		c.APIKey = ""
 		shown.Configs[i] = c
-		views[i] = modelView{LLM: c, HasKey: key, Usage: usage[store.ConfigKey(c.ID, c.Model)]}
+		views[i] = modelView{LLM: c, HasKey: key, Usage: usage[c.ID]}
 	}
 	d := map[string]any{
 		"Base": sc.base, "Own": sc.own, "M": shown, "Configs": views, "ReadOnly": readOnly,
@@ -419,6 +419,13 @@ func (mx maximums) apply(c *settings.LLM) string {
 	}
 	c.SetMaximums(mx.lim.Context, mx.lim.Output, mx.ctx, mx.out)
 	msg := ". " + strings.TrimSuffix(limitsNote(mx.lim, *c, mx.ctx, mx.out), ".")
+	if typed := mx.typedOut; mx.ctx && !mx.out && typed > 0 && c.MaxOutputTokens != typed {
+		why := fmt.Sprintf("half the %d-token context window", c.ContextTokens)
+		if c.MaxOutputTokens > typed {
+			why = "the least the bot allows"
+		}
+		msg += fmt.Sprintf("; the output limit typed, %d, was changed to %d, %s", typed, c.MaxOutputTokens, why)
+	}
 	if mx.err != nil {
 		msg += fmt.Sprintf(" (its server couldn't be asked: %v); set them by hand if they're wrong", mx.err)
 	}

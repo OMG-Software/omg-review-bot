@@ -132,32 +132,30 @@ type ConfigUsage struct {
 }
 
 // ConfigUsageSince sums up the use of a set's models (0 = the instance's,
-// else an organization's own) at or after since, by configuration ID and
-// model name joined by a NUL (see ConfigKey).
+// else an organization's own) at or after since, by configuration ID: a
+// configuration's card counts every model it has used in the period, so
+// editing its model doesn't hide the reviews it already sent.
 func (s *Store) ConfigUsageSince(set, since int64) (map[string]ConfigUsage, error) {
-	rows, err := s.db.Query(`SELECT config_id, model,
+	rows, err := s.db.Query(`SELECT config_id,
   COUNT(DISTINCT CASE WHEN kind='review' AND review_id<>0 THEN review_id END),
   COUNT(DISTINCT CASE WHEN kind='review' AND review_id<>0 AND ok=1 THEN review_id END),
   COALESCE(SUM(kind='reply' AND ok=1),0), COALESCE(SUM(ok=0),0)
-FROM model_calls WHERE model_set=? AND ts>=? GROUP BY config_id, model`, set, since)
+FROM model_calls WHERE model_set=? AND ts>=? GROUP BY config_id`, set, since)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := map[string]ConfigUsage{}
 	for rows.Next() {
-		var id, model string
+		var id string
 		var u ConfigUsage
-		if err := rows.Scan(&id, &model, &u.Reviews, &u.Answered, &u.Replies, &u.Failed); err != nil {
+		if err := rows.Scan(&id, &u.Reviews, &u.Answered, &u.Replies, &u.Failed); err != nil {
 			return nil, err
 		}
-		out[ConfigKey(id, model)] = u
+		out[id] = u
 	}
 	return out, rows.Err()
 }
-
-// ConfigKey indexes ConfigUsageSince's result.
-func ConfigKey(configID, model string) string { return configID + "\x00" + model }
 
 // ---------- organizations ----------
 

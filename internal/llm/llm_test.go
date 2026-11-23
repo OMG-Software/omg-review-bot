@@ -111,6 +111,12 @@ func TestLimits(t *testing.T) {
 		{"Ollama", "ollama", "", map[string]string{
 			"POST /api/show": `{"model_info":{"general.architecture":"qwen3","qwen3.context_length":40960,"qwen3.embedding_length":4096}}`,
 		}, Limits{Context: 40960}, false},
+		{"Ollama, a vision model", "ollama", "", map[string]string{
+			"POST /api/show": `{"model_info":{"general.architecture":"gemma3","clip.vision.context_length":1024,"gemma3.context_length":131072,"zzz.context_length":8}}`,
+		}, Limits{Context: 131072}, false},
+		{"Ollama, no architecture", "ollama", "", map[string]string{
+			"POST /api/show": `{"model_info":{"b.context_length":2048,"a.context_length":4096}}`,
+		}, Limits{Context: 4096}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			srv := serve(c.routes)

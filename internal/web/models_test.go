@@ -271,6 +271,16 @@ func TestModelMaximums(t *testing.T) {
 	if c := last(); c.ContextTokens != 40960 || c.MaxOutputTokens != 20000 {
 		t.Errorf("window cleared, output typed: limits %d/%d (redirect %s); want 40960/20000", c.ContextTokens, c.MaxOutputTokens, hdr.Get("Location"))
 	}
+	if loc, _ := url.QueryUnescape(hdr.Get("Location")); strings.Contains(loc, "output limit typed") {
+		t.Errorf("an output that fits is said to have been changed: %s", loc)
+	}
+	// More than half the window typed: lowered to half, and the message says so.
+	_, hdr = s.post("/settings/models/"+id+"/update", url.Values{"provider": {"ollama"}, "base_url": {ollamaSrv.URL}, "model": {"qwen3"},
+		"context": {""}, "max_output": {"30000"}})
+	loc, _ = url.QueryUnescape(hdr.Get("Location"))
+	if c := last(); c.MaxOutputTokens != 20480 || !strings.Contains(loc, "the output limit typed, 30000, was changed to 20480, half the 40960-token context window") {
+		t.Errorf("too large an output typed: limit %d, redirect %s; want 20480 and a note", c.MaxOutputTokens, loc)
+	}
 
 	// A full set refuses at once, without asking the model's server.
 	for tries := 0; len(func() settings.Models { st, _ := settings.Load(s.st); return st.Models }().Configs) < settings.MaxModels; tries++ {
