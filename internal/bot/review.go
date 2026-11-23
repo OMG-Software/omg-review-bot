@@ -111,6 +111,13 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 			return
 		}
 	}
+	if q, full := b.dailyCapped(pr); full {
+		b.holdForDailyLimit(pr, q)
+		b.prMu.Unlock()
+		b.closeQueued(qn, "This organization has reached its daily review limit. The review will run automatically once there's room.")
+		b.announceDailyLimit(ctx, st, pr, q)
+		return
+	}
 	pr.Status = "reviewing"
 	pr.LastError = ""
 	_ = b.store.SavePR(pr)

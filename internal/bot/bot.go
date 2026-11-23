@@ -112,6 +112,9 @@ type Bot struct {
 	syncTried   time.Time // the last repository sync started, successful or not
 	syncPending bool      // a repository sync is scheduled for when the minute since the last one ends
 	lastSweep   time.Time
+	// dailyWake is when a PR held by its organization's daily review limit
+	// may next be let through (zero if none waits on the clock).
+	dailyWake   time.Time
 	lastPoll    time.Time
 	lastWebhook time.Time
 	queued      map[string]bool // key → whether the queued job is a manual review
@@ -191,6 +194,9 @@ func (b *Bot) Run(ctx context.Context) {
 		wait := interval - time.Since(b.lastPollTime())
 		if due := b.store.NextDue(time.Now().Unix()); due > 0 {
 			wait = min(wait, time.Until(time.Unix(due, 0))+time.Second)
+		}
+		if at := b.nextDailyRelease(); !at.IsZero() {
+			wait = min(wait, time.Until(at)+time.Second)
 		}
 		t := time.NewTimer(max(wait, time.Second))
 		pollNow = false
@@ -664,6 +670,12 @@ func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
 	if !allowedRepo(b.Settings(), repo) {
 		b.prMu.Unlock()
 		return fmt.Errorf("%s is paused: the \"Only these orgs\" setting excludes its owner", repo)
+	}
+	// Unlike the per-PR round limit, the daily limit binds reviews asked for
+	// by hand too: it's the administrator's, not the organization's.
+	if q, full := b.dailyCapped(pr); full {
+		b.prMu.Unlock()
+		return dailyLimitError(q)
 	}
 	pr.Status = "pending"
 	pr.NotBefore = 0

@@ -1781,3 +1781,138 @@ func TestUnknownRepoAccountActivityUnassigned(t *testing.T) {
 			startedTrackingUnder(st, 900), startedTrackingUnder(st, 0))
 	}
 }
+
+// TestDailyReviewLimit: once an organization has had its daily reviews, the
+// next review isn't run: the PR is told once, waits at "daily" through later
+// pushes and refuses a review by hand, until the limit has room again.
+func TestDailyReviewLimit(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+	})
+	gh, st, b, ctx := e.gh, e.st, e.b, e.ctx
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetOrgDailyReviews(500, 1); err != nil {
+		t.Fatal(err)
+	}
+	patch, content := gh.patch, gh.content
+	pushes := 0
+	push := func() {
+		pushes++
+		e.push(fmt.Sprintf("head%03d", pushes), patch, content, clean, fmt.Sprintf("2026-01-01T01:%02d:00Z", pushes))
+		b.pollOnce(ctx)
+		drain(ctx, b)
+	}
+	notices := func() []string {
+		var out []string
+		for _, c := range gh.posted {
+			if strings.Contains(c, "prbot:daily-limit") {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	status := func() string {
+		pr, _ := st.GetPR("acme/web", 7)
+		return pr.Status
+	}
+
+	// 1) The day's one review.
+	b.pollOnce(ctx)
+	drain(ctx, b)
+	if len(gh.reviews) != 1 || len(notices()) != 0 {
+		t.Fatalf("first review: %d reviews, %d notices", len(gh.reviews), len(notices()))
+	}
+
+	// 2) A push isn't reviewed: the PR is held and told why, once, and its
+	// queued comment says the review didn't run.
+	push()
+	if len(gh.reviews) != 1 || status() != "daily" {
+		t.Fatalf("past the daily limit: %d reviews, status %q", len(gh.reviews), status())
+	}
+	ns := notices()
+	if len(ns) != 1 {
+		t.Fatalf("daily-limit notices = %q", ns)
+	}
+	for _, want := range []string{"Daily review limit reached", "1 of its 1 reviews", "resume automatically from about ", "answer replies"} {
+		if !strings.Contains(ns[0], want) {
+			t.Errorf("daily-limit notice missing %q:\n%s", want, ns[0])
+		}
+	}
+	if !strings.Contains(fmt.Sprint(gh.edited), "reached its daily review limit") {
+		t.Errorf("queued comment not closed with the reason: %v", gh.edited)
+	}
+	if at := b.nextDailyRelease(); at.IsZero() || time.Until(at) < 23*time.Hour || time.Until(at) > 24*time.Hour {
+		t.Errorf("next release at %v, want about 24 hours after the first review", at)
+	}
+
+	// 3) Later pushes leave it held, with no second notice, and a review by
+	// hand is refused.
+	push()
+	if len(gh.reviews) != 1 || len(notices()) != 1 || status() != "daily" {
+		t.Fatalf("second push: %d reviews, %d notices, status %q", len(gh.reviews), len(notices()), status())
+	}
+	if err := b.ReviewNow("acme/web", 7, 500); err == nil || !strings.Contains(err.Error(), "1 of its 1 reviews") {
+		t.Fatalf("ReviewNow past the daily limit = %v", err)
+	}
+	drain(ctx, b)
+	if len(gh.reviews) != 1 || status() != "daily" {
+		t.Fatalf("after ReviewNow: %d reviews, status %q", len(gh.reviews), status())
+	}
+
+	// 4) Raising the limit lets the held PR through at the next wake-up,
+	// reviewing its latest push.
+	if err := st.SetOrgDailyReviews(500, 2); err != nil {
+		t.Fatal(err)
+	}
+	b.enqueueDue(b.Settings())
+	drain(ctx, b)
+	if len(gh.reviews) != 2 || gh.reviews[1].CommitID != fmt.Sprintf("head%03d", pushes) || status() != "reviewed" {
+		t.Fatalf("after raising the limit: %d reviews, status %q", len(gh.reviews), status())
+	}
+	if !b.nextDailyRelease().IsZero() {
+		t.Errorf("a release is still scheduled with nothing held")
+	}
+
+	// 5) At the raised limit again, the next push is held, but the PR was told
+	// within the last 24 hours, so it isn't told again.
+	push()
+	if len(gh.reviews) != 2 || status() != "daily" || len(notices()) != 1 {
+		t.Fatalf("at the raised limit: %d reviews, status %q, %d notices", len(gh.reviews), status(), len(notices()))
+	}
+}
+
+// TestDailyLimitReleasesOnlyWhatFits: PRs held by the daily limit are let
+// through longest held first, only as many as there's room for.
+func TestDailyLimitReleasesOnlyWhatFits(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"x","comments":[]}`, func(cfg *settings.Settings) {})
+	st, b := e.st, e.b
+	if err := st.UpsertOrg(500, "acme", "Organization", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetOrgDailyReviews(500, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{1, 2, 3} {
+		p := store.PR{Repo: "acme/held", Number: n, AccountID: 500, Open: true, Status: "daily", HeadSHA: fmt.Sprintf("sha%d", n)}
+		if err := st.SavePR(&p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.releaseDailyCapped(b.Settings())
+	var got []string
+	for _, n := range []int{1, 2, 3} {
+		pr, _ := st.GetPR("acme/held", n)
+		got = append(got, pr.Status)
+	}
+	if fmt.Sprint(got) != "[pending daily daily]" {
+		t.Fatalf("statuses after release = %v, want only the first let through", got)
+	}
+	// The released one now waits for its place, so nothing more is let go.
+	b.releaseDailyCapped(b.Settings())
+	if pr, _ := st.GetPR("acme/held", 2); pr.Status != "daily" {
+		t.Fatalf("second release let through PR 2 (%s) while PR 1 is due", pr.Status)
+	}
+}

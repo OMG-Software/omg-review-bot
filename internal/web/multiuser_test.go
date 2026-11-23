@@ -1758,3 +1758,60 @@ func TestStopWithUnrecordedEndsSignsOut(t *testing.T) {
 	}
 	s.srv.unreconciled.Delete(int64(aliceID)) // let the old retry stop
 }
+
+// TestDailyLimitAdminOnly: an organization's owners can see its daily review
+// limit but not change it; only administrators can.
+func TestDailyLimitAdminOnly(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice, an owner of acme
+
+	limit := func() int {
+		t.Helper()
+		n, err := s.st.OrgDailyLimit(acmeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	_, body, _ := s.get("/orgs/acme/settings")
+	if !strings.Contains(body, "up to <strong>100</strong> reviews in any 24 hours (the default)") ||
+		!strings.Contains(body, "Used in the last 24 hours: 1.") {
+		t.Errorf("owner's settings page doesn't show the daily limit:\n%s", body)
+	}
+	if strings.Contains(body, "/daily-limit") {
+		t.Error("owner's settings page offers to change the daily limit")
+	}
+	if code, _ := s.post("/orgs/acme/daily-limit", url.Values{"daily_reviews": {"5000"}}); code != http.StatusForbidden {
+		t.Errorf("owner POST daily-limit = %d, want 403", code)
+	}
+	if limit() != 100 {
+		t.Fatalf("owner changed the daily limit to %d", limit())
+	}
+
+	// Made an administrator, she can set it, within bounds, and put it back.
+	if err := s.st.SetUserAdmin(aliceID, true); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := s.post("/orgs/acme/daily-limit", url.Values{"daily_reviews": {"25"}}); code != http.StatusSeeOther || limit() != 25 {
+		t.Fatalf("admin POST daily-limit = %d, limit %d", code, limit())
+	}
+	if n, _ := s.st.OrgDailyLimit(otherID); n != 100 {
+		t.Errorf("acme's limit leaked into other: %d", n)
+	}
+	_, body, _ = s.get("/orgs/acme/settings")
+	if !strings.Contains(body, `name="daily_reviews" min="1" max="100000" value="25"`) || !strings.Contains(body, "Use the default (100)") {
+		t.Errorf("admin's settings page has no daily-limit form:\n%s", body)
+	}
+	for _, bad := range []string{"0", "-3", "abc", "100001", ""} {
+		if _, hdr := s.post("/orgs/acme/daily-limit", url.Values{"daily_reviews": {bad}}); !strings.Contains(hdr.Get("Location"), "err=") || limit() != 25 {
+			t.Errorf("daily limit %q accepted (limit now %d)", bad, limit())
+		}
+	}
+	if _, _ = s.post("/orgs/acme/daily-limit", url.Values{"default": {"1"}}); limit() != 100 {
+		t.Errorf("back to the default: limit %d", limit())
+	}
+	if o, _ := s.st.GetOrg(acmeID); o.DailyReviews != 0 {
+		t.Errorf("default stored as %d, want 0", o.DailyReviews)
+	}
+}

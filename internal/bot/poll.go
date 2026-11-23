@@ -357,6 +357,9 @@ func (b *Bot) recompute(pr *store.PR, st settings.Settings) {
 	case pr.Status == "limit" && b.stillOverLimit(pr, st):
 		// reviewed as often as the bot may: later pushes wait for the limit
 		// to be raised or a review asked for by hand
+	case pr.Status == "daily":
+		// the organization's daily review limit stopped it: only
+		// releaseDailyCapped lets it go, once there's room
 	default:
 		pr.Status = "pending"
 	}
@@ -394,6 +397,7 @@ func (b *Bot) releaseLimited(st settings.Settings) {
 
 func (b *Bot) enqueueDue(st settings.Settings) {
 	b.releaseLimited(st) // first, so a PR it frees is queued now
+	b.releaseDailyCapped(st)
 	prs, err := b.store.DuePRs(time.Now().Unix())
 	if err != nil {
 		b.log.Warn("due PRs", "err", err)
