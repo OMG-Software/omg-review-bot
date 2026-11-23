@@ -368,14 +368,19 @@ func modelRows(ms []store.ModelUsage, withSet bool) []rankRow {
 	return out
 }
 
-// orgSevRows are organizations' findings by level.
-func orgSevRows(os []store.OrgMetrics) []stackRow {
-	out := make([]stackRow, 0, len(os))
-	for _, o := range os {
-		if o.Findings == 0 {
-			continue
+// orgSevRows are organizations' findings by level, the most found first, at
+// most limit of them.
+func orgSevRows(os []store.OrgMetrics, limit int) []stackRow {
+	var idx []int
+	for i, o := range os {
+		if o.Findings > 0 {
+			idx = append(idx, i)
 		}
-		out = append(out, stackRow{Label: orgLabel(o.Login), Sev: o.Sev})
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return os[idx[a]].Findings > os[idx[b]].Findings })
+	out := make([]stackRow, 0, min(limit, len(idx)))
+	for _, i := range idx[:min(limit, len(idx))] {
+		out = append(out, stackRow{Label: orgLabel(os[i].Login), Sev: os[i].Sev})
 	}
 	return out
 }

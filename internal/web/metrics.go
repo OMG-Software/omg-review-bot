@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
@@ -59,32 +60,52 @@ func byWeek(days []store.DayStats) []store.DayStats {
 // reviewed first.
 const repoTableRows = 50
 
-// repoChartRows is how many repositories each repository chart shows, the
-// top of its own ranking.
+// repoChartRows is how many rows each repository chart (and the
+// organizations' chart) shows, the top of its own ranking.
 const repoChartRows = 15
 
 // hideInstanceModelNames keeps the instance's models from an organization's
-// members: each is shown as "Instance model" (numbered, when there are
-// several), as its label is its model name when it has no name of its own,
-// and a name its administrators gave it can contain the model name too.
-func hideInstanceModelNames(ms []store.ModelUsage) {
-	var unnamed []int
-	for i, m := range ms {
-		if m.ModelSet == 0 {
-			unnamed = append(unnamed, i)
-		}
+// members: each is shown as "Instance model", as its label is its model name
+// when it has no name of its own, and a name its administrators gave it can
+// contain the model name too. With several configured (cfgs), each is
+// numbered by its place in that list, so a model has the same number on
+// every period's page whichever models were used in it. A configuration
+// since removed is a "Removed instance model", and one whose model has been
+// changed since says so.
+func hideInstanceModelNames(ms []store.ModelUsage, cfgs []settings.LLM) {
+	pos := make(map[string]int, len(cfgs))
+	for i, c := range cfgs {
+		pos[c.ID] = i
 	}
-	// Numbered in configuration order, not by use, so a model keeps its
-	// number as the ranking changes.
-	slices.SortFunc(unnamed, func(a, b int) int {
+	var removed []int
+	for i, m := range ms {
+		if m.ModelSet != 0 {
+			continue
+		}
+		n, ok := pos[m.ConfigID]
+		if !ok {
+			removed = append(removed, i)
+			continue
+		}
+		ms[i].Label = "Instance model"
+		if len(cfgs) > 1 {
+			ms[i].Label += " " + strconv.Itoa(n+1)
+		}
+		if m.Model != cfgs[n].Model {
+			ms[i].Label += " (earlier model)"
+		}
+		ms[i].Model = ""
+	}
+	// Removed ones in a fixed order too: by configuration, then model.
+	slices.SortFunc(removed, func(a, b int) int {
 		if c := strings.Compare(ms[a].ConfigID, ms[b].ConfigID); c != 0 {
 			return c
 		}
 		return strings.Compare(ms[a].Model, ms[b].Model)
 	})
-	for n, i := range unnamed {
-		ms[i].Label, ms[i].Model = "Instance model", ""
-		if len(unnamed) > 1 {
+	for n, i := range removed {
+		ms[i].Label, ms[i].Model = "Removed instance model", ""
+		if len(removed) > 1 {
 			ms[i].Label += " " + strconv.Itoa(n+1)
 		}
 	}
@@ -130,7 +151,7 @@ func (s *Server) metricsData(accountID int64, days int) map[string]any {
 	models, err := s.store.ModelUsageSince(accountID, since)
 	warn("models", err)
 	if !all {
-		hideInstanceModelNames(models)
+		hideInstanceModelNames(models, s.bot.Settings().Models.Configs)
 	}
 	replies, err := s.store.RepliesSince(accountID, since)
 	warn("replies", err)
@@ -155,7 +176,7 @@ func (s *Server) metricsData(accountID int64, days int) map[string]any {
 	if all {
 		orgs, err := s.store.OrgMetricsSince(since)
 		warn("organizations", err)
-		d["Orgs"], d["OrgSevRows"] = orgs, orgSevRows(orgs)
+		d["Orgs"], d["OrgSevRows"], d["OrgCount"] = orgs, orgSevRows(orgs, repoChartRows), len(orgs)
 	}
 	return d
 }

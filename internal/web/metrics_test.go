@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
@@ -41,8 +42,8 @@ func TestMetricsPages(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("acme's metrics = %d", code)
 	}
-	for _, want := range []string{"Most active repositories", "acme/web", "Findings by repository and level", "Instance model 1", "Instance model 2",
-		"Reviews sent to each model", "Time to first review", `class="active">90 days`, "Instance model", "acme/broken"} {
+	for _, want := range []string{"Most active repositories", "acme/web", "Findings by repository and level", ">Instance model", "Removed instance model", // m1 is configured, m2 isn't
+		"Reviews sent to each model", "Time to first review", `class="active">90 days`, "acme/broken"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("acme's metrics lack %q", want)
 		}
@@ -79,6 +80,38 @@ func TestMetricsPages(t *testing.T) {
 	}
 	if _, body, _ := s.get("/"); !strings.Contains(body, "Most active repositories") || !strings.Contains(body, `href="/metrics"`) {
 		t.Error("the dashboard has no chart of the most active repositories, or no link to the metrics")
+	}
+}
+
+// TestHideInstanceModelNames: an instance model's number is its place in the
+// configured list, the same whichever models a period used; a removed one,
+// or an earlier model of a configuration, says so; own models keep names.
+func TestHideInstanceModelNames(t *testing.T) {
+	cfgs := []settings.LLM{{ID: "a", Model: "small"}, {ID: "b", Model: "mid"}, {ID: "c", Model: "large"}}
+	names := func(ms []store.ModelUsage) []string {
+		hideInstanceModelNames(ms, cfgs)
+		var out []string
+		for _, m := range ms {
+			if m.Model != "" && m.ModelSet == 0 {
+				t.Errorf("%s still names its model %q", m.Label, m.Model)
+			}
+			out = append(out, m.Label)
+		}
+		return out
+	}
+	// Seven days: "b" unused. Ninety: all three, plus history.
+	week := names([]store.ModelUsage{{ConfigID: "c", Label: "Large one", Model: "large"}, {ConfigID: "a", Label: "small", Model: "small"}})
+	quarter := names([]store.ModelUsage{
+		{ConfigID: "c", Label: "Large one", Model: "large"}, {ConfigID: "b", Label: "mid", Model: "mid"},
+		{ConfigID: "a", Label: "small", Model: "small"}, {ConfigID: "a", Label: "tiny", Model: "tiny"},
+		{ConfigID: "z", Label: "gone", Model: "gone"}, {ModelSet: 5, ConfigID: "a", Label: "Ours", Model: "ours-7b"},
+	})
+	if fmt.Sprint(week) != "[Instance model 3 Instance model 1]" {
+		t.Errorf("7 days = %v", week)
+	}
+	want := "[Instance model 3 Instance model 2 Instance model 1 Instance model 1 (earlier model) Removed instance model Ours]"
+	if fmt.Sprint(quarter) != want {
+		t.Errorf("90 days = %v, want %s", quarter, want)
 	}
 }
 
@@ -124,6 +157,13 @@ func TestRepoNames(t *testing.T) {
 		if names[i] != w {
 			t.Errorf("name %d = %q, want %q", i, names[i], w)
 		}
+	}
+	var orgs []store.OrgMetrics
+	for i := range repoChartRows + 3 {
+		orgs = append(orgs, store.OrgMetrics{Login: fmt.Sprintf("org%02d", i), Findings: i})
+	}
+	if rows := orgSevRows(orgs, repoChartRows); len(rows) != repoChartRows || rows[0].Label != fmt.Sprintf("org%02d", repoChartRows+2) {
+		t.Errorf("organizations' chart: %d rows, first %q; want the %d with most findings, most first", len(rows), rows[0].Label, repoChartRows)
 	}
 	if segClass(0, 3.9) != "viz-seg viz-s1 short" || segClass(4, 4) != "viz-seg viz-s5" {
 		t.Errorf("segment classes: %q %q", segClass(0, 3.9), segClass(4, 4))

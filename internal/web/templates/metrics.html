@@ -82,7 +82,7 @@
 {{if $d.All}}
 <h2 class="section">Organizations</h2>
 <div class="card">
-  {{if $d.OrgSevRows}}<figure class="chart"><figcaption><b>Findings by organization and level</b></figcaption>
+  {{if $d.OrgSevRows}}<figure class="chart"><figcaption><b>Findings by organization and level</b>{{if and (eq (len $d.OrgSevRows) $d.RepoChartRows) (gt $d.OrgCount $d.RepoChartRows)}} <span class="muted">· the top {{len $d.OrgSevRows}} of {{$d.OrgCount}} organizations, by findings</span>{{end}}</figcaption>
     {{sevStackChart "Findings by organization and level" $d.OrgSevRows}}</figure>{{end}}
   {{if $d.Orgs}}
   <div class="table-scroll">
