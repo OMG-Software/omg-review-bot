@@ -1,0 +1,114 @@
+{{define "model-fields"}}
+{{/* One configuration's fields. Dot: map with C (the config), P (providers), Own, HasKey, L (datalist id). */}}
+<div class="row">
+  <label class="grow">Name <input name="name" value="{{.C.Name}}" placeholder="Optional, e.g. &quot;Fast&quot; or &quot;Hosted&quot;" maxlength="60"></label>
+  <label>Provider
+    <select name="provider" data-provider>
+      {{range .P}}<option value="{{.ID}}" data-base="{{.Base}}" {{if eq .ID $.C.Provider}}selected{{end}}>{{.Label}}</option>{{end}}
+    </select></label>
+  <label class="grow">Base URL <input name="base_url" data-base value="{{.C.BaseURL}}" {{if .Own}}placeholder="https://api.example.com/v1" required{{end}}>
+    {{if .Own}}<small>Must be a public <code>https://</code> address.</small>{{end}}</label>
+</div>
+<div class="row">
+  <label class="grow">API key {{if .HasKey}}<span class="pill s-reviewed">saved</span>{{end}}
+    <input name="api_key" type="password" autocomplete="off" placeholder="{{if .HasKey}}Leave empty to keep the saved key{{else}}Only needed for hosted APIs{{end}}"></label>
+  {{if .HasKey}}<label class="check"><input type="checkbox" name="api_key_clear"> Remove saved key</label>{{end}}
+</div>
+<div class="row">
+  <label class="grow">Model <input name="model" list="{{.L}}" value="{{.C.Model}}" placeholder="e.g. qwen2.5-coder:32b" required><datalist id="{{.L}}"></datalist></label>
+  <div class="actions end"><button type="button" data-test="{{.Base}}/list" data-out="{{.L}}-result" data-list="{{.L}}">Load models</button></div>
+</div>
+<div class="row">
+  <label>Context tokens <input name="context" type="number" min="4096" step="1024" value="{{.C.ContextTokens}}">
+    <small>Must match the model's loaded context. For Ollama this sets <code>num_ctx</code>.</small></label>
+  <label>Max output tokens <input name="max_output" type="number" min="512" step="256" value="{{.C.MaxOutputTokens}}"></label>
+  <label>Temperature <input name="temperature" type="number" min="0" max="2" step="0.05" value="{{.C.Temperature}}"></label>
+  <label>Timeout (s) <input name="timeout" type="number" min="30" value="{{.C.TimeoutSeconds}}"></label>
+</div>
+<label class="check"><input type="checkbox" name="structured" {{if .C.StructuredOutput}}checked{{end}}> Enforce JSON schema output (recommended; turn off if the server rejects <code>response_format</code>/<code>format</code>)</label>
+{{end}}
+
+{{define "content"}}
+{{$d := .D}}{{$base := $d.Base}}
+<h1>Models</h1>
+{{if .Org}}
+  {{if $d.M.Configs}}
+  <p class="lead">{{.Org.Login}} uses <strong>its own models</strong> below, with its own API keys. Its reviews and replies use only these, and the daily review limit doesn't apply.</p>
+  {{else}}
+  <p class="lead">{{.Org.Login}} uses the instance's models
+    ({{range $i, $c := $d.InstanceInUse}}{{if $i}}, {{end}}<code>{{$c.Label}}</code>{{end}}),
+    with a limit of {{$d.DailyLimit}} reviews in any 24 hours.</p>
+  <p class="hint">Add a model of your own (bring your own API key) and {{.Org.Login}} uses only its own models from the next review, with no daily review limit.
+    Remove them all to go back to the instance's models and limit. Keys are stored encrypted and never shown again. The model server must be reachable at a public <code>https://</code> address.</p>
+  {{end}}
+{{else}}
+  <p class="lead">The instance's models, used by every organization that hasn't added its own. Back to <a href="/settings">Settings</a>.</p>
+{{end}}
+{{if $d.ReadOnly}}<div class="flash warn">Only owners can change these.</div>{{end}}
+
+{{if $d.Unreadable}}{{if not $d.ReadOnly}}
+<form method="post" action="{{$base}}/x/delete" data-confirm="Remove all of {{.Org.Login}}'s own models? It goes back to the instance's models and daily review limit.">
+  <input type="hidden" name="all" value="1"><button>Remove all of its own models</button>
+</form>
+{{end}}{{end}}
+
+{{if $d.M.Configs}}
+<section class="card">
+  <h2>How they're used</h2>
+  <form method="post" action="{{$base}}/strategy">
+  <fieldset class="plain" {{if $d.ReadOnly}}disabled{{end}}>
+    {{range $d.Strategies}}
+    <label class="check"><input type="radio" name="strategy" value="{{.ID}}" {{if eq .ID $d.M.Strategy}}checked{{end}}>
+      <span><strong>{{.Label}}</strong>: <span class="hint">{{.Help}}</span></span></label>
+    {{end}}
+    <div class="row">
+      <label class="grow">Model for "One model"
+        <select name="active">{{range $d.Configs}}<option value="{{.ID}}" {{if eq .ID $d.M.Active}}selected{{end}}>{{.Label}}</option>{{end}}</select></label>
+    </div>
+    <p class="hint">Failover, round-robin and collate go through the models in the order listed below. With several models, prompts are sized to fit the one with the smallest context.</p>
+    {{if not $d.ReadOnly}}<div class="actions"><button class="primary">Save</button></div>{{end}}
+  </fieldset>
+  </form>
+</section>
+{{end}}
+
+{{range $i, $c := $d.Configs}}
+<section class="card" id="model-{{$c.ID}}">
+  <h2>{{add $i 1}}. {{$c.Label}}
+    {{if and (eq $d.M.Strategy "single") (eq $c.ID $d.M.Active)}}<span class="pill s-reviewed">in use</span>{{end}}</h2>
+  <form method="post" action="{{$base}}/{{$c.ID}}/update" data-model-form>
+  <fieldset class="plain" {{if $d.ReadOnly}}disabled{{end}}>
+    <input type="hidden" name="id" value="{{$c.ID}}">
+    {{template "model-fields" (dict "C" $c.LLM "P" $d.Providers "Own" $d.Own "HasKey" $c.HasKey "L" (print "models-" $c.ID) "Base" $base)}}
+    {{if not $d.ReadOnly}}
+    <div class="actions">
+      <button class="primary">Save</button>
+      <button type="button" data-test="{{$base}}/test" data-out="models-{{$c.ID}}-result">Test model</button>
+      <button formaction="{{$base}}/{{$c.ID}}/move" name="dir" value="up" formnovalidate {{if eq $i 0}}disabled{{end}} title="Move up">↑</button>
+      <button formaction="{{$base}}/{{$c.ID}}/move" name="dir" value="down" formnovalidate {{if eq (add $i 1) (len $d.Configs)}}disabled{{end}} title="Move down">↓</button>
+      {{if or $.Org (gt (len $d.Configs) 1)}}<button formaction="{{$base}}/{{$c.ID}}/delete" formnovalidate
+        data-confirm="Remove {{$c.Label}}?{{if and $.Org (eq (len $d.Configs) 1)}} It's {{$.Org.Login}}'s last own model: it goes back to the instance's models and daily review limit.{{end}}">Remove</button>{{end}}
+    </div>
+    {{end}}
+    <span id="models-{{$c.ID}}-result" class="result"></span>
+  </fieldset>
+  </form>
+</section>
+{{end}}
+
+{{if not $d.ReadOnly}}
+<section class="card">
+  <h2>Add a model</h2>
+  {{if $d.Full}}<p class="hint">A set holds at most {{$d.Max}} models. Remove one to add another.</p>{{else}}
+  <form method="post" action="{{$base}}/add" data-model-form>
+    {{template "model-fields" (dict "C" $d.New "P" $d.Providers "Own" $d.Own "HasKey" false "L" "models-new" "Base" $base)}}
+    <div class="actions">
+      <button class="primary">Add model</button>
+      <button type="button" data-test="{{$base}}/test" data-out="models-new-result">Test model</button>
+      <span id="models-new-result" class="result"></span>
+    </div>
+  </form>
+  {{end}}
+</section>
+{{end}}
+{{end}}

@@ -33,12 +33,20 @@ func (b *Bot) handleReplies(ctx context.Context, j job) {
 		return
 	}
 	cl := app.Installation(pr.InstallationID)
-	if st.Replies.Enabled {
+	mst, err := b.modelSettings(st, pr.AccountID)
+	if err != nil {
+		// Not answered with the instance's models instead: an organization
+		// with its own uses only those.
+		b.logf("error", pr.Repo, pr.Number, "not replying: %v", err)
+	} else {
+		st = mst
+	}
+	if st.Replies.Enabled && err == nil {
 		if err := b.replyThreads(ctx, st, cl, pr, login); err != nil {
 			b.logf("error", pr.Repo, pr.Number, "replying to review threads: %v", err)
 		}
 	}
-	if st.Replies.Mentions {
+	if st.Replies.Mentions && err == nil {
 		if err := b.replyMentions(ctx, st, cl, pr, login); err != nil {
 			b.logf("error", pr.Repo, pr.Number, "replying to mentions: %v", err)
 		}
@@ -217,7 +225,7 @@ func (b *Bot) threadReply(ctx context.Context, st settings.Settings, cl *github.
 	guide, _ := b.guidelinesFor(ctx, st, cl, pr.Repo, pr.Number, pr.BaseRef, pr.BaseRef, []string{root.Path}, 10)
 	system := threadSystemPrompt(sk.Name, skillText, guide)
 
-	lc, err := llm.New(llmConfig(st))
+	lc, err := b.chatClient(st, pr)
 	if err != nil {
 		return "", false, err
 	}
@@ -232,7 +240,7 @@ func (b *Bot) threadReply(ctx context.Context, st settings.Settings, cl *github.
 	}
 	// The model couldn't produce the JSON: still answer, but don't resolve.
 	b.logf("warn", pr.Repo, pr.Number, "model gave no structured thread reply; answering in plain text")
-	text, err = b.freeText(ctx, st, system+"\n\nIgnore the JSON format: output only the reply text.", sb.String())
+	text, err = b.freeText(ctx, lc, st, system+"\n\nIgnore the JSON format: output only the reply text.", sb.String())
 	return text, false, err
 }
 
@@ -318,14 +326,14 @@ func (b *Bot) mentionReply(ctx context.Context, st settings.Settings, cl *github
 		changed = append(changed, f.Filename)
 	}
 	guide, _ := b.guidelinesFor(ctx, st, cl, pr.Repo, pr.Number, pr.BaseRef, pr.BaseRef, changed, 10)
-	return b.freeText(ctx, st, mentionSystemPrompt(sk.Name, skillText, guide), sb.String())
-}
-
-func (b *Bot) freeText(ctx context.Context, st settings.Settings, system, user string) (string, error) {
-	lc, err := llm.New(llmConfig(st))
+	lc, err := b.chatClient(st, pr)
 	if err != nil {
 		return "", err
 	}
+	return b.freeText(ctx, lc, st, mentionSystemPrompt(sk.Name, skillText, guide), sb.String())
+}
+
+func (b *Bot) freeText(ctx context.Context, lc llm.Client, st settings.Settings, system, user string) (string, error) {
 	resp, err := lc.Chat(ctx, llm.Request{
 		Messages:    []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}},
 		Temperature: st.LLM.Temperature,

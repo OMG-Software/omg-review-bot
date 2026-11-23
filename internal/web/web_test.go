@@ -93,9 +93,8 @@ func TestPagesRender(t *testing.T) {
 	}
 
 	form := url.Values{
-		"gh_app_id": {"42"}, "gh_api_base": {"https://api.github.com"}, "llm_provider": {"ollama"},
-		"llm_base_url": {"http://localhost:11434"}, "llm_model": {"qwen2.5-coder:14b"}, "llm_context": {"16384"},
-		"llm_max_output": {"2048"}, "rv_enabled": {"on"}, "rv_ignore": {"*.lock\nvendor/"},
+		"gh_app_id": {"42"}, "gh_api_base": {"https://api.github.com"}, "lim_org_slot_percent": {"75"},
+		"rv_enabled": {"on"}, "rv_ignore": {"*.lock\nvendor/"},
 		"rv_comment_level": {"P4"}, "rv_approval_level": {"P5"}, // approval broader than comments: clamped to P4
 		"rv_request_changes_level": {"P5"}, // broader than the approval level: clamped to P4 too
 		"rv_max_rounds":            {"50"}, // above the 30 allowed
@@ -103,11 +102,33 @@ func TestPagesRender(t *testing.T) {
 	}
 	post("/settings", form, ts.URL)
 	got, _ := settings.Load(st)
-	if got.GitHub.AppID != 42 || got.LLM.Provider != "ollama" || got.LLM.ContextTokens != 16384 ||
+	if got.GitHub.AppID != 42 || got.Limits.OrgSlotPercent != 75 || got.Limits.OrgSlots(4) != 3 ||
 		len(got.Review.IgnorePatterns) != 2 || got.Replies.Enabled || got.Review.CommentLevel != "P4" || got.Review.ApprovalLevel != "P4" ||
 		got.Review.RequestChangesLevel != "P4" || got.Review.MaxRounds != 30 || len(got.Review.GuidelineFiles) != 2 || got.Review.GuidelineFiles[1] != "/CONTRIBUTING.md" {
 		t.Errorf("settings not saved as submitted: %+v", got)
 	}
+	// The instance's models: a second one is added, they're used in turn,
+	// and the last one can't be removed.
+	if code, body := get("/settings/models"); code != http.StatusOK || !strings.Contains(body, "Add a model") {
+		t.Fatalf("GET /settings/models = %d", code)
+	}
+	post("/settings/models/add", url.Values{"name": {"Hosted"}, "provider": {"openai"}, "base_url": {"http://10.1.2.3:8000/v1"},
+		"model": {"big"}, "api_key": {"k2"}, "context": {"16384"}, "max_output": {"2048"}}, ts.URL)
+	post("/settings/models/strategy", url.Values{"strategy": {"roundrobin"}}, ts.URL)
+	got, _ = settings.Load(st)
+	if m := got.Models; len(m.Configs) != 2 || m.Strategy != settings.StrategyRoundRobin || m.Configs[1].Model != "big" ||
+		m.Configs[1].APIKey != "k2" || m.Configs[1].ContextTokens != 16384 || len(m.InUse()) != 2 {
+		t.Errorf("instance models not saved as submitted: %+v", m)
+	}
+	if _, body := get("/settings/models"); strings.Contains(body, "k2") {
+		t.Error("the models page shows a saved API key")
+	}
+	post("/settings/models/m1/delete", url.Values{}, ts.URL)
+	post("/settings/models/m2/delete", url.Values{}, ts.URL) // refused: the instance needs one
+	if got, _ = settings.Load(st); len(got.Models.Configs) != 1 || got.LLM.Model != "big" {
+		t.Errorf("removing the instance's last model: %+v", got.Models)
+	}
+
 	_, body := get("/settings")
 	for _, want := range []string{`<option value="P4" selected>[P4] MINOR (Quality) and above</option>`,
 		`<option value="off" >Never approve</option>`, `<option value="off" >Never request changes</option>`,

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/diff"
@@ -449,13 +450,29 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		return gp, errAlreadyReviewed
 	}
 	sk := b.loadSkill(st)
+	// The organization's own models if it has them, else the instance's.
+	if st, err = b.modelSettings(st, pr.AccountID); err != nil {
+		return nil, err
+	}
+	lcs, err := b.reviewClients(st, pr)
+	if err != nil {
+		return nil, err
+	}
+	// Fix checks and the overall summary are single calls: with several
+	// models reviewing, they go to the first, failing over to the next.
+	aux := lcs[0]
+	if len(lcs) > 1 {
+		if aux, err = b.chatClient(st, pr); err != nil {
+			return nil, err
+		}
+	}
 
-	rec := &store.Review{Repo: pr.Repo, Number: pr.Number, HeadSHA: head, Model: st.LLM.Model, Skill: sk.Name,
-		Status: "running", StartedAt: time.Now().Unix(), AccountID: pr.AccountID}
+	rec := &store.Review{Repo: pr.Repo, Number: pr.Number, HeadSHA: head, Model: labels(lcs), Skill: sk.Name,
+		Status: "running", StartedAt: time.Now().Unix(), AccountID: pr.AccountID, OwnModel: st.OwnModels != 0}
 	if id, err := b.store.CreateReview(rec); err == nil {
 		rec.ID = id
 	}
-	notice := reviewNotice{head: head, model: st.LLM.Model, skill: sk.Name, started: time.Unix(rec.StartedAt, 0)}
+	notice := reviewNotice{head: head, model: rec.Model, skill: sk.Name, started: time.Unix(rec.StartedAt, 0)}
 	var noticeID int64
 	if qn != nil {
 		noticeID, qn.claimed = qn.id, true // from here on, the deferred edit below keeps it current
@@ -499,10 +516,6 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	files, err := cl.PullFiles(ctx, pr.Repo, pr.Number)
 	if err != nil {
 		return nil, fmt.Errorf("list PR files: %w", err)
-	}
-	lc, err := llm.New(llmConfig(st))
-	if err != nil {
-		return nil, err
 	}
 	existing, err := cl.ReviewComments(ctx, pr.Repo, pr.Number)
 	if err != nil {
@@ -554,7 +567,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	// ones get a reply and are resolved, and no longer block approval.
 	fixed := 0
 	if threadsKnown {
-		vu := b.verifyFixes(ctx, st, lc, cl, pr, head, threads, files, &raw)
+		vu := b.verifyFixes(ctx, st, aux, cl, pr, head, threads, files, &raw)
 		fixed = vu.fixed
 		rec.Fixed = fixed
 		rec.PromptTokens += vu.usage.PromptTokens
@@ -577,28 +590,46 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		return gp, nil
 	}
 
-	var all []finding
-	var summaries []string
-	for i, bt := range p.batches {
-		if len(p.batches) > 1 {
-			b.setCurrent(ctx, pr, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
-		}
-		user := batchPrompt(header, i, len(p.batches), bt, previousFor(mine, bt.paths))
-		var out modelOutput
-		usage, rawOut, err := b.chatJSON(ctx, lc, st, reviewSchema, "code_review", system, user, &out)
-		fmt.Fprintf(&raw, "===== part %d/%d =====\n%s\n\n", i+1, len(p.batches), rawOut)
-		rec.PromptTokens += usage.PromptTokens
-		rec.CompletionTokens += usage.CompletionTokens
-		if err != nil {
-			return nil, fmt.Errorf("model (part %d/%d): %w", i+1, len(p.batches), err)
-		}
-		if s := strings.TrimSpace(out.Summary); s != "" {
-			summaries = append(summaries, s)
-		}
-		all = append(all, out.Comments...)
+	if len(lcs) > 1 {
+		b.setCurrent(ctx, pr, "Reviewing %s#%d with %d models", pr.Repo, pr.Number, len(lcs))
 	}
+	// Each model reviews the whole diff; with several (collate), side by side.
+	passes := make([]reviewPass, len(lcs))
+	var wg sync.WaitGroup
+	for k, lc := range lcs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			passes[k] = b.reviewPass(ctx, st, pr, lc, len(lcs) > 1, p, system, header, mine)
+		}()
+	}
+	wg.Wait()
+	var lists [][]finding
+	var summaries, answered []string
+	var failed error
+	for _, ps := range passes {
+		raw.WriteString(ps.raw)
+		rec.PromptTokens += ps.usage.PromptTokens
+		rec.CompletionTokens += ps.usage.CompletionTokens
+		if ps.err != nil {
+			if len(lcs) > 1 {
+				b.logf("warn", pr.Repo, pr.Number, "model %s couldn't review %s, so the review goes ahead without it: %v", ps.label, short(head), ps.err)
+			}
+			if failed == nil {
+				failed = ps.err
+			}
+			continue
+		}
+		answered = append(answered, ps.label)
+		lists = append(lists, ps.findings)
+		summaries = append(summaries, ps.summaries...)
+	}
+	if len(answered) == 0 {
+		return nil, failed // every model failed
+	}
+	rec.Model = strings.Join(answered, " + ")
 
-	inline, notes, dropped := prepareFindings(st, p, all, mine)
+	inline, notes, dropped := prepareFindings(st, p, collateFindings(p, lists), mine)
 	var summary string
 	switch len(summaries) {
 	case 0:
@@ -606,7 +637,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	case 1:
 		summary = summaries[0]
 	default:
-		summary = b.synthesizeSummary(ctx, lc, st, gp, summaries, append(append([]finding{}, inline...), notes...))
+		summary = b.synthesizeSummary(ctx, aux, st, gp, summaries, append(append([]finding{}, inline...), notes...))
 	}
 	summary = sanitizeModelText(summary)
 
@@ -619,7 +650,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	blocking, requesting := open(st.Review.ApprovalLevel), open(st.Review.RequestChangesLevel)
 	event := reviewEvent(st, blocking, requesting)
 	ri := reviewInfo{summary: summary, head: head, inline: inline, notes: notes, plan: p, dropped: dropped,
-		model: st.LLM.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed,
+		model: rec.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed,
 		maxRounds: st.Review.MaxRounds}
 	if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err == nil {
 		ri.round = n + 1 // this one isn't "posted" yet
@@ -669,6 +700,48 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	b.logf("info", pr.Repo, pr.Number, "posted review of %s (%s): %d inline comments, %d notes, %d earlier findings resolved as fixed (%d parts, %d+%d tokens)",
 		short(head), strings.ToLower(event), len(drafts), len(ri.notes), fixed, len(p.batches), rec.PromptTokens, rec.CompletionTokens)
 	return gp, nil
+}
+
+// reviewPass is one model's review of the whole diff, batch by batch.
+type reviewPass struct {
+	label     string // the model(s) that answered
+	findings  []finding
+	summaries []string
+	usage     llm.Response
+	raw       string
+	err       error
+}
+
+// reviewPass runs the plan's batches through lc. many: other models review
+// the same diff alongside, so the output names the model.
+func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR, lc modelClient, many bool,
+	p plan, system, header string, mine []github.ReviewComment) (ps reviewPass) {
+	var raw strings.Builder
+	defer func() { ps.label, ps.raw = lc.Label(), raw.String() }()
+	for i, bt := range p.batches {
+		if len(p.batches) > 1 && !many {
+			b.setCurrent(ctx, pr, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
+		}
+		user := batchPrompt(header, i, len(p.batches), bt, previousFor(mine, bt.paths))
+		var out modelOutput
+		usage, rawOut, err := b.chatJSON(ctx, lc, st, reviewSchema, "code_review", system, user, &out)
+		if many {
+			fmt.Fprintf(&raw, "===== %s, part %d/%d =====\n%s\n\n", lc.Label(), i+1, len(p.batches), rawOut)
+		} else {
+			fmt.Fprintf(&raw, "===== part %d/%d =====\n%s\n\n", i+1, len(p.batches), rawOut)
+		}
+		ps.usage.PromptTokens += usage.PromptTokens
+		ps.usage.CompletionTokens += usage.CompletionTokens
+		if err != nil {
+			ps.err = fmt.Errorf("model (part %d/%d): %w", i+1, len(p.batches), err)
+			return ps
+		}
+		if s := strings.TrimSpace(out.Summary); s != "" {
+			ps.summaries = append(ps.summaries, s)
+		}
+		ps.findings = append(ps.findings, out.Comments...)
+	}
+	return ps
 }
 
 // reviewEvent picks the review's event from the open findings: blocking at
@@ -734,7 +807,7 @@ func (b *Bot) chatJSON(ctx context.Context, lc llm.Client, st settings.Settings,
 
 func (b *Bot) synthesizeSummary(ctx context.Context, lc llm.Client, st settings.Settings, gp *github.PullRequest, parts []string, fs []finding) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Pull request: %s\n\nThe diff was reviewed in %d parts. Part summaries:\n", gp.Title, len(parts))
+	fmt.Fprintf(&sb, "Pull request: %s\n\nThe review was done in %d parts (parts of the diff, or reviews by different models). Their summaries:\n", gp.Title, len(parts))
 	for i, s := range parts {
 		fmt.Fprintf(&sb, "\nPart %d: %s\n", i+1, s)
 	}

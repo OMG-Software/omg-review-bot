@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/netguard"
 	"github.com/OMG-Software/omg-review-bot/internal/textutil"
 )
 
@@ -49,6 +50,11 @@ type Config struct {
 	ContextTokens int
 	Structured    bool
 	Timeout       time.Duration
+	// PublicOnly limits the client to https and public addresses, checked
+	// when connecting: for servers an organization chose (its own models),
+	// which mustn't reach the bot's own machine or network. No proxy is used,
+	// since the check has to see the server's own address.
+	PublicOnly bool
 }
 
 type Client interface {
@@ -65,6 +71,11 @@ func New(cfg Config) (Client, error) {
 	if err != nil || bu.Host == "" || (bu.Scheme != "http" && bu.Scheme != "https") {
 		return nil, fmt.Errorf("LLM base URL %q is not a valid http(s) URL", base)
 	}
+	if cfg.PublicOnly {
+		if err := netguard.CheckURL(base); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Minute
 	}
@@ -80,6 +91,16 @@ func New(cfg Config) (Client, error) {
 		}
 		return nil
 	}}
+	if cfg.PublicOnly {
+		hc.Transport = &http.Transport{
+			DialContext:           netguard.Dialer(),
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		}
+	}
 	switch cfg.Provider {
 	case "ollama", "ollama-cloud":
 		base = strings.TrimSuffix(strings.TrimSuffix(base, "/v1"), "/api")

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
-	"github.com/OMG-Software/omg-review-bot/internal/llm"
+	"github.com/OMG-Software/omg-review-bot/internal/secret"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/skill"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
@@ -62,6 +62,9 @@ type Activity struct {
 // after another (see claimPR).
 const workers = 4
 
+// Workers is how many jobs the bot runs at once (its review slots).
+const Workers = workers
+
 // workerSlot is the context key of the running worker's index, so a job's
 // progress (setCurrent) is shown against the worker running it.
 type workerSlot struct{}
@@ -82,6 +85,9 @@ type job struct {
 	// number pass to another account first, it isn't reviewed there.
 	account int64
 	tries   int // policy reads failed so far (manual reviews; see retryForced)
+	// org is the account whose share of the workers the job counts against
+	// (0 = none: its PR isn't tracked). Set as a worker takes the job.
+	org int64
 }
 
 func (j job) key() string { return fmt.Sprintf("%s:%s#%d", j.kind, j.repo, j.number) }
@@ -150,6 +156,19 @@ type Bot struct {
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
 
+	// box seals organizations' own models (see secretBox; tests may set it).
+	boxOnce sync.Once
+	box     *secret.Box
+	boxErr  error
+	// roundRobin counts the jobs each set of models has started (key: the
+	// organization whose own set it is, 0 for the instance's).
+	roundRobin map[int64]int
+	// orgBusy counts the workers running each organization's jobs, and
+	// orgHeld holds jobs taken off the queue while their organization had
+	// its share of the workers (see claimPR), oldest first.
+	orgBusy map[int64]int
+	orgHeld map[int64][]job
+
 	jobs chan job
 	wake chan struct{} // poll GitHub now
 	kick chan struct{} // re-check due reviews without polling
@@ -166,6 +185,9 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		running:         map[string]bool{},
 		after:           map[string]job{},
 		active:          map[string][]job{},
+		roundRobin:      map[int64]int{},
+		orgBusy:         map[int64]int{},
+		orgHeld:         map[int64][]job{},
 		jobs:            make(chan job, 4096),
 		wake:            make(chan struct{}, 1),
 		kick:            make(chan struct{}, 1),
@@ -480,7 +502,8 @@ func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)
 			return
 		case j = <-b.jobs:
 		}
-		ok := b.claimPR(j)
+		j.org = b.jobOrg(j)
+		ok := b.claimPR(j, b.orgSlots())
 		b.takeMu.Unlock()
 		for ok {
 			if ctx.Err() != nil {
@@ -500,10 +523,26 @@ func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)
 // prKey names the PR a job is for, whatever its kind.
 func prKey(j job) string { return fmt.Sprintf("%s#%d", strings.ToLower(j.repo), j.number) }
 
+// jobOrg returns the account j's PR belongs to (0 if it isn't tracked).
+func (b *Bot) jobOrg(j job) int64 {
+	if j.account != 0 {
+		return j.account
+	}
+	if pr, err := b.store.GetPR(j.repo, j.number); err == nil && pr != nil {
+		return pr.AccountID
+	}
+	return 0
+}
+
+// orgSlots is how many workers one organization's jobs may hold at once.
+func (b *Bot) orgSlots() int { return b.Settings().Limits.OrgSlots(workers) }
+
 // claimPR makes the calling worker the one running j's PR's jobs, and reports
 // whether it may run j now. If another worker has the PR, j waits for that
-// worker (it stays queued until then, as it would in the queue).
-func (b *Bot) claimPR(j job) bool {
+// worker (it stays queued until then, as it would in the queue). If j's
+// organization already has limit workers, j waits for one of them to finish
+// instead, so the rest stay free for other organizations.
+func (b *Bot) claimPR(j job, limit int) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	k := prKey(j)
@@ -511,23 +550,56 @@ func (b *Bot) claimPR(j job) bool {
 		b.active[k] = append(waiting, j)
 		return false
 	}
+	if j.org != 0 && b.orgBusy[j.org] >= limit {
+		b.orgHeld[j.org] = append(b.orgHeld[j.org], j)
+		return false
+	}
 	b.active[k] = nil
+	if j.org != 0 {
+		b.orgBusy[j.org]++
+	}
 	return true
 }
 
 // nextForPR returns the next job for j's PR that was taken off the queue
-// while j ran, or releases the PR if there's none.
+// while j ran. With none, it releases the PR, and the worker takes a job its
+// organization's share held back, if any: the worker stays the
+// organization's, so its share isn't exceeded.
 func (b *Bot) nextForPR(j job) (job, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	k := prKey(j)
-	waiting := b.active[k]
-	if len(waiting) == 0 {
-		delete(b.active, k)
-		return job{}, false
+	if waiting := b.active[k]; len(waiting) > 0 {
+		b.active[k] = waiting[1:]
+		return waiting[0], true
 	}
-	b.active[k] = waiting[1:]
-	return waiting[0], true
+	delete(b.active, k)
+	for j.org != 0 && len(b.orgHeld[j.org]) > 0 {
+		h := b.orgHeld[j.org][0]
+		b.orgHeld[j.org] = b.orgHeld[j.org][1:]
+		hk := prKey(h)
+		if waiting, busy := b.active[hk]; busy {
+			b.active[hk] = append(waiting, h) // its PR's worker runs it next
+			continue
+		}
+		b.active[hk] = nil
+		return h, true
+	}
+	b.orgDone(j.org)
+	return job{}, false
+}
+
+// orgDone gives back a worker org's jobs held. The caller holds mu.
+func (b *Bot) orgDone(org int64) {
+	if len(b.orgHeld[org]) == 0 {
+		delete(b.orgHeld, org)
+	}
+	if org == 0 {
+		return
+	}
+	if b.orgBusy[org]--; b.orgBusy[org] <= 0 {
+		delete(b.orgBusy, org)
+	}
 }
 
 // releasePR gives up j's PR without running j or the jobs waiting for it,
@@ -537,6 +609,7 @@ func (b *Bot) releasePR(j job) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	k := prKey(j)
+	b.orgDone(j.org)
 	for _, w := range append([]job{j}, b.active[k]...) {
 		select {
 		case b.jobs <- w:
@@ -633,18 +706,6 @@ func (b *Bot) botSlug() string {
 		return ""
 	}
 	return b.appInfo.Slug
-}
-
-func llmConfig(st settings.Settings) llm.Config {
-	return llm.Config{
-		Provider:      st.LLM.Provider,
-		BaseURL:       st.LLM.BaseURL,
-		APIKey:        st.LLM.APIKey,
-		Model:         st.LLM.Model,
-		ContextTokens: st.LLM.ContextTokens,
-		Structured:    st.LLM.StructuredOutput,
-		Timeout:       time.Duration(st.LLM.TimeoutSeconds) * time.Second,
-	}
 }
 
 // DataDir is the directory the bot keeps its files in.
@@ -769,36 +830,4 @@ func (b *Bot) TestGitHub(ctx context.Context, st settings.Settings) (string, err
 		parts = append(parts, fmt.Sprintf("%s (%s repos)", in.Account.Login, n))
 	}
 	return fmt.Sprintf("Authenticated as %q (%s[bot]). Installed on: %s.", info.Name, info.Slug, strings.Join(parts, ", ")), nil
-}
-
-// TestLLM sends a tiny prompt to the configured model.
-func (b *Bot) TestLLM(ctx context.Context, st settings.Settings) (string, error) {
-	lc, err := llm.New(llmConfig(st))
-	if err != nil {
-		return "", err
-	}
-	resp, err := lc.Chat(ctx, llm.Request{
-		Messages: []llm.Message{
-			{Role: "system", Content: "You are a connectivity check. Follow instructions exactly."},
-			{Role: "user", Content: "Reply with exactly the word: OK"},
-		},
-		MaxTokens: st.LLM.MaxOutputTokens, // same budget as reviews, so reasoning models are tested realistically
-	})
-	if err != nil {
-		return "", err
-	}
-	reply := llm.StripThinking(resp.Content)
-	if len(reply) > 80 {
-		reply = reply[:80] + "…"
-	}
-	return fmt.Sprintf("%s replied %q in %s (%d prompt / %d completion tokens).",
-		st.LLM.Model, reply, resp.Duration.Round(time.Millisecond), resp.PromptTokens, resp.CompletionTokens), nil
-}
-
-func (b *Bot) Models(ctx context.Context, st settings.Settings) ([]string, error) {
-	lc, err := llm.New(llmConfig(st))
-	if err != nil {
-		return nil, err
-	}
-	return lc.Models(ctx)
 }

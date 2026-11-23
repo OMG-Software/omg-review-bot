@@ -33,8 +33,12 @@ type GitHub struct {
 // SignInOn reports whether "Sign in with GitHub" is configured.
 func (g GitHub) SignInOn() bool { return g.ClientID != "" && g.ClientSecret != "" }
 
+// LLM is one model configuration: where the model is served and how it's
+// called. A set of them, and how they're used, is Models.
 type LLM struct {
-	Provider         string  `json:"provider"` // lmstudio | ollama | ollama-cloud | openai
+	ID               string  `json:"id,omitempty"`   // stable within its set ("m1", "m2", …)
+	Name             string  `json:"name,omitempty"` // shown in the UI; empty = the model's name
+	Provider         string  `json:"provider"`       // lmstudio | ollama | ollama-cloud | openai
 	BaseURL          string  `json:"base_url"`
 	APIKey           string  `json:"api_key"`
 	Model            string  `json:"model"`
@@ -96,12 +100,38 @@ type Poll struct {
 	WebhookIntervalSeconds int `json:"webhook_interval_seconds"`
 }
 
+// Limits share the instance between organizations.
+type Limits struct {
+	// OrgSlotPercent is the largest share of the review slots (workers) one
+	// organization's jobs may hold at once, so one busy organization can't
+	// keep the others waiting. At least one slot is always allowed.
+	OrgSlotPercent int `json:"org_slot_percent"`
+}
+
+// DefaultOrgSlotPercent is Limits.OrgSlotPercent unless an administrator changes it.
+const DefaultOrgSlotPercent = 50
+
+// OrgSlots is how many of slots one organization's jobs may hold at once.
+func (l Limits) OrgSlots(slots int) int {
+	return max(1, min(slots, slots*l.OrgSlotPercent/100))
+}
+
 type Settings struct {
-	GitHub  GitHub  `json:"github"`
+	GitHub GitHub `json:"github"`
+	// LLM is the primary model of Models (see Models.Primary). It's kept in
+	// step on every Normalize, for the code that needs one model's limits
+	// and for older versions reading the settings; edit Models, not this.
 	LLM     LLM     `json:"llm"`
+	Models  Models  `json:"models"`
 	Review  Review  `json:"review"`
 	Replies Replies `json:"replies"`
 	Poll    Poll    `json:"poll"`
+	Limits  Limits  `json:"limits"`
+
+	// OwnModels is the GitHub account whose own models (bring your own key)
+	// Models holds, or 0 when they're the instance's. Never stored: it's set
+	// by WithOwnModels for the job at hand.
+	OwnModels int64 `json:"-"`
 }
 
 // Policy is the part of the settings an organization can set for itself.
@@ -263,6 +293,9 @@ func Defaults() Settings {
 		},
 		Replies: Replies{Enabled: true, Mentions: true, MaxPerThread: 5},
 		Poll:    Poll{IntervalSeconds: 60, RepoRefreshMinutes: 15, WebhookIntervalSeconds: 900},
+		Limits:  Limits{OrgSlotPercent: DefaultOrgSlotPercent},
+		// Models is left empty: Normalize makes LLM above the only model, and
+		// settings saved before there were several keep theirs the same way.
 	}
 }
 
@@ -280,20 +313,16 @@ func (s *Settings) Normalize() {
 	if s.GitHub.APIBaseURL == "" {
 		s.GitHub.APIBaseURL = "https://api.github.com"
 	}
-	s.LLM.Provider = strings.TrimSpace(s.LLM.Provider)
-	if DefaultBaseURL(s.LLM.Provider) == "" && s.LLM.Provider != "openai" {
-		s.LLM.Provider = "lmstudio"
+	if len(s.Models.Configs) == 0 {
+		// Saved before there could be several models: the one becomes the set.
+		s.Models.Configs = []LLM{s.LLM}
 	}
-	s.LLM.BaseURL = strings.TrimRight(strings.TrimSpace(s.LLM.BaseURL), "/")
-	if s.LLM.BaseURL == "" {
-		s.LLM.BaseURL = DefaultBaseURL(s.LLM.Provider)
+	s.Models.Normalize()
+	s.LLM = s.Models.Primary()
+	if s.Limits.OrgSlotPercent == 0 {
+		s.Limits.OrgSlotPercent = DefaultOrgSlotPercent // saved before the setting existed
 	}
-	s.LLM.APIKey = strings.TrimSpace(s.LLM.APIKey)
-	s.LLM.Model = strings.TrimSpace(s.LLM.Model)
-	s.LLM.Temperature = clampF(s.LLM.Temperature, 0, 2)
-	s.LLM.ContextTokens = clamp(s.LLM.ContextTokens, 4096, 2_000_000)
-	s.LLM.MaxOutputTokens = clamp(s.LLM.MaxOutputTokens, 512, s.LLM.ContextTokens/2)
-	s.LLM.TimeoutSeconds = clamp(s.LLM.TimeoutSeconds, 30, 3600)
+	s.Limits.OrgSlotPercent = clamp(s.Limits.OrgSlotPercent, 1, 100)
 	s.Review.SkillDir = strings.TrimSpace(s.Review.SkillDir)
 	s.Review.DebounceSeconds = clamp(s.Review.DebounceSeconds, 0, 3600)
 	s.Review.MaxComments = clamp(s.Review.MaxComments, 1, 100)
@@ -345,16 +374,7 @@ func (s Settings) Issues() []string {
 	if s.GitHub.PrivateKey == "" {
 		out = append(out, "GitHub App private key is not set")
 	}
-	if s.LLM.BaseURL == "" {
-		out = append(out, "LLM base URL is not set")
-	}
-	if s.LLM.Model == "" {
-		out = append(out, "LLM model is not set")
-	}
-	if s.LLM.Provider == "ollama-cloud" && s.LLM.APIKey == "" {
-		out = append(out, "Ollama Cloud needs an API key")
-	}
-	return out
+	return append(out, s.Models.Issues()...)
 }
 
 func Load(st *store.Store) (Settings, error) {

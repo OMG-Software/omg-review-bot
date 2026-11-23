@@ -28,6 +28,11 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
   a comment saying the limit is reached. **Review now** still works.
 - **Caps each org's daily reviews.** An org gets at most 100 reviews in any 24 hours by default.
   Administrators can change that per org; org owners can see the limit but not change it.
+- **Several models, or the org's own.** Configure several models and use one, fail over between
+  them, take turns, or have every model review each PR and merge their findings. An org can bring
+  its own models and API keys: it then uses only those, and the daily limit no longer applies.
+- **Shares the review slots fairly.** One org's jobs hold at most half of the review slots at once
+  by default (administrators can change the share), so a busy org can't hold up the others.
 - **Follows your project's rules.** It reads the repository's own docs (`CLAUDE.md`, `AGENTS.md`,
   `CONTRIBUTING.md`, style guides) from the base branch and reviews against them, citing the rule.
 - **Conversations.** It replies when someone answers one of its comments, and answers when
@@ -105,11 +110,22 @@ Once the bot has saved the key, you can delete the `.pem` file.
 
 ### 3. Connect a model
 
-In **Settings → Model**:
+In **Settings → Models → Manage models**:
 1. Pick the provider.
 2. Click **Load models** and choose one.
 3. Set **Context tokens** to the context length the model is actually loaded with.
-4. Click **Test model**, then **Save settings**.
+4. Click **Test model**, then **Save**.
+
+You can add more models (up to 8) and choose how they're used:
+
+| Strategy | What happens |
+|---|---|
+| One model | Every review and reply uses the selected model; the others are kept, ready to switch to. |
+| Failover | The first model in the list; if it fails or times out, the next one takes over. |
+| Round-robin | Each review or reply uses the next model in turn. |
+| Collate | Every model reviews each PR; their findings are merged, duplicates removed, keeping the more severe level. |
+
+With several models, prompts are sized to fit the one with the smallest context.
 
 ### 4. Add your skill
 
@@ -230,8 +246,22 @@ table**. The administrator's dashboard shows the same totals for every org.
 **Per-org review settings.** An org uses the instance's review settings until an owner saves its
 **Review settings** page. From then on it has its own: wait after push, comment, approval and
 request-changes levels, comment cap, most reviews per PR, drafts, skip labels, guideline and
-ignore files, and replies. **Use instance defaults instead** removes them. The model, the skill and the review queue stay shared, so every
-org's reviews take turns on the same model, two at a time.
+ignore files, and replies. **Use instance defaults instead** removes them. The skill and the
+review queue stay shared.
+
+**An org's own models (bring your own key).** On the org's **Models** page, its owners can add
+models with their own API keys, and choose how they're used, as above. As soon as it has one, the
+org's reviews and replies use only its own models, never the instance's, and its daily review
+limit no longer applies (reviews on its own models don't count towards it). Removing the last one
+puts it back on the instance's models and limit. Its models must be served at a public `https://`
+address: the bot refuses loopback, private and link-local addresses, also when a host name resolves
+to one. Its keys are stored encrypted with a key kept outside the database: `secret.key` in the data
+folder, or `PRBOT_SECRET_KEY` (64 hex characters) if set. Back the key up with the database: without
+it, orgs have to enter their keys again.
+
+**Sharing the review slots.** The bot runs four jobs at once. One org's jobs may hold at most 50%
+of them (two) at a time; its others wait for one of its own to finish. Change the share in
+**Settings → Sharing the review slots**.
 
 ### Adding more organizations
 
@@ -267,8 +297,8 @@ GitHub (**the org's Settings → GitHub Apps → the App → Configure → Repos
 picks up the change at its next sync. Uninstalling the App marks the org *App uninstalled* in the
 bot.
 
-**When one bot isn't enough.** Every org shares the model, the skill and the review queue. If an
-org needs its own model or must be kept fully separate, give it its own private App and run a
+**When one bot isn't enough.** Every org shares the skill and the review queue. If an
+org must be kept fully separate, give it its own private App and run a
 second instance with its own data folder and port:
 
 ```powershell
