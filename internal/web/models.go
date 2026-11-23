@@ -378,6 +378,7 @@ const limitsTimeout = 15 * time.Second
 // the model's maximums, and those maximums as its server reported them.
 type maximums struct {
 	ctx, out bool // the context / output limit was left blank
+	typedOut int  // the output limit typed in, if any
 	lim      llm.Limits
 	err      error // the server couldn't be asked, or didn't say
 }
@@ -388,6 +389,9 @@ type maximums struct {
 // one), whose key a form with none uses.
 func (s *Server) formMaximums(r *http.Request, sc modelScope, cur settings.LLM) maximums {
 	mx := maximums{ctx: strings.TrimSpace(r.FormValue("context")) == "", out: strings.TrimSpace(r.FormValue("max_output")) == ""}
+	if n, err := strconv.Atoi(strings.TrimSpace(r.FormValue("max_output"))); err == nil {
+		mx.typedOut = n
+	}
 	if !mx.ctx && !mx.out {
 		return mx
 	}
@@ -407,6 +411,12 @@ func (mx maximums) apply(c *settings.LLM) string {
 	if !mx.ctx && !mx.out {
 		return ""
 	}
+	// parseLLM capped a typed output at half the context the form kept;
+	// with the context now set from the server, the typed output is capped
+	// at half of that instead (SetMaximums normalizes).
+	if mx.ctx && !mx.out && mx.typedOut > 0 {
+		c.MaxOutputTokens = mx.typedOut
+	}
 	c.SetMaximums(mx.lim.Context, mx.lim.Output, mx.ctx, mx.out)
 	msg := ". " + strings.TrimSuffix(limitsNote(mx.lim, *c, mx.ctx, mx.out), ".")
 	if mx.err != nil {
@@ -422,15 +432,22 @@ func (mx maximums) apply(c *settings.LLM) string {
 func limitsNote(lim llm.Limits, c settings.LLM, ctx, out bool) string {
 	var parts []string
 	if ctx {
-		if lim.Context > 0 {
+		switch {
+		case lim.Context > 0 && c.ContextTokens > lim.Context:
+			parts = append(parts, fmt.Sprintf("%d context tokens, the least the bot allows: the server reports a window of only %d, too small for a review, so load the model with a larger one", c.ContextTokens, lim.Context))
+		case lim.Context > 0 && c.ContextTokens < lim.Context:
+			parts = append(parts, fmt.Sprintf("%d context tokens, the most the bot allows (the model allows %d)", c.ContextTokens, lim.Context))
+		case lim.Context > 0:
 			parts = append(parts, fmt.Sprintf("%d context tokens, the model's maximum", c.ContextTokens))
-		} else {
+		default:
 			parts = append(parts, fmt.Sprintf("%d context tokens, the default (the server didn't report the model's window)", c.ContextTokens))
 		}
 	}
 	if out {
 		switch {
-		case lim.Output > 0 && c.MaxOutputTokens >= lim.Output:
+		case lim.Output > 0 && c.MaxOutputTokens > lim.Output:
+			parts = append(parts, fmt.Sprintf("%d output tokens, the least the bot allows (the model reports a cap of only %d)", c.MaxOutputTokens, lim.Output))
+		case lim.Output > 0 && c.MaxOutputTokens == lim.Output:
 			parts = append(parts, fmt.Sprintf("%d output tokens, the model's maximum", c.MaxOutputTokens))
 		case lim.Output > 0:
 			parts = append(parts, fmt.Sprintf("%d output tokens, half the context window (the model allows %d, but the other half is kept for the prompt)", c.MaxOutputTokens, lim.Output))

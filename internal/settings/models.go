@@ -185,8 +185,8 @@ func (l *LLM) Normalize() {
 	l.APIKey = strings.TrimSpace(l.APIKey)
 	l.Model = strings.TrimSpace(l.Model)
 	l.Temperature = clampF(l.Temperature, 0, 2)
-	l.ContextTokens = clamp(l.ContextTokens, 4096, 2_000_000)
-	l.MaxOutputTokens = clamp(l.MaxOutputTokens, 512, l.ContextTokens/2)
+	l.ContextTokens = clamp(l.ContextTokens, MinContextTokens, MaxContextTokens)
+	l.MaxOutputTokens = clamp(l.MaxOutputTokens, MinOutputTokens, l.ContextTokens/2)
 	l.TimeoutSeconds = clamp(l.TimeoutSeconds, 30, 3600)
 }
 
@@ -198,6 +198,16 @@ func NewLLM() LLM { return Defaults().LLM }
 const (
 	FallbackContextTokens = 131072
 	FallbackOutputTokens  = 16384
+)
+
+// The limits a model can be given (Normalize). A window smaller than
+// MinContextTokens can't hold a review's prompt, so a server reporting one
+// still gets the minimum, and the bot says so rather than calling it the
+// model's maximum.
+const (
+	MinContextTokens = 4096
+	MaxContextTokens = 2_000_000
+	MinOutputTokens  = 512
 )
 
 // SetMaximums sets the context window (setCtx) and output cap (setOut) to

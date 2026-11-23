@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/llm"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
@@ -192,6 +193,23 @@ func TestOrgModelsPageUnreadable(t *testing.T) {
 	}
 }
 
+// TestLimitsNote: a reported limit the bot can't use as it is (a window
+// below its minimum) is described as the bot's limit, not the model's.
+func TestLimitsNote(t *testing.T) {
+	c := settings.NewLLM()
+	c.SetMaximums(2048, 256, true, true)
+	note := limitsNote(llm.Limits{Context: 2048, Output: 256}, c, true, true)
+	if c.ContextTokens != settings.MinContextTokens || !strings.Contains(note, "window of only 2048") ||
+		!strings.Contains(note, "cap of only 256") || strings.Contains(note, "maximum") {
+		t.Errorf("small window: %d/%d, %q", c.ContextTokens, c.MaxOutputTokens, note)
+	}
+	c = settings.NewLLM()
+	c.SetMaximums(40960, 8192, true, true)
+	if note := limitsNote(llm.Limits{Context: 40960, Output: 8192}, c, true, true); strings.Count(note, "the model's maximum") != 2 {
+		t.Errorf("ordinary limits: %q", note)
+	}
+}
+
 // TestModelMaximums: a model added with its token limits left empty gets
 // the model's maximums from its server, or the fallbacks (and says so) when
 // the server can't tell. "Use model maximums" answers with them for the form.
@@ -241,6 +259,17 @@ func TestModelMaximums(t *testing.T) {
 	loc = addWith("ollama", ollamaSrv.URL, "", "4096")
 	if c := last(); c.ContextTokens != 40960 || c.MaxOutputTokens != 4096 || !strings.Contains(loc, "40960 context tokens") || strings.Contains(loc, "output tokens") {
 		t.Errorf("context only: limits %d/%d, redirect %s; want 40960/4096, the output not mentioned", c.ContextTokens, c.MaxOutputTokens, loc)
+	}
+
+	// Saved with a 32768 window, then the window cleared and 20000 output
+	// typed: the typed output is checked against the server's window
+	// (40960, half 20480), not the old one (half 16384).
+	addWith("ollama", ollamaSrv.URL, "32768", "1024")
+	id := last().ID
+	_, hdr := s.post("/settings/models/"+id+"/update", url.Values{"provider": {"ollama"}, "base_url": {ollamaSrv.URL}, "model": {"qwen3"},
+		"context": {""}, "max_output": {"20000"}})
+	if c := last(); c.ContextTokens != 40960 || c.MaxOutputTokens != 20000 {
+		t.Errorf("window cleared, output typed: limits %d/%d (redirect %s); want 40960/20000", c.ContextTokens, c.MaxOutputTokens, hdr.Get("Location"))
 	}
 
 	// A full set refuses at once, without asking the model's server.

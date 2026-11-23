@@ -142,6 +142,18 @@ func TestRepoChartCaptions(t *testing.T) {
 	}
 }
 
+// TestOrgSevRows: the organizations' chart shows the ones with the most
+// findings, most first, at most the cap.
+func TestOrgSevRows(t *testing.T) {
+	var orgs []store.OrgMetrics
+	for i := range repoChartRows + 3 {
+		orgs = append(orgs, store.OrgMetrics{Login: fmt.Sprintf("org%02d", i), Findings: i})
+	}
+	if rows := orgSevRows(orgs, repoChartRows); len(rows) != repoChartRows || rows[0].Label != fmt.Sprintf("org%02d", repoChartRows+2) {
+		t.Errorf("organizations' chart: %d rows, first %q; want the %d with most findings, most first", len(rows), rows[0].Label, repoChartRows)
+	}
+}
+
 // TestRepoNames: across organizations, a repository on two accounts' rows,
 // or not under its organization's name, says whose row it is.
 func TestRepoNames(t *testing.T) {
@@ -157,13 +169,6 @@ func TestRepoNames(t *testing.T) {
 		if names[i] != w {
 			t.Errorf("name %d = %q, want %q", i, names[i], w)
 		}
-	}
-	var orgs []store.OrgMetrics
-	for i := range repoChartRows + 3 {
-		orgs = append(orgs, store.OrgMetrics{Login: fmt.Sprintf("org%02d", i), Findings: i})
-	}
-	if rows := orgSevRows(orgs, repoChartRows); len(rows) != repoChartRows || rows[0].Label != fmt.Sprintf("org%02d", repoChartRows+2) {
-		t.Errorf("organizations' chart: %d rows, first %q; want the %d with most findings, most first", len(rows), rows[0].Label, repoChartRows)
 	}
 	if segClass(0, 3.9) != "viz-seg viz-s1 short" || segClass(4, 4) != "viz-seg viz-s5" {
 		t.Errorf("segment classes: %q %q", segClass(0, 3.9), segClass(4, 4))
