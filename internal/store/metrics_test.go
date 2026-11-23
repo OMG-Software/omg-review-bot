@@ -122,6 +122,8 @@ func TestRepoAndOrgMetrics(t *testing.T) {
 	addReview(t, st, Review{Repo: "acme/api", Number: 1, AccountID: 1, Status: "posted", Event: "COMMENT", StartedAt: now - 80, FinishedAt: now - 30,
 		Comments: 4, Sev: [5]int{0, 0, 0, 1, 3}})
 	addReview(t, st, Review{Repo: "acme/api", Number: 2, AccountID: 1, Status: "error", StartedAt: now - 70})
+	// A review that chose its verdict but failed to post isn't a verdict.
+	addReview(t, st, Review{Repo: "acme/api", Number: 3, AccountID: 1, Status: "error", Event: "APPROVE", StartedAt: now - 65})
 	addReview(t, st, Review{Repo: "globex/app", Number: 1, AccountID: 2, Status: "posted", StartedAt: now - 60, FinishedAt: now - 20,
 		Comments: 1, Sev: [5]int{1, 0, 0, 0, 0}})
 
@@ -137,7 +139,7 @@ func TestRepoAndOrgMetrics(t *testing.T) {
 		web.Fixed != 1 || web.FixRate() != 25 || web.Approvals != 1 || web.ChangesRequested != 1 || web.Org != "acme" {
 		t.Errorf("acme/web = %+v", web)
 	}
-	if api.Reviews != 1 || api.Errors != 1 || api.Sev != [5]int{0, 0, 0, 1, 3} {
+	if api.Reviews != 1 || api.Errors != 2 || api.Approvals != 0 || api.Sev != [5]int{0, 0, 0, 1, 3} {
 		t.Errorf("acme/api = %+v", api)
 	}
 	all, err := st.RepoStatsSince(AllAccounts, 0, 10)
@@ -150,7 +152,7 @@ func TestRepoAndOrgMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(orgs) != 2 || orgs[0].Login != "acme" || orgs[0].Posted != 3 || orgs[0].Repos != 2 || orgs[0].Findings != 8 ||
-		orgs[0].Sev != [5]int{1, 1, 2, 1, 3} || orgs[0].Errors != 1 || orgs[1].Login != "globex" || orgs[1].Posted != 1 {
+		orgs[0].Sev != [5]int{1, 1, 2, 1, 3} || orgs[0].Errors != 2 || orgs[1].Login != "globex" || orgs[1].Posted != 1 {
 		t.Errorf("organizations = %+v", orgs)
 	}
 

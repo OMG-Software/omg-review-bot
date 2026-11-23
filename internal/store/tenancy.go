@@ -637,8 +637,8 @@ func (s *Store) ReviewStatsSince(accountID, since int64) (ReviewStats, error) {
 	var r ReviewStats
 	var avg sql.NullFloat64
 	err := s.db.QueryRow(`SELECT COUNT(*),
-  COALESCE(SUM(status='posted'),0), COALESCE(SUM(status='error'),0), COALESCE(SUM(event='APPROVE'),0),
-  COALESCE(SUM(event='REQUEST_CHANGES'),0),
+  COALESCE(SUM(status='posted'),0), COALESCE(SUM(status='error'),0), COALESCE(SUM(status='posted' AND event='APPROVE'),0),
+  COALESCE(SUM(status='posted' AND event='REQUEST_CHANGES'),0),
   COUNT(DISTINCT CASE WHEN status='posted' THEN repo||'#'||number END),
   COUNT(DISTINCT CASE WHEN status='posted' THEN repo END),
   COALESCE(SUM(comments),0), COALESCE(SUM(notes),0), COALESCE(SUM(fixed),0),
@@ -741,7 +741,7 @@ func (s *Store) RepoStatsSince(accountID, since int64, limit int) ([]RepoStats, 
   COUNT(DISTINCT CASE WHEN r.status='posted' THEN r.number END),
   COALESCE(SUM(r.comments+r.notes),0), COALESCE(SUM(r.sev_p1+r.sev_p2),0),
   COALESCE(SUM(r.sev_p1),0), COALESCE(SUM(r.sev_p2),0), COALESCE(SUM(r.sev_p3),0), COALESCE(SUM(r.sev_p4),0), COALESCE(SUM(r.sev_p5),0),
-  COALESCE(SUM(r.fixed),0), COALESCE(SUM(r.event='APPROVE'),0), COALESCE(SUM(r.event='REQUEST_CHANGES'),0),
+  COALESCE(SUM(r.fixed),0), COALESCE(SUM(r.status='posted' AND r.event='APPROVE'),0), COALESCE(SUM(r.status='posted' AND r.event='REQUEST_CHANGES'),0),
   COALESCE(SUM(r.status='error'),0), MAX(r.started_at)
 FROM reviews r LEFT JOIN orgs o ON o.id=r.account_id
 WHERE r.started_at>=? AND (?=-1 OR r.account_id=?) GROUP BY r.account_id, r.repo ORDER BY 4 DESC, 6 DESC, 17 DESC LIMIT ?`,
