@@ -412,8 +412,9 @@ event checks it for replies, so polling only catches anything missed.
 **Reviewing.**
 
 1. When a PR's head commit changes, the PR becomes `pending`. After the *wait after push*
-   delay, it's queued. Up to two jobs (reviews or replies) run at once, each on a different PR, so
-   the model never gets more than two requests at a time. A PR's own jobs run one after another.
+   delay, it's queued. Up to four jobs (reviews or replies) run at once, each on a different PR, so
+   the model never gets more than four requests at a time. A PR's own jobs run one after another.
+   The dashboard shows the four review slots, each with the PR it's working on or `Idle`.
 2. Files that are ignored, deleted or binary are skipped. Each remaining diff line is labelled
    with its new-file line number, so the model doesn't have to work out line numbers inside diff
    hunks. Large diffs are split into parts that fit the context, and the parts' summaries are

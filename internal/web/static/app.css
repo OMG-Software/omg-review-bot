@@ -50,6 +50,10 @@ small { display: block; font-size: 12px; margin-top: 2px; }
 .stat .value { font-size: 24px; font-weight: 600; }
 .stat .value.small { font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
 .stat .sub { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat .slots { margin: 4px 0 0; padding-left: 1.4em; font-size: 15px; font-weight: 500; }
+.stat .slots li { min-width: 0; overflow-wrap: anywhere; }
+.stat .slots li + li { margin-top: 4px; }
+.stat .slots .sub { display: block; font-weight: 400; }
 
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
