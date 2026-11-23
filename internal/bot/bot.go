@@ -627,7 +627,15 @@ func (b *Bot) releasePR(j job) {
 	defer b.mu.Unlock()
 	k := prKey(j)
 	b.orgDone(j.org)
-	for _, w := range append([]job{j}, b.active[k]...) {
+	back := append([]job{j}, b.active[k]...)
+	delete(b.active, k)
+	// With none of its jobs left running, nothing would hand on the jobs its
+	// share held back (see nextForPR): they go back on the queue too.
+	if j.org != 0 && b.orgBusy[j.org] == 0 {
+		back = append(back, b.orgHeld[j.org]...)
+		delete(b.orgHeld, j.org)
+	}
+	for _, w := range back {
 		select {
 		case b.jobs <- w:
 		default:
@@ -637,7 +645,6 @@ func (b *Bot) releasePR(j job) {
 			b.log.Warn("job queue full, dropping", "job", w.key())
 		}
 	}
-	delete(b.active, k)
 }
 
 func (b *Bot) runJob(ctx context.Context, j job) {

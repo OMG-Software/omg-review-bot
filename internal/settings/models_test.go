@@ -63,6 +63,7 @@ func TestCheckOwn(t *testing.T) {
 		{BaseURL: "https://192.168.1.2/v1", Model: "gpt"},
 		{BaseURL: "https://localhost/v1", Model: "gpt"},
 		{Model: "gpt"},
+		{Provider: "ollama-cloud", BaseURL: "https://ollama.com", Model: "gpt"}, // no API key
 	} {
 		if CheckOwn(bad) == nil {
 			t.Errorf("CheckOwn(%+v) accepted", bad)

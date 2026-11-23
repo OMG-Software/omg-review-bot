@@ -204,6 +204,9 @@ func CheckOwn(l LLM) error {
 	if l.BaseURL == "" {
 		return errors.New("enter the model server's base URL")
 	}
+	if l.Provider == "ollama-cloud" && l.APIKey == "" {
+		return errors.New("an Ollama Cloud model needs an API key") // as Models.Issues requires
+	}
 	if err := netguard.CheckURL(l.BaseURL); err != nil {
 		return fmt.Errorf("the base URL must be a public https address: %w", err)
 	}

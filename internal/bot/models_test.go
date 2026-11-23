@@ -497,3 +497,27 @@ func TestRoundRobin(t *testing.T) {
 		t.Errorf("shorter set gave %q", l)
 	}
 }
+
+// TestReleaseRequeuesHeld: a worker stopping gives back its place; if it was
+// its organization's last, the jobs its share held go back on the queue,
+// since no worker of that organization is left to hand them on.
+func TestReleaseRequeuesHeld(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	j := func(n int) job { return job{kind: jobReview, repo: "acme/web", number: n, org: 500} }
+	if !b.claimPR(j(1), 1) || b.claimPR(j(2), 1) {
+		t.Fatal("claims")
+	}
+	b.releasePR(j(1))
+	var back []int
+	for len(b.jobs) > 0 {
+		back = append(back, (<-b.jobs).number)
+	}
+	if fmt.Sprint(back) != "[1 2]" || len(b.orgHeld) != 0 || len(b.orgBusy) != 0 {
+		t.Errorf("queued again %v, held %v, busy %v", back, b.orgHeld, b.orgBusy)
+	}
+}

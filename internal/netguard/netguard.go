@@ -29,6 +29,9 @@ var special = []netip.Prefix{
 	netip.MustParsePrefix("198.51.100.0/24"), // NOSONAR: documentation
 	netip.MustParsePrefix("203.0.113.0/24"),  // NOSONAR: documentation
 	netip.MustParsePrefix("240.0.0.0/4"),     // NOSONAR: reserved, and broadcast
+	netip.MustParsePrefix("100::/64"),        // NOSONAR: discard-only
+	netip.MustParsePrefix("2001:2::/48"),     // NOSONAR: benchmarking
+	netip.MustParsePrefix("fec0::/10"),       // NOSONAR: site-local (deprecated, may still route locally)
 	netip.MustParsePrefix("64:ff9b::/96"),    // NOSONAR: NAT64: can map to any IPv4 address, private ones included
 	netip.MustParsePrefix("64:ff9b:1::/48"),  // NOSONAR: local-use NAT64
 	netip.MustParsePrefix("2001:db8::/32"),   // NOSONAR: documentation
