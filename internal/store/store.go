@@ -144,6 +144,7 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_time ON webhook_deliveries(received_at
 var addedColumns = []struct{ table, column, alter string }{
 	{"repos", "account_id", `ALTER TABLE repos ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
 	{"pulls", "account_id", `ALTER TABLE pulls ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
+	{"pulls", "force_retry", `ALTER TABLE pulls ADD COLUMN force_retry INTEGER NOT NULL DEFAULT 0`},
 	{"reviews", "account_id", `ALTER TABLE reviews ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`},
 	{"reviews", "event", `ALTER TABLE reviews ADD COLUMN event TEXT NOT NULL DEFAULT ''`},
 	{"reviews", "fixed", `ALTER TABLE reviews ADD COLUMN fixed INTEGER NOT NULL DEFAULT 0`},
@@ -194,7 +195,7 @@ CREATE VIEW repos_v AS SELECT id, installation_id, account_id, full_name, enable
 DROP VIEW IF EXISTS pulls_v;
 CREATE VIEW pulls_v AS SELECT repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
   head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
-  not_before, tracked_at, updated_at, account_id, held_at FROM pulls;
+  not_before, tracked_at, updated_at, account_id, force_retry, held_at FROM pulls;
 DROP VIEW IF EXISTS reviews_v;
 CREATE VIEW reviews_v AS SELECT id, repo, number, head_sha, gh_review_id, url, summary, comments, notes, model, skill,
   status, error, raw, batches, prompt_tokens, completion_tokens, started_at, finished_at,
@@ -639,6 +640,7 @@ type PR struct {
 	TrackedAt      int64
 	UpdatedAt      int64
 	AccountID      int64
+	ForceRetry     bool // retry a failed manual review with its original authorization
 	// HeldAt is when the daily review limit last held the PR (0 if it
 	// isn't held). Unlike UpdatedAt, later saves (pushes) don't move it.
 	HeldAt int64
@@ -648,15 +650,16 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanPR(sc scanner) (*PR, error) {
 	var p PR
-	var draft, open, skip int
+	var draft, open, skip, forceRetry int
 	var labels string
 	err := sc.Scan(&p.Repo, &p.Number, &p.InstallationID, &p.Title, &p.Author, &p.URL, &p.BaseRef, &p.HeadRef,
 		&draft, &open, &labels, &p.HeadSHA, &p.ReviewedSHA, &p.AttemptSHA, &p.Attempts, &p.GHUpdatedAt,
-		&p.CommentsSeen, &p.Status, &p.LastError, &skip, &p.NotBefore, &p.TrackedAt, &p.UpdatedAt, &p.AccountID, &p.HeldAt)
+		&p.CommentsSeen, &p.Status, &p.LastError, &skip, &p.NotBefore, &p.TrackedAt, &p.UpdatedAt, &p.AccountID, &forceRetry, &p.HeldAt)
 	if err != nil {
 		return nil, err
 	}
 	p.Draft, p.Open, p.Skip = draft == 1, open == 1, skip == 1
+	p.ForceRetry = forceRetry == 1
 	if labels != "" {
 		p.Labels = strings.Split(labels, "\n")
 	}
@@ -693,11 +696,11 @@ func (s *Store) SavePR(p *PR) error {
 	p.UpdatedAt = time.Now().Unix()
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO pulls(repo, number, installation_id, title, author, url, base_ref, head_ref, draft, open, labels,
   head_sha, reviewed_sha, attempt_sha, attempts, gh_updated_at, comments_seen, status, last_error, skip,
-  not_before, tracked_at, updated_at, account_id, held_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  not_before, tracked_at, updated_at, account_id, force_retry, held_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.Repo, p.Number, p.InstallationID, p.Title, p.Author, p.URL, p.BaseRef, p.HeadRef,
 		b2i(p.Draft), b2i(p.Open), strings.Join(p.Labels, "\n"), p.HeadSHA, p.ReviewedSHA, p.AttemptSHA,
 		p.Attempts, p.GHUpdatedAt, p.CommentsSeen, p.Status, p.LastError, b2i(p.Skip), p.NotBefore,
-		p.TrackedAt, p.UpdatedAt, p.AccountID, p.HeldAt)
+		p.TrackedAt, p.UpdatedAt, p.AccountID, b2i(p.ForceRetry), p.HeldAt)
 	return err
 }
 
@@ -713,7 +716,7 @@ func (s *Store) OpenPRs(repo string) ([]PR, error) {
 
 // DuePRs returns PRs waiting for review whose debounce/backoff window has passed.
 func (s *Store) DuePRs(now int64) ([]PR, error) {
-	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='pending' AND open=1 AND skip=0 AND not_before<=? ORDER BY not_before`, now)
+	return s.queryPRs(`SELECT * FROM pulls_v WHERE status='pending' AND open=1 AND (skip=0 OR force_retry=1) AND not_before<=? ORDER BY not_before`, now)
 }
 
 // NextDue returns when the next pending review becomes due after the given
@@ -723,7 +726,7 @@ func (s *Store) DuePRs(now int64) ([]PR, error) {
 // would keep the run loop waking every second.
 func (s *Store) NextDue(after int64) int64 {
 	var n sql.NullInt64
-	_ = s.db.QueryRow(`SELECT MIN(not_before) FROM pulls WHERE status='pending' AND open=1 AND skip=0 AND not_before>?`, after).Scan(&n)
+	_ = s.db.QueryRow(`SELECT MIN(not_before) FROM pulls WHERE status='pending' AND open=1 AND (skip=0 OR force_retry=1) AND not_before>?`, after).Scan(&n)
 	return n.Int64
 }
 
@@ -870,7 +873,7 @@ type DailyUsage struct {
 	Posted    int   // reviews posted since the window began
 	Oldest    int64 // when the oldest of them started (0 if none)
 	Reviewing int   // reviews under way now
-	Due       int   // PRs waiting for a review that is due now
+	Due       int   // PRs waiting for a review that is due now (as DuePRs counts them)
 }
 
 // DailyReviewUsage counts accountID's reviews posted since since (a Unix
@@ -886,7 +889,7 @@ func (s *Store) DailyReviewUsage(accountID, since, now int64) (DailyUsage, error
 	}
 	u.Oldest = oldest.Int64
 	err = s.db.QueryRow(`SELECT COALESCE(SUM(status='reviewing'), 0),
-  COALESCE(SUM(status='pending' AND skip=0 AND not_before<=?), 0) FROM pulls WHERE account_id=? AND open=1`,
+  COALESCE(SUM(status='pending' AND (skip=0 OR force_retry=1) AND not_before<=?), 0) FROM pulls WHERE account_id=? AND open=1`,
 		now, accountID).Scan(&u.Reviewing, &u.Due)
 	return u, err
 }

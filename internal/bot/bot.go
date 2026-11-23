@@ -33,7 +33,10 @@ type Status struct {
 	LastPollErr  string
 	// Working is what the workers are doing, longest-running first (empty
 	// when idle).
-	Working       []Activity
+	Working []Activity
+	// Slots has one entry per worker, in worker order; an idle worker's
+	// entry has no What.
+	Slots         []Activity
 	QueueLen      int
 	RateRemaining int64
 	LastWebhook   time.Time
@@ -43,8 +46,10 @@ type Status struct {
 
 // Activity is the job one worker is running.
 type Activity struct {
-	What string
-	Repo string // repository of the job
+	What   string
+	Repo   string // repository of the job
+	Number int    // the job's PR
+	Title  string // the PR's title when the job started this step
 	// Account owns the job's PR, so org views can hide others' work. It's
 	// recorded with the job, not looked up from Repo: the name can pass to
 	// another account while the job runs.
@@ -55,7 +60,7 @@ type Activity struct {
 
 // workers is how many jobs run at once. Jobs for the same PR still run one
 // after another (see claimPR).
-const workers = 2
+const workers = 4
 
 // workerSlot is the context key of the running worker's index, so a job's
 // progress (setCurrent) is shown against the worker running it.
@@ -168,8 +173,8 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 	}
 }
 
-// Run polls until ctx is cancelled. Two workers process the queue, so the
-// model handles at most two requests at a time.
+// Run polls until ctx is cancelled. Four workers process the queue, so the
+// model handles at most four requests at a time.
 func (b *Bot) Run(ctx context.Context) {
 	if err := b.store.ResetReviewing(); err != nil {
 		b.log.Warn("reset interrupted reviews", "err", err)
@@ -300,9 +305,11 @@ func (b *Bot) Status() Status {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := b.status
-	for _, a := range b.working {
+	s.Slots = make([]Activity, workers)
+	for i, a := range b.working {
 		if a.What != "" {
 			s.Working = append(s.Working, a)
+			s.Slots[i] = a
 		}
 	}
 	sort.SliceStable(s.Working, func(i, j int) bool { return s.Working[i].started.Before(s.Working[j].started) })
@@ -327,7 +334,8 @@ func (b *Bot) setCurrent(ctx context.Context, pr *store.PR, format string, args 
 	if started.IsZero() {
 		started = now
 	}
-	b.working[slot] = Activity{What: fmt.Sprintf(format, args...), Repo: pr.Repo, Account: pr.AccountID, Since: now, started: started}
+	b.working[slot] = Activity{What: fmt.Sprintf(format, args...), Repo: pr.Repo, Number: pr.Number, Title: pr.Title,
+		Account: pr.AccountID, Since: now, started: started}
 	b.mu.Unlock()
 }
 

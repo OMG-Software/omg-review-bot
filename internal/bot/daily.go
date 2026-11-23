@@ -62,7 +62,7 @@ func (b *Bot) DailyQuota(accountID int64, now time.Time) (DailyQuota, error) {
 }
 
 // dailyCapped reports whether pr's organization has no review left for now.
-// The caller holds prMu, so two workers can't both take the last place. If
+// The caller holds prMu, so no two workers can take the last place. If
 // the usage can't be read, the review goes ahead, as with the round limit.
 func (b *Bot) dailyCapped(pr *store.PR) (DailyQuota, bool) {
 	q, err := b.DailyQuota(pr.AccountID, time.Now())

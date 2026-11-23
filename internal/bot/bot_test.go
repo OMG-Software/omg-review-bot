@@ -58,6 +58,7 @@ type fakeGitHub struct {
 	failEdits     bool             // editing issue comments fails (a 502)
 	failList      bool             // listing the PR's conversation comments fails (a 502)
 	mainStatus    string           // main.go's status in the PR's files; "" = modified
+	onReview      func()           // runs once after recording a review, before responding
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -82,7 +83,13 @@ func (f *fakeGitHub) id() int64 { f.nextID++; return f.nextID - 1 }
 func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		defer f.mu.Unlock()
+		var finishReview func()
+		defer func() {
+			f.mu.Unlock()
+			if finishReview != nil {
+				finishReview()
+			}
+		}()
 		auth := r.Header.Get("Authorization")
 		if strings.HasPrefix(r.URL.Path, "/app") && !strings.HasPrefix(auth, "Bearer ") {
 			t.Errorf("%s called without App JWT", r.URL.Path)
@@ -138,7 +145,14 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			state := map[string]string{"APPROVE": "APPROVED", "COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}[req.Event]
 			rid := 500 + int64(len(f.reviews))
 			f.reviewLog = append(f.reviewLog, map[string]any{"id": rid, "user": bot, "state": state, "commit_id": req.CommitID, "body": req.Body})
-			send(map[string]any{"id": rid, "html_url": fmt.Sprintf("https://github.example/review/%d", rid)})
+			hook := f.onReview
+			f.onReview = nil
+			finishReview = func() {
+				if hook != nil {
+					hook()
+				}
+				send(map[string]any{"id": rid, "html_url": fmt.Sprintf("https://github.example/review/%d", rid)})
+			}
 		case strings.HasPrefix(p, "/repos/acme/web/pulls/7/reviews/") && strings.HasSuffix(p, "/dismissals"):
 			var rid int64
 			_, _ = fmt.Sscanf(strings.TrimPrefix(p, "/repos/acme/web/pulls/7/reviews/"), "%d", &rid)
@@ -369,6 +383,197 @@ func (e *reviewEnv) push(sha, patch, content, review, updatedAt string) {
 	e.lm.mu.Lock()
 	e.lm.review = review
 	e.lm.mu.Unlock()
+}
+
+func TestAutomaticReviewUsesFreshHeadOnce(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+	})
+	e.b.pollOnce(e.ctx)
+	original, err := e.st.GetPR("acme/web", 7)
+	if err != nil || original == nil || original.Status != "pending" {
+		t.Fatalf("expected a queued PR, got %+v (%v)", original, err)
+	}
+
+	// GitHub sees the push before the worker's fetch, but the tracker still has
+	// the head from the first poll. Let the scheduler run again without polling.
+	e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+	drain(e.ctx, e.b)
+	e.b.enqueueDue(e.cfg)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || e.gh.reviews[0].CommitID != "bbb222" {
+		t.Fatalf("expected one review of bbb222, got %+v", e.gh.reviews)
+	}
+	pr, err := e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.HeadSHA != "bbb222" || pr.ReviewedSHA != "bbb222" || pr.Status != "reviewed" {
+		t.Fatalf("expected the new head to be tracked and reviewed, got %+v (%v)", pr, err)
+	}
+
+	// Repair a pending record left by the old behavior without calling the model.
+	pr.HeadSHA, pr.GHUpdatedAt, pr.Status = original.HeadSHA, original.GHUpdatedAt, "pending"
+	if err := e.st.SavePR(pr); err != nil {
+		t.Fatal(err)
+	}
+	e.b.enqueueDue(e.cfg)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || len(e.lm.prompts["code_review"]) != 1 {
+		t.Fatalf("already-reviewed head ran again: %d posts, %d model reviews", len(e.gh.reviews), len(e.lm.prompts["code_review"]))
+	}
+	pr, err = e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.HeadSHA != "bbb222" || pr.Status != "reviewed" {
+		t.Fatalf("expected the stale record to be repaired, got %+v (%v)", pr, err)
+	}
+
+	if err := e.b.ReviewNow(pr.Repo, pr.Number, pr.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 2 || e.gh.reviews[1].CommitID != "bbb222" {
+		t.Fatalf("expected a manual re-review of bbb222, got %+v", e.gh.reviews)
+	}
+}
+
+func TestManualReviewRetainsForceAfterFailure(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(*settings.Settings) {})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	pr, err := e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.ReviewedSHA != "aaa111" {
+		t.Fatalf("expected an already-reviewed commit, got %+v (%v)", pr, err)
+	}
+
+	e.push("", e.gh.patch, e.gh.content, clean, "2026-01-01T00:00:00Z")
+	if err := e.b.ReviewNow(pr.Repo, pr.Number, pr.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	drain(e.ctx, e.b)
+	pr, err = e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || pr.Status != "pending" || !pr.ForceRetry || pr.Attempts != 1 || pr.NotBefore <= time.Now().Unix() {
+		t.Fatalf("expected a manual review retry after backoff, got %+v (%v)", pr, err)
+	}
+
+	e.push("aaa111", e.gh.patch, e.gh.content, clean, "2026-01-01T00:00:00Z")
+	e.cfg.Review.Enabled = false
+	if err := settings.Save(e.st, e.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.b.SetSkip(pr.Repo, pr.Number, pr.AccountID, true); err != nil {
+		t.Fatal(err)
+	}
+	pr, err = e.st.GetPR(pr.Repo, pr.Number)
+	if err != nil || pr == nil || pr.Status != "pending" || !pr.Skip || !pr.ForceRetry {
+		t.Fatalf("expected manual retry to survive status recomputation, got %+v (%v)", pr, err)
+	}
+	if due := e.st.NextDue(time.Now().Unix()); due != pr.NotBefore {
+		t.Fatalf("next retry due at %d, want %d", due, pr.NotBefore)
+	}
+	e.b.enqueueDue(e.cfg)
+	if len(e.b.jobs) != 0 {
+		t.Fatal("manual retry was queued before its backoff expired")
+	}
+	pr.NotBefore = 0
+	if err := e.st.SavePR(pr); err != nil {
+		t.Fatal(err)
+	}
+	e.b.enqueueDue(e.cfg)
+	drain(e.ctx, e.b)
+	pr, err = e.st.GetPR(pr.Repo, pr.Number)
+	if err != nil || pr == nil || pr.Status != "skipped" || pr.ForceRetry || pr.Attempts != 0 {
+		t.Fatalf("expected manual retry to finish and clear its intent, got %+v (%v)", pr, err)
+	}
+	e.gh.mu.Lock()
+	defer e.gh.mu.Unlock()
+	if len(e.gh.reviews) != 2 || e.gh.reviews[1].CommitID != "aaa111" {
+		t.Fatalf("expected the retry to re-review aaa111, got %+v", e.gh.reviews)
+	}
+}
+
+func TestReviewCompletionReconcilesHeadWithWebhook(t *testing.T) {
+	cases := []struct {
+		name, action, webhookHead, updatedAt, wantHead, wantStatus string
+	}{
+		{"old head metadata", "edited", "aaa111", "2026-01-01T00:05:00Z", "bbb222", "reviewed"},
+		{"newer push", "synchronize", "ccc333", "2026-01-01T00:20:00Z", "ccc333", "pending"},
+		{"push back to original head", "synchronize", "aaa111", "2026-01-01T00:20:00Z", "aaa111", "pending"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const clean = `{"summary":"Looks fine.","comments":[]}`
+			e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+				cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+			})
+			e.b.pollOnce(e.ctx)
+			e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+			e.gh.mu.Lock()
+			e.gh.onReview = func() {
+				if tc.action == "synchronize" {
+					e.gh.mu.Lock()
+					e.gh.head, e.gh.updatedAt = tc.webhookHead, tc.updatedAt
+					e.gh.mu.Unlock()
+				}
+				event := &github.WebhookEvent{
+					Action:     tc.action,
+					Repository: &github.Repo{ID: 100, FullName: "acme/web"},
+					PullRequest: &github.PullRequest{
+						Number: 7, State: "open", UpdatedAt: tc.updatedAt, Head: github.Ref{SHA: tc.webhookHead},
+					},
+				}
+				want := "acme/web#7 " + tc.action + ": reviewing"
+				if got := e.b.webhookPull(e.cfg, event); got != want {
+					t.Errorf("webhook result = %q, want %q", got, want)
+				}
+			}
+			e.gh.mu.Unlock()
+			drain(e.ctx, e.b)
+			pr, err := e.st.GetPR("acme/web", 7)
+			if err != nil || pr == nil || pr.HeadSHA != tc.wantHead || pr.ReviewedSHA != "bbb222" || pr.Status != tc.wantStatus {
+				t.Fatalf("expected head %s and status %s after reviewing bbb222, got %+v (%v)", tc.wantHead, tc.wantStatus, pr, err)
+			}
+			e.b.enqueueDue(e.cfg)
+			drain(e.ctx, e.b)
+			e.gh.mu.Lock()
+			defer e.gh.mu.Unlock()
+			if tc.wantStatus == "reviewed" {
+				if len(e.gh.reviews) != 1 || e.gh.reviews[0].CommitID != "bbb222" {
+					t.Fatalf("expected only a review of bbb222, got %+v", e.gh.reviews)
+				}
+			} else if len(e.gh.reviews) != 2 || e.gh.reviews[0].CommitID != "bbb222" || e.gh.reviews[1].CommitID != tc.wantHead {
+				t.Fatalf("expected reviews of bbb222 and %s, got %+v", tc.wantHead, e.gh.reviews)
+			}
+		})
+	}
+}
+
+func TestReviewRetriesWhenFetchedHeadIsInvalid(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	cases := []struct {
+		name, head, updatedAt, wantError string
+	}{
+		{"stale head", "aaa111", "2026-01-01T00:00:00Z", "fetched PR head aaa111 is older than the tracked head bbb222"},
+		{"missing head", "", "2026-01-01T00:20:00Z", "fetched PR has no head SHA"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newReviewEnv(t, clean, func(*settings.Settings) {})
+			e.push("bbb222", e.gh.patch, e.gh.content, clean, "2026-01-01T00:10:00Z")
+			e.b.pollOnce(e.ctx)
+			e.push(tc.head, e.gh.patch, e.gh.content, clean, tc.updatedAt)
+			drain(e.ctx, e.b)
+			pr, err := e.st.GetPR("acme/web", 7)
+			if err != nil || pr == nil || pr.HeadSHA != "bbb222" || pr.ReviewedSHA != "" || pr.Status != "pending" ||
+				pr.AttemptSHA != "bbb222" || pr.Attempts != 1 || pr.NotBefore <= time.Now().Unix() ||
+				!strings.Contains(pr.LastError, tc.wantError) {
+				t.Fatalf("expected a delayed retry of bbb222 with error %q, got %+v (%v)", tc.wantError, pr, err)
+			}
+			e.gh.mu.Lock()
+			defer e.gh.mu.Unlock()
+			if len(e.gh.reviews) != 0 {
+				t.Fatalf("expected no review for an invalid fetched head, got %+v", e.gh.reviews)
+			}
+		})
+	}
 }
 
 func TestReviewResolveAndApproveEndToEnd(t *testing.T) {

@@ -414,8 +414,9 @@ event checks it for replies, so polling only catches anything missed.
 **Reviewing.**
 
 1. When a PR's head commit changes, the PR becomes `pending`. After the *wait after push*
-   delay, it's queued. Up to two jobs (reviews or replies) run at once, each on a different PR, so
-   the model never gets more than two requests at a time. A PR's own jobs run one after another.
+   delay, it's queued. Up to four jobs (reviews or replies) run at once, each on a different PR, so
+   the model never gets more than four requests at a time. A PR's own jobs run one after another.
+   The dashboard shows the four review slots, each with the PR it's working on or `Idle`.
 2. Files that are ignored, deleted or binary are skipped. Each remaining diff line is labelled
    with its new-file line number, so the model doesn't have to work out line numbers inside diff
    hunks. Large diffs are split into parts that fit the context, and the parts' summaries are
@@ -463,7 +464,7 @@ event checks it for replies, so polling only catches anything missed.
    don't count.
 9. Each org also has a **daily review limit**: at most that many posted reviews in any 24 hours
    (100 by default). A review counts from when it started, and reviews under way count too, so
-   two workers can't both take the last place. A review past the limit isn't run: the PR shows
+   no two workers can take the last place. A review past the limit isn't run: the PR shows
    `daily` and gets one comment saying the limit is reached and when reviews resume. After that
    nothing more is reviewed on it, new pushes included, and **Review now** is refused for the
    whole org, until a place frees up 24 hours after the oldest review in the window. Then held

@@ -1372,6 +1372,22 @@ func TestRunningJobShownByAccount(t *testing.T) {
 	if two.Working[0].What != what {
 		t.Errorf("hiding a job changed the bot's own status: %+v", two.Working[0])
 	}
+	// The dashboard's slots are hidden the same way, title included.
+	slot := func(account int64) bot.Activity { a := job(account); a.Number, a.Title = 7, "Secret plans"; return a }
+	slots := bot.Status{Slots: []bot.Activity{slot(otherID), slot(acmeID), {}}}
+	st = visibleStatus(slots, member)
+	if a := st.Slots[0]; a.What == what || a.Repo != "" || a.Number != 0 || a.Title != "" {
+		t.Errorf("another account's slot shown to acme: %+v", a)
+	}
+	if a := st.Slots[1]; a.Title != "Secret plans" || a.Number != 7 {
+		t.Errorf("acme's own slot hidden from acme: %+v", a)
+	}
+	if a := st.Slots[2]; a.What != "" {
+		t.Errorf("an idle slot shown as busy: %+v", a)
+	}
+	if slots.Slots[0].Title != "Secret plans" {
+		t.Errorf("hiding a slot changed the bot's own status: %+v", slots.Slots[0])
+	}
 	// Not linked to an organization: administrators only.
 	if a := visibleStatus(bot.Status{Working: []bot.Activity{job(0)}}, member).Working[0]; a.What == what {
 		t.Errorf("a job of no organization shown to a member: %+v", a)

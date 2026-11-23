@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -91,44 +92,72 @@ func (e *workerEnv) quiet() {
 	e.t.Helper()
 	select {
 	case j := <-e.started:
-		e.t.Fatalf("%s started while both workers should be busy or waiting", j.key())
+		e.t.Fatalf("%s started while every worker should be busy or waiting", j.key())
 	case <-time.After(100 * time.Millisecond):
 	}
 }
 
 func replies(repo string, n int) job { return job{kind: jobReplies, repo: repo, number: n} }
 
-// Two jobs for different PRs run at the same time, and the dashboard shows
-// both; a third waits until one of them is done.
-func TestTwoJobsRunAtOnce(t *testing.T) {
+// Four jobs for different PRs run at the same time, and the dashboard shows
+// each in its own slot; a fifth waits until one of them is done.
+func TestFourJobsRunAtOnce(t *testing.T) {
+	if workers != 4 {
+		t.Fatalf("workers = %d, want 4", workers)
+	}
 	e := newWorkerEnv(t)
-	a, b, c := replies("acme/web", 1), replies("acme/web", 2), replies("acme/api", 3)
-	for _, j := range []job{a, b, c} {
+	queued := []job{replies("acme/web", 1), replies("acme/web", 2), replies("acme/api", 3), replies("acme/api", 4)}
+	last := replies("acme/docs", 5)
+	for _, j := range append(queued, last) {
 		if !e.b.enqueue(j) {
 			t.Fatalf("%s not queued", j.key())
 		}
 	}
-	first, second := e.next(), e.next()
-	if got := map[string]bool{first.key(): true, second.key(): true}; !got[a.key()] || !got[b.key()] {
-		t.Fatalf("started %s and %s, want the first two queued", first.key(), second.key())
+	got := map[string]bool{}
+	var started []job
+	for range queued {
+		j := e.next()
+		got[j.key()] = true
+		started = append(started, j)
+	}
+	for _, j := range queued {
+		if !got[j.key()] {
+			t.Fatalf("started %v, want the first four queued", got)
+		}
 	}
 	e.quiet()
 	s := e.b.Status()
-	if len(s.Working) != 2 || s.QueueLen != 1 {
-		t.Fatalf("status while two run = %+v, want two working and one queued", s)
+	if len(s.Working) != 4 || s.QueueLen != 1 || len(s.Slots) != 4 {
+		t.Fatalf("status while four run = %+v, want four working in four slots and one queued", s)
 	}
-	e.finish(first)
-	if j := e.next(); j.key() != c.key() {
-		t.Fatalf("started %s, want %s", j.key(), c.key())
+	inSlots := map[string]bool{}
+	for i, a := range s.Slots {
+		if a.What == "" || a.Repo == "" || a.Number == 0 {
+			t.Fatalf("slot %d = %+v, want its running PR", i+1, a)
+		}
+		inSlots[fmt.Sprintf("%s#%d", a.Repo, a.Number)] = true
 	}
-	e.finish(second)
-	e.finish(c)
+	if len(inSlots) != 4 {
+		t.Fatalf("slots = %+v, want a different PR in each", s.Slots)
+	}
+	e.finish(started[0])
+	if j := e.next(); j.key() != last.key() {
+		t.Fatalf("started %s, want %s", j.key(), last.key())
+	}
+	for _, j := range append(started[1:], last) {
+		e.finish(j)
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for len(e.b.Status().Working) != 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("still working after every job finished: %+v", e.b.Status().Working)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	for i, a := range e.b.Status().Slots {
+		if a.What != "" {
+			t.Errorf("slot %d = %+v after every job finished, want idle", i+1, a)
+		}
 	}
 }
 
@@ -197,9 +226,14 @@ func TestWorkingOrderedByJobStart(t *testing.T) {
 	before := b.Status().Working[0].Since
 	b.setCurrent(slot(1), pr, "first, part 2")
 
-	w := b.Status().Working
+	s := b.Status()
+	w := s.Working
 	if len(w) != 2 || w[0].What != "first, part 2" || w[1].What != "second" {
 		t.Fatalf("working = %+v, want the first job still listed first", w)
+	}
+	// Slots stay in worker order, whichever job started first.
+	if len(s.Slots) != workers || s.Slots[0].What != "second" || s.Slots[1].What != "first, part 2" || s.Slots[2].What != "" {
+		t.Fatalf("slots = %+v, want each job in its own worker's slot and the rest idle", s.Slots)
 	}
 	if !w[0].Since.After(before) {
 		t.Errorf("a job's new step kept the old step's time: %v, then %v", before, w[0].Since)

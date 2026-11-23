@@ -14,7 +14,9 @@
     {{if .LastPollErr}}<span class="sub bad" title="{{.LastPollErr}}">{{.LastPollErr}}</span>{{end}}</div>
   <div class="stat"><span class="label">Webhooks</span><span class="value small">{{if .WebhooksActive}}receiving · last {{agoT .LastWebhook}}{{else if not .LastWebhook.IsZero}}last {{agoT .LastWebhook}}{{else if $.D.WebhookOn}}none received yet{{else}}off (polling){{end}}</span>
     <span class="sub"><a href="/admin/webhooks">{{$.D.Deliveries24h}} deliveries in 24h →</a></span></div>
-  <div class="stat wide"><span class="label">Working on</span><span class="value small">{{range $i, $w := .Working}}{{if $i}}<br>{{end}}{{$w.What}} <span class="muted">({{agoT $w.Since}})</span>{{else}}idle{{end}}</span></div>
+  <div class="stat wide"><span class="label">Review slots</span>
+    <ol class="slots">{{range .Slots}}<li>{{if not .What}}<span class="muted">Idle</span>{{else if .Repo}}<a href="/prs/{{.Repo}}/{{.Number}}" title="{{.What}}">{{if .Title}}{{.Title}}{{else}}{{.Repo}}#{{.Number}}{{end}}</a>
+      <span class="sub muted">{{.What}} · {{agoT .Since}}</span>{{else}}{{.What}} <span class="sub muted">{{agoT .Since}}</span>{{end}}</li>{{end}}</ol></div>
   <div class="stat"><span class="label">Queue</span><span class="value">{{.QueueLen}}</span></div>
   <div class="stat"><span class="label">GitHub API calls left</span><span class="value">{{if ge .RateRemaining 0}}{{.RateRemaining}}{{else}}—{{end}}</span></div>
 </div>

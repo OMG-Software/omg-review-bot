@@ -546,16 +546,25 @@ func visibleStatus(st bot.Status, v *viewer) bot.Status {
 	if v != nil && v.Admin {
 		return st
 	}
-	working := make([]bot.Activity, len(st.Working))
-	for i, a := range st.Working {
-		if a.Repo != "" && (v == nil || a.Account == 0 || v.Role(a.Account) == "") {
-			a.What, a.Repo, a.Account = "a review for another organization", "", 0
-		}
-		working[i] = a
-	}
-	st.Working = working
+	st.Working, st.Slots = visibleJobs(st.Working, v), visibleJobs(st.Slots, v)
 	st.ConfigIssues, st.LastPollErr = nil, ""
 	return st
+}
+
+// visibleJobs copies jobs, hiding those v may not see. The copy leaves the
+// bot's own status as it was.
+func visibleJobs(jobs []bot.Activity, v *viewer) []bot.Activity {
+	if jobs == nil {
+		return nil
+	}
+	out := make([]bot.Activity, len(jobs))
+	for i, a := range jobs {
+		if a.Repo != "" && (v == nil || a.Account == 0 || v.Role(a.Account) == "") {
+			a = bot.Activity{What: "a review for another organization", Since: a.Since}
+		}
+		out[i] = a
+	}
+	return out
 }
 
 func (s *Server) apiTestGitHub(w http.ResponseWriter, r *http.Request) {
