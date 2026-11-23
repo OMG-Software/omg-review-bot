@@ -70,6 +70,25 @@ func TestOrgOwnModels(t *testing.T) {
 	if m, _ := s.b.OrgModels(acmeID); m.Configs[0].Model != "gpt-y" || m.Configs[0].APIKey != "sk-very-secret-123" {
 		t.Errorf("after update: %+v", m.Configs)
 	}
+	// Ollama Cloud needs a key: refused without one, and once saved, an
+	// update that leaves the key field empty keeps it and passes.
+	cloud := func(path, key string) string {
+		_, hdr := s.post(path, url.Values{"provider": {"ollama-cloud"}, "base_url": {"https://ollama.com"}, "model": {"big"}, "api_key": {key}})
+		return hdr.Get("Location")
+	}
+	if loc := cloud("/orgs/acme/models/add", ""); !strings.Contains(loc, "err=") {
+		t.Errorf("Ollama Cloud model without a key accepted (went to %s)", loc)
+	}
+	if loc := cloud("/orgs/acme/models/add", "ok-cloud-key"); strings.Contains(loc, "err=") {
+		t.Fatalf("Ollama Cloud model with a key refused: %s", loc)
+	}
+	if loc := cloud("/orgs/acme/models/m2/update", ""); strings.Contains(loc, "err=") {
+		t.Errorf("update keeping the saved Ollama Cloud key refused: %s", loc)
+	}
+	if m, _ := s.b.OrgModels(acmeID); len(m.Configs) != 2 || m.Configs[1].APIKey != "ok-cloud-key" {
+		t.Errorf("after Ollama Cloud update: %+v", m.Configs)
+	}
+	s.post("/orgs/acme/models/m2/delete", url.Values{})
 
 	// A member sees them but can't change them.
 	if err := s.st.EnsureUser(bobID, "bob"); err != nil {

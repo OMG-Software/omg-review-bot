@@ -144,7 +144,7 @@ func (b *Bot) webhookConversation(st settings.Settings, event string, ev *github
 	if b.modelsUnset(st, pr.AccountID) {
 		return "ignored: no model is set up for this organization"
 	}
-	if !b.enqueue(job{kind: jobReplies, repo: pr.Repo, number: pr.Number}) {
+	if !b.enqueue(job{kind: jobReplies, repo: pr.Repo, number: pr.Number, org: pr.AccountID}) {
 		return fmt.Sprintf("%s#%d: reply check already queued", pr.Repo, pr.Number)
 	}
 	return fmt.Sprintf("%s#%d: reply check queued (%s %s)", pr.Repo, pr.Number, event, ev.Action)

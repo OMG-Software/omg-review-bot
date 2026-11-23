@@ -521,3 +521,16 @@ func TestReleaseRequeuesHeld(t *testing.T) {
 		t.Errorf("queued again %v, held %v, busy %v", back, b.orgHeld, b.orgBusy)
 	}
 }
+
+// TestQueuedJobsCarryTheirOrg: a job is queued with its PR's account, so a
+// worker taking it needn't look it up while every take waits.
+func TestQueuedJobsCarryTheirOrg(t *testing.T) {
+	e := newReviewEnv(t, `{"summary":"Looks fine.","comments":[]}`, func(*settings.Settings) {})
+	e.b.pollOnce(e.ctx) // queues the PR's review; no worker runs it here
+	if len(e.b.jobs) == 0 {
+		t.Fatal("nothing queued")
+	}
+	if j := <-e.b.jobs; j.org != 500 {
+		t.Errorf("queued job org = %d, want 500", j.org)
+	}
+}

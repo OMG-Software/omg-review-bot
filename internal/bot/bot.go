@@ -491,8 +491,12 @@ func (b *Bot) worker(ctx context.Context, slot int) { b.work(ctx, slot, b.runJob
 func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)) {
 	ctx = context.WithValue(ctx, workerSlot{}, slot)
 	for {
+		// Read before taking the lock, which every worker's take waits on:
+		// it's a settings read, and the share changes rarely.
+		limit := b.orgSlots()
 		// A job is taken and its PR claimed in one step, so a PR's jobs are
-		// claimed in queue order and run in it.
+		// claimed in queue order and run in it. Its organization is normally
+		// stamped when it was queued, so the take is in memory only.
 		b.takeMu.Lock()
 		var j job
 		select {
@@ -501,8 +505,10 @@ func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)
 			return
 		case j = <-b.jobs:
 		}
-		j.org = b.jobOrg(j)
-		ok := b.claimPR(j, b.orgSlots())
+		if j.org == 0 { // stamped when queued; looked up only if it wasn't
+			j.org = b.jobOrg(j)
+		}
+		ok := b.claimPR(j, limit)
 		b.takeMu.Unlock()
 		for ok {
 			if ctx.Err() != nil {
@@ -785,7 +791,7 @@ func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
 	if err != nil {
 		return err
 	}
-	if !b.enqueue(job{kind: jobReview, repo: repo, number: number, force: true, account: accountID}) {
+	if !b.enqueue(job{kind: jobReview, repo: repo, number: number, force: true, account: accountID, org: accountID}) {
 		return fmt.Errorf("a review of %s#%d is already queued", repo, number)
 	}
 	b.logf("info", repo, number, "manual review requested")
@@ -801,7 +807,7 @@ func (b *Bot) CheckReplies(repo string, number int, accountID int64) error {
 	if err != nil || pr == nil || pr.AccountID != accountID {
 		return fmt.Errorf("PR %s#%d is not tracked", repo, number)
 	}
-	b.enqueue(job{kind: jobReplies, repo: repo, number: number})
+	b.enqueue(job{kind: jobReplies, repo: repo, number: number, org: pr.AccountID})
 	return nil
 }
 

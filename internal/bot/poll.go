@@ -415,7 +415,7 @@ func (b *Bot) enqueueDue(st settings.Settings) {
 			b.modelsUnset(st, p.AccountID) {
 			continue
 		}
-		b.enqueue(job{kind: jobReview, repo: p.Repo, number: p.Number})
+		b.enqueue(job{kind: jobReview, repo: p.Repo, number: p.Number, org: p.AccountID})
 	}
 }
 
@@ -444,7 +444,7 @@ func (b *Bot) maybeSweep(st settings.Settings) {
 		if t, err := time.Parse(time.RFC3339, p.GHUpdatedAt); err == nil && t.Before(cutoff) {
 			continue
 		}
-		b.enqueue(job{kind: jobReplies, repo: p.Repo, number: p.Number})
+		b.enqueue(job{kind: jobReplies, repo: p.Repo, number: p.Number, org: p.AccountID})
 	}
 }
 
