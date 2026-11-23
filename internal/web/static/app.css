@@ -176,7 +176,7 @@ svg.viz { width: 100%; height: auto; display: block; overflow: visible; }
 .viz-s4 { fill: var(--sev-4); background: var(--sev-4); }
 .viz-s5 { fill: var(--sev-5); background: var(--sev-5); }
 .viz-seg { stroke: var(--panel); stroke-width: 2px; } /* the gap between stacked segments */
-svg.viz.thin .viz-seg { stroke: none; }
+svg.viz.thin .viz-seg, .viz-seg.short { stroke: none; } /* too narrow, or too short, to keep colour inside the gap */
 .viz-col:hover .viz-seg { opacity: .82; }
 ul.viz-legend { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
 ul.viz-legend li { display: inline-flex; align-items: center; gap: 6px; }

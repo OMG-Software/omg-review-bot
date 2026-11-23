@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_model_calls_account ON model_calls(account_id, ts);
 CREATE INDEX IF NOT EXISTS idx_model_calls_set ON model_calls(model_set, ts);
+CREATE INDEX IF NOT EXISTS idx_model_calls_ts ON model_calls(ts);
 `
 
 // addedColumns were added after the first release. Opening an older database

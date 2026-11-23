@@ -337,10 +337,24 @@ func (o *openAI) Limits(ctx context.Context) (Limits, error) {
 		}
 	}
 	if o.cfg.Provider == "lmstudio" {
+		// The v1 REST API (LM Studio 0.4) lists each loaded instance's
+		// window; v0 gives the model's own entry.
+		var v1 struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := doJSON(ctx, o.hc, http.MethodGet, root+"/api/v1/models", o.cfg.APIKey, nil, &v1); err == nil {
+			for _, m := range v1.Models {
+				if key, _ := m["key"].(string); key == o.cfg.Model {
+					if l := lmStudioLimits(m); l.Context > 0 {
+						return l, nil
+					}
+				}
+			}
+		}
 		var m map[string]any
 		err := doJSON(ctx, o.hc, http.MethodGet, root+"/api/v0/models/"+strings.ReplaceAll(url.PathEscape(o.cfg.Model), "%2F", "/"), o.cfg.APIKey, nil, &m)
 		if err == nil {
-			if l := limitsFrom(m); l.Context > 0 {
+			if l := lmStudioLimits(m); l.Context > 0 {
 				return l, nil
 			}
 		}
@@ -393,6 +407,31 @@ func limitsFrom(m map[string]any) Limits {
 		l.Context = max(l.Context, num(tp, "context_length"))
 		if l.Output == 0 {
 			l.Output = num(tp, "max_completion_tokens")
+		}
+	}
+	return l
+}
+
+// lmStudioLimits reads an LM Studio model entry. A loaded model answers in
+// the window it was loaded with, which can be smaller than the model's
+// maximum, so the context is capped at the smallest loaded window (v1's
+// loaded_instances, v0's loaded_context_length).
+func lmStudioLimits(m map[string]any) Limits {
+	l := limitsFrom(m)
+	loaded := func(n float64) {
+		if n > 0 && (l.Context == 0 || int(n) < l.Context) {
+			l.Context = int(n)
+		}
+	}
+	if n, ok := m["loaded_context_length"].(float64); ok {
+		loaded(n)
+	}
+	insts, _ := m["loaded_instances"].([]any)
+	for _, in := range insts {
+		inst, _ := in.(map[string]any)
+		cfg, _ := inst["config"].(map[string]any)
+		if n, ok := cfg["context_length"].(float64); ok {
+			loaded(n)
 		}
 	}
 	return l

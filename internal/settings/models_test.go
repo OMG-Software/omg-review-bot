@@ -84,6 +84,9 @@ func TestSetMaximums(t *testing.T) {
 		{"nothing reported", 0, 0, true, true, FallbackContextTokens, FallbackOutputTokens},
 		{"only output blank", 0, 8192, false, true, 50000, 8192},
 		{"only context blank", 128000, 0, true, false, 128000, 1000},
+		// The context kept (50000 here, below; 131072 in the review) is
+		// larger than the server's window: output is half the server's.
+		{"only output blank, smaller window", 40960, 0, false, true, 50000, 20480},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l := NewLLM()

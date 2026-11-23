@@ -216,10 +216,13 @@ type ReplyStats struct {
 func (r ReplyStats) Total() int { return r.Threads + r.Mentions }
 
 // RepliesSince counts the replies the bot posted on one organization's PRs
-// (or everyone's, with AllAccounts) at or after since.
+// (or everyone's, with AllAccounts) at or after since. One reply can answer
+// several waiting messages, each marked with its ID, so replies are counted
+// by ID.
 func (s *Store) RepliesSince(accountID, since int64) (ReplyStats, error) {
 	var r ReplyStats
-	err := s.db.QueryRow(`SELECT COALESCE(SUM(h.kind='thread'),0), COALESCE(SUM(h.kind='mention'),0)
+	err := s.db.QueryRow(`SELECT COUNT(DISTINCT CASE WHEN h.kind='thread' THEN h.reply_id END),
+  COUNT(DISTINCT CASE WHEN h.kind='mention' THEN h.reply_id END)
 FROM handled_comments h WHERE h.handled_at>=? AND h.reply_id<>0 AND (?=-1
   OR EXISTS(SELECT 1 FROM pulls p WHERE p.repo=h.repo AND p.number=h.number AND p.account_id=?))`,
 		since, accountID, accountID).Scan(&r.Threads, &r.Mentions)

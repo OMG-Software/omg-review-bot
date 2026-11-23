@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/store"
@@ -54,6 +55,37 @@ func byWeek(days []store.DayStats) []store.DayStats {
 	return out
 }
 
+// repoTableRows is how many repositories the metrics table lists, the most
+// reviewed first.
+const repoTableRows = 50
+
+// hideInstanceModelNames keeps the instance's model names from an
+// organization's members: an instance model without a name of its own is
+// labelled with its model name, so it's shown as "Instance model" (numbered,
+// when there are several) instead. Named ones keep the administrators' name.
+func hideInstanceModelNames(ms []store.ModelUsage) {
+	var unnamed []int
+	for i, m := range ms {
+		if m.ModelSet == 0 && (m.Label == "" || m.Label == m.Model) {
+			unnamed = append(unnamed, i)
+		}
+	}
+	// Numbered in configuration order, not by use, so a model keeps its
+	// number as the ranking changes.
+	slices.SortFunc(unnamed, func(a, b int) int {
+		if c := strings.Compare(ms[a].ConfigID, ms[b].ConfigID); c != 0 {
+			return c
+		}
+		return strings.Compare(ms[a].Model, ms[b].Model)
+	})
+	for n, i := range unnamed {
+		ms[i].Label, ms[i].Model = "Instance model", ""
+		if len(unnamed) > 1 {
+			ms[i].Label += " " + strconv.Itoa(n+1)
+		}
+	}
+}
+
 // modelTotals sums up every model's calls.
 type modelTotals struct {
 	Calls, Failed                  int
@@ -87,10 +119,15 @@ func (s *Server) metricsData(accountID int64, days int) map[string]any {
 	if days > weeklyAfter {
 		perDay = byWeek(perDay)
 	}
-	repos, err := s.store.RepoStatsSince(accountID, since, 50)
+	// Every repository, so each chart ranks over all of them; the table
+	// shows the most reviewed.
+	repos, err := s.store.RepoStatsSince(accountID, since, -1)
 	warn("repositories", err)
 	models, err := s.store.ModelUsageSince(accountID, since)
 	warn("models", err)
+	if !all {
+		hideInstanceModelNames(models)
+	}
 	replies, err := s.store.RepliesSince(accountID, since)
 	warn("replies", err)
 	latency, err := s.store.FirstReviewLatency(accountID, since)
@@ -104,7 +141,8 @@ func (s *Server) metricsData(accountID int64, days int) map[string]any {
 	}
 	d := map[string]any{
 		"Range": days, "Ranges": metricsRanges, "All": all,
-		"Stats": stats, "Days": perDay, "Repos": repos, "Models": models, "ModelTotals": tot,
+		"Stats": stats, "Days": perDay, "Repos": repos[:min(len(repos), repoTableRows)], "RepoCount": len(repos),
+		"RepoTableRows": repoTableRows, "Models": models, "ModelTotals": tot,
 		"Replies": replies, "Latency": latency,
 		"Commented":      max(0, stats.Posted-stats.Approvals-stats.ChangesRequested),
 		"RepoReviewRows": repoReviewRows(repos, 15), "RepoSevRows": repoSevRows(repos, 15),

@@ -173,10 +173,11 @@ func TestFailover(t *testing.T) {
 	}
 }
 
-// usageByLabel is every model's use for the test's organization, by label.
+// usageByLabel is every model's use for the test's organization (account
+// 500), by label: a call not tagged with its account isn't counted.
 func usageByLabel(t *testing.T, st *store.Store) map[string]store.ModelUsage {
 	t.Helper()
-	ms, err := st.ModelUsageSince(store.AllAccounts, 0)
+	ms, err := st.ModelUsageSince(500, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

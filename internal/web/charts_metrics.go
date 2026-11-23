@@ -162,10 +162,11 @@ func sevStackChart(label string, rows []stackRow) template.HTML {
 				continue
 			}
 			w := max(2, rowChartPlotW*float64(n)/float64(peak))
+			cls := segClass(k, w)
 			if k == last {
-				fmt.Fprintf(&sb, `<path class="viz-seg viz-s%d" d="%s"/>`, k+1, hbarEnd(x, cy, w, rowChartBarH))
+				fmt.Fprintf(&sb, `<path class="%s" d="%s"/>`, cls, hbarEnd(x, cy, w, rowChartBarH))
 			} else {
-				fmt.Fprintf(&sb, `<rect class="viz-seg viz-s%d" x="%.1f" y="%.1f" width="%.1f" height="%.0f"/>`, k+1, x, cy-rowChartBarH/2, w, rowChartBarH)
+				fmt.Fprintf(&sb, `<rect class="%s" x="%.1f" y="%.1f" width="%.1f" height="%.0f"/>`, cls, x, cy-rowChartBarH/2, w, rowChartBarH)
 			}
 			x += w
 		}
@@ -173,6 +174,17 @@ func sevStackChart(label string, rows []stackRow) template.HTML {
 	}
 	sb.WriteString(`</svg>`)
 	return template.HTML(sb.String())
+}
+
+// segClass is a stacked segment's classes: its level, and "short" when its
+// length along the stack is under 4 units. The 2-unit gap stroke, centred on
+// the edge, would then cover the whole segment, so a short one goes without.
+func segClass(level int, length float64) string {
+	cls := fmt.Sprintf("viz-seg viz-s%d", level+1)
+	if length < 4 {
+		cls += " short"
+	}
+	return cls
 }
 
 // sevDayChart is a column per day of the findings posted, stacked by level
@@ -226,10 +238,11 @@ func sevDayChart(days []store.DayStats) template.HTML {
 				continue
 			}
 			h := max(1.5, plotH*float64(n)/float64(ymax))
+			cls := segClass(k, h)
 			if k == last {
-				fmt.Fprintf(&sb, `<path class="viz-seg viz-s%d" d="%s"/>`, k+1, barTop(bx, base-h, bw, h))
+				fmt.Fprintf(&sb, `<path class="%s" d="%s"/>`, cls, barTop(bx, base-h, bw, h))
 			} else {
-				fmt.Fprintf(&sb, `<rect class="viz-seg viz-s%d" x="%.1f" y="%.1f" width="%.1f" height="%.1f"/>`, k+1, bx, base-h, bw, h)
+				fmt.Fprintf(&sb, `<rect class="%s" x="%.1f" y="%.1f" width="%.1f" height="%.1f"/>`, cls, bx, base-h, bw, h)
 			}
 			base -= h
 		}
@@ -274,35 +287,60 @@ func dayLabelEvery(days int) int {
 
 // ---------- chart rows for templates ----------
 
+// repoNames names repositories in charts. Across organizations a name can
+// be on two accounts' rows (a repository that moved, or an organization
+// installed again), so a row whose organization isn't the name's owner, or
+// whose name is on another row too, says whose it is.
+func repoNames(repos []store.RepoStats) map[int]string {
+	seen := map[string]int{}
+	for _, r := range repos {
+		seen[r.Repo]++
+	}
+	names := make(map[int]string, len(repos))
+	for i, r := range repos {
+		owner, _, _ := strings.Cut(r.Repo, "/")
+		names[i] = r.Repo
+		switch {
+		case r.Org == "":
+			names[i] += " (no organization)"
+		case seen[r.Repo] > 1 || !strings.EqualFold(owner, r.Org):
+			names[i] += " (" + r.Org + ")"
+		}
+	}
+	return names
+}
+
 // repoReviewRows ranks repositories by reviews posted.
 func repoReviewRows(repos []store.RepoStats, limit int) []rankRow {
+	names := repoNames(repos)
 	out := make([]rankRow, 0, min(limit, len(repos)))
-	for _, r := range repos {
+	for i, r := range repos {
 		if len(out) == limit {
 			break
 		}
 		if r.Reviews == 0 {
 			continue
 		}
-		out = append(out, rankRow{Label: r.Repo, Value: r.Reviews,
+		out = append(out, rankRow{Label: names[i], Value: r.Reviews,
 			Tip: fmt.Sprintf("%s: %d reviews posted on %d pull requests; %d findings (%d at P1–P2), %d confirmed fixed",
-				r.Repo, r.Reviews, r.PRs, r.Findings, r.Serious, r.Fixed)})
+				names[i], r.Reviews, r.PRs, r.Findings, r.Serious, r.Fixed)})
 	}
 	return out
 }
 
 // repoSevRows are repositories' findings by level, the most found first.
 func repoSevRows(repos []store.RepoStats, limit int) []stackRow {
-	rs := make([]store.RepoStats, 0, len(repos))
-	for _, r := range repos {
+	names := repoNames(repos)
+	var idx []int
+	for i, r := range repos {
 		if r.Findings > 0 {
-			rs = append(rs, r)
+			idx = append(idx, i)
 		}
 	}
-	sort.SliceStable(rs, func(i, j int) bool { return rs[i].Findings > rs[j].Findings })
-	out := make([]stackRow, 0, min(limit, len(rs)))
-	for _, r := range rs[:min(limit, len(rs))] {
-		out = append(out, stackRow{Label: r.Repo, Sev: r.Sev})
+	sort.SliceStable(idx, func(a, b int) bool { return repos[idx[a]].Findings > repos[idx[b]].Findings })
+	out := make([]stackRow, 0, min(limit, len(idx)))
+	for _, i := range idx[:min(limit, len(idx))] {
+		out = append(out, stackRow{Label: names[i], Sev: repos[i].Sev})
 	}
 	return out
 }

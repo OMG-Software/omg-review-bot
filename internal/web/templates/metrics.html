@@ -46,22 +46,24 @@
 </div>
 
 <h2 class="section">Repositories</h2>
-{{if $d.RepoReviewRows}}
+{{if $d.Repos}}
 <div class="card"><figure class="chart"><figcaption><b>Most active repositories</b> <span class="muted">· reviews posted</span></figcaption>
-    {{rankChart "Most active repositories by reviews posted" $d.RepoReviewRows}}</figure></div>
+    {{if $d.RepoReviewRows}}{{rankChart "Most active repositories by reviews posted" $d.RepoReviewRows}}{{else}}<p class="muted">No reviews posted in this period; the table shows the failed ones.</p>{{end}}</figure></div>
 <div class="card"><figure class="chart"><figcaption><b>Findings by repository and level</b></figcaption>
     {{if $d.RepoSevRows}}{{sevStackChart "Findings by repository and level" $d.RepoSevRows}}{{else}}<p class="muted">No findings in this period.</p>{{end}}</figure></div>
 <div class="card">
+  {{if gt $d.RepoCount (len $d.Repos)}}<p class="hint">The {{len $d.Repos}} most reviewed of {{$d.RepoCount}} repositories; the charts cover them all.</p>{{end}}
   <div class="table-scroll">
   <table class="num">
-    <thead><tr><th>Repository</th><th class="n">Reviews</th><th class="n">PRs</th><th class="n">Findings</th>
+    <thead><tr><th>Repository</th>{{if $d.All}}<th>Organization</th>{{end}}<th class="n">Reviews</th><th class="n">PRs</th><th class="n">Findings</th>
       <th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th>
       <th class="n">Fixed</th><th class="n" title="Fixes confirmed in the period as a share of its findings (an estimate)">Fix rate</th>
       <th class="n">Approved</th><th class="n">Changes req.</th><th class="n">Failed</th><th>Last review</th></tr></thead>
     <tbody>
     {{range $d.Repos}}
     <tr>
-      <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}</span>{{else}}<a href="{{query (printf "%s/reviews" $d.Base) "repo" .Repo}}">{{.Repo}}</a>{{end}}</td>
+      <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}</span>{{else if and $d.All .Org}}<a href="{{query (printf "%s/reviews" (orgPath .Org)) "repo" .Repo}}">{{.Repo}}</a>{{else}}<a href="{{query (printf "%s/reviews" $d.Base) "repo" .Repo}}">{{.Repo}}</a>{{end}}</td>
+      {{if $d.All}}<td>{{if .Org}}{{.Org}}{{else}}<span class="muted">(no organization)</span>{{end}}</td>{{end}}
       <td class="n">{{.Reviews}}</td><td class="n">{{.PRs}}</td><td class="n">{{.Findings}}</td>
       {{range $i, $n := .Sev}}<td class="n">{{if $n}}{{if lt $i 2}}<b>{{$n}}</b>{{else}}{{$n}}{{end}}{{else}}<span class="muted">0</span>{{end}}</td>{{end}}
       <td class="n">{{.Fixed}}</td><td class="n">{{if .Findings}}{{.FixRate}}%{{else}}<span class="muted">—</span>{{end}}</td>
@@ -74,7 +76,7 @@
   </table>
   </div>
 </div>
-{{else}}<div class="card"><p class="muted">No reviews posted in this period.</p></div>{{end}}
+{{else}}<div class="card"><p class="muted">No reviews in this period.</p></div>{{end}}
 
 {{if $d.All}}
 <h2 class="section">Organizations</h2>

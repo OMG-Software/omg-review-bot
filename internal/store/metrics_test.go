@@ -107,7 +107,10 @@ func TestModelUsage(t *testing.T) {
 
 func TestRepoAndOrgMetrics(t *testing.T) {
 	st := openMetricsStore(t)
-	now := time.Now().Unix()
+	// Midday yesterday (UTC), so every review falls on one day, whatever
+	// the time the test runs.
+	ref := time.Now().UTC().Truncate(24 * time.Hour).Add(-12 * time.Hour)
+	now := ref.Unix()
 	addReview(t, st, Review{Repo: "acme/web", Number: 1, AccountID: 1, Status: "posted", Event: "APPROVE", StartedAt: now - 100, FinishedAt: now - 50,
 		Comments: 2, Notes: 1, Sev: [5]int{1, 0, 2, 0, 0}, Fixed: 1, PromptTokens: 10, CompletionTokens: 1})
 	addReview(t, st, Review{Repo: "acme/web", Number: 2, AccountID: 1, Status: "posted", Event: "REQUEST_CHANGES", StartedAt: now - 90, FinishedAt: now - 40,
@@ -154,9 +157,9 @@ func TestRepoAndOrgMetrics(t *testing.T) {
 	if stats.Approvals != 1 || stats.ChangesRequested != 1 || stats.Posted != 3 {
 		t.Errorf("acme's stats = %+v", stats)
 	}
-	days, err := st.ReviewsPerDay(1, 1, time.Now())
+	days, err := st.ReviewsPerDay(1, 1, ref)
 	if err != nil || len(days) != 1 || days[0].Sev != [5]int{1, 1, 2, 1, 3} || days[0].Fixed != 1 {
-		t.Errorf("today = %+v (%v)", days, err)
+		t.Errorf("the reviews' day = %+v (%v)", days, err)
 	}
 }
 
@@ -202,6 +205,7 @@ func TestRepliesAndFirstReviewLatency(t *testing.T) {
 	}{
 		{1, "thread", "acme/web", 1, 11},
 		{2, "thread", "acme/web", 2, 12},
+		{6, "thread", "acme/web", 2, 12}, // two messages, one reply: counted once
 		{3, "mention", "acme/web", 1, 13},
 		{4, "thread-skipped", "acme/web", 1, 0},
 		{5, "mention", "globex/app", 1, 15},

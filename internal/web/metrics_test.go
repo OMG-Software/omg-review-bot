@@ -17,10 +17,21 @@ func TestMetricsPages(t *testing.T) {
 	for _, c := range []store.ModelCall{
 		{AccountID: acmeID, ReviewID: 1, Kind: store.CallReview, ConfigID: "m1", Label: "Shared model", Model: "shared-7b", OK: true, PromptTokens: 900},
 		{AccountID: otherID, ReviewID: 2, Kind: store.CallReview, ModelSet: otherID, ConfigID: "m1", Label: "Secret own model", Model: "secret-70b", OK: true},
+		// An instance model with no name of its own is labelled with its
+		// model name: members see neither.
+		{AccountID: acmeID, ReviewID: 1, Kind: store.CallReview, ConfigID: "m2", Label: "plain-13b", Model: "plain-13b", OK: true},
 	} {
 		if err := s.st.RecordModelCall(c); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A repository whose only review failed still shows, with its failure.
+	id, err := s.st.CreateReview(&store.Review{Repo: "acme/broken", Number: 1, AccountID: acmeID, Status: "running", StartedAt: time.Now().Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.UpdateReview(&store.Review{ID: id, Repo: "acme/broken", Number: 1, Status: "error", FinishedAt: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
 	}
 	s.signIn() // alice: an owner of acme only
 
@@ -29,14 +40,14 @@ func TestMetricsPages(t *testing.T) {
 		t.Fatalf("acme's metrics = %d", code)
 	}
 	for _, want := range []string{"Most active repositories", "acme/web", "Findings by repository and level", "Shared model",
-		"Reviews sent to each model", "Time to first review", `class="active">90 days`} {
+		"Reviews sent to each model", "Time to first review", `class="active">90 days`, "Instance model", "acme/broken"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("acme's metrics lack %q", want)
 		}
 	}
 	// Another organization's repositories and models stay out of it, and an
 	// instance model's server isn't named to members.
-	for _, leak := range []string{"other/secret", "Secret own model", "secret-70b", "shared-7b"} {
+	for _, leak := range []string{"other/secret", "Secret own model", "secret-70b", "shared-7b", "plain-13b"} {
 		if strings.Contains(body, leak) {
 			t.Errorf("acme's metrics show %q", leak)
 		}
@@ -59,13 +70,34 @@ func TestMetricsPages(t *testing.T) {
 		t.Fatalf("every organization's metrics for an administrator = %d", code)
 	}
 	for _, want := range []string{"acme/web", "other/secret", "Findings by organization and level", "Secret own model",
-		"secret-70b", "other's own"} {
+		"secret-70b", "other's own", "plain-13b", "/orgs/acme/reviews?repo="} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the administrators' metrics lack %q", want)
 		}
 	}
 	if _, body, _ := s.get("/"); !strings.Contains(body, "Most active repositories") || !strings.Contains(body, `href="/metrics"`) {
 		t.Error("the dashboard has no chart of the most active repositories, or no link to the metrics")
+	}
+}
+
+// TestRepoNames: across organizations, a repository on two accounts' rows,
+// or not under its organization's name, says whose row it is.
+func TestRepoNames(t *testing.T) {
+	names := repoNames([]store.RepoStats{
+		{Org: "acme", Repo: "acme/web"},
+		{Org: "acme", Repo: "acme/api"},
+		{Org: "Acme", Repo: "acme/api"}, // installed again: a new account
+		{Org: "globex", Repo: "acme/moved"},
+		{Org: "", Repo: "x/y"},
+	})
+	want := []string{"acme/web", "acme/api (acme)", "acme/api (Acme)", "acme/moved (globex)", "x/y (no organization)"}
+	for i, w := range want {
+		if names[i] != w {
+			t.Errorf("name %d = %q, want %q", i, names[i], w)
+		}
+	}
+	if segClass(0, 3.9) != "viz-seg viz-s1 short" || segClass(4, 4) != "viz-seg viz-s5" {
+		t.Errorf("segment classes: %q %q", segClass(0, 3.9), segClass(4, 4))
 	}
 }
 

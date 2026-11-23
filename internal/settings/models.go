@@ -218,7 +218,9 @@ func (l *LLM) SetMaximums(ctxMax, outMax int, setCtx, setOut bool) {
 		case outMax > 0:
 			l.MaxOutputTokens = outMax
 		case ctxMax > 0:
-			l.MaxOutputTokens = l.ContextTokens / 2
+			// Half the smaller window: a context kept as it was can be
+			// larger than the server's.
+			l.MaxOutputTokens = min(l.ContextTokens, ctxMax) / 2
 		default:
 			l.MaxOutputTokens = FallbackOutputTokens
 		}

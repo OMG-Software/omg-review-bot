@@ -210,12 +210,14 @@ func TestModelMaximums(t *testing.T) {
 	if err := s.st.SetUserAdmin(aliceID, true); err != nil {
 		t.Fatal(err)
 	}
-	add := func(provider, base string) string {
+	addWith := func(provider, base, context, output string) string {
 		t.Helper()
 		_, hdr := s.post("/settings/models/add", url.Values{"provider": {provider}, "base_url": {base}, "model": {"qwen3"},
-			"context": {""}, "max_output": {""}})
-		return hdr.Get("Location")
+			"context": {context}, "max_output": {output}})
+		msg, _ := url.QueryUnescape(hdr.Get("Location"))
+		return msg
 	}
+	add := func(provider, base string) string { return addWith(provider, base, "", "") }
 	last := func() settings.LLM {
 		t.Helper()
 		st, err := settings.Load(s.st)
@@ -226,13 +228,19 @@ func TestModelMaximums(t *testing.T) {
 	}
 
 	loc := add("ollama", ollamaSrv.URL)
-	if c := last(); c.ContextTokens != 40960 || c.MaxOutputTokens != 20480 || !strings.Contains(loc, "maximums") {
+	if c := last(); c.ContextTokens != 40960 || c.MaxOutputTokens != 20480 || !strings.Contains(loc, "40960 context tokens, the model's maximum") ||
+		!strings.Contains(loc, "20480 output tokens, half the context window") {
 		t.Errorf("Ollama model: limits %d/%d, redirect %s; want 40960/20480 with a note", c.ContextTokens, c.MaxOutputTokens, loc)
 	}
 	loc = add("openai", ollamaSrv.URL+"/v1") // reports nothing on the OpenAI API
 	if c := last(); c.ContextTokens != settings.FallbackContextTokens || c.MaxOutputTokens != settings.FallbackOutputTokens ||
-		!strings.Contains(loc, "couldn") {
-		t.Errorf("unknown limits: %d/%d, redirect %s; want the fallbacks with a warning", c.ContextTokens, c.MaxOutputTokens, loc)
+		!strings.Contains(loc, "couldn") || !strings.Contains(loc, "the default") || strings.Contains(loc, "maximum") {
+		t.Errorf("unknown limits: %d/%d, redirect %s; want the fallbacks, called defaults, with a warning", c.ContextTokens, c.MaxOutputTokens, loc)
+	}
+	// Only the context left blank: the output typed in isn't described.
+	loc = addWith("ollama", ollamaSrv.URL, "", "4096")
+	if c := last(); c.ContextTokens != 40960 || c.MaxOutputTokens != 4096 || !strings.Contains(loc, "40960 context tokens") || strings.Contains(loc, "output tokens") {
+		t.Errorf("context only: limits %d/%d, redirect %s; want 40960/4096, the output not mentioned", c.ContextTokens, c.MaxOutputTokens, loc)
 	}
 
 	form := url.Values{"provider": {"ollama"}, "base_url": {ollamaSrv.URL}, "model": {"qwen3"}}

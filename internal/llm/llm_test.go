@@ -84,6 +84,17 @@ func TestLimits(t *testing.T) {
 		{"LM Studio", "lmstudio", "/v1", map[string]string{
 			"GET /api/v0/models/qwen/coder": `{"id":"qwen/coder","max_context_length":131072}`,
 		}, Limits{Context: 131072}, false},
+		// Loaded in a smaller window than the model's maximum: reviews must
+		// fit the loaded one.
+		{"LM Studio v0, loaded", "lmstudio", "/v1", map[string]string{
+			"GET /api/v0/models/qwen/coder": `{"id":"qwen/coder","state":"loaded","max_context_length":131072,"loaded_context_length":32768}`,
+		}, Limits{Context: 32768}, false},
+		{"LM Studio v1, loaded", "lmstudio", "/v1", map[string]string{
+			"GET /api/v1/models": `{"models":[{"key":"other","max_context_length":8},{"key":"qwen/coder","max_context_length":131072,"loaded_instances":[{"id":"qwen/coder","config":{"context_length":65536}},{"id":"qwen/coder:2","config":{"context_length":16384}}]}]}`,
+		}, Limits{Context: 16384}, false},
+		{"LM Studio v1, not loaded", "lmstudio", "/v1", map[string]string{
+			"GET /api/v1/models": `{"models":[{"key":"qwen/coder","max_context_length":131072,"loaded_instances":[]}]}`,
+		}, Limits{Context: 131072}, false},
 		{"OpenRouter", "openai", "/api/v1", map[string]string{
 			"GET /api/v1/models": `{"data":[{"id":"other","context_length":1},{"id":"qwen/coder","context_length":262144,"top_provider":{"context_length":262144,"max_completion_tokens":65536}}]}`,
 		}, Limits{Context: 262144, Output: 65536}, false},

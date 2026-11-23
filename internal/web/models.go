@@ -354,7 +354,7 @@ func (s *Server) modelsProbe(w http.ResponseWriter, r *http.Request, sc modelSco
 			return
 		}
 		c.SetMaximums(lim.Context, lim.Output, true, true)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": limitsNote(lim, c) + " Save to keep them.",
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": limitsNote(lim, c, true, true) + " Save to keep them.",
 			"limits": map[string]int{"context": c.ContextTokens, "max_output": c.MaxOutputTokens}})
 		return
 	}
@@ -401,20 +401,42 @@ func (mx maximums) apply(c *settings.LLM) string {
 		return ""
 	}
 	c.SetMaximums(mx.lim.Context, mx.lim.Output, mx.ctx, mx.out)
+	msg := ". " + strings.TrimSuffix(limitsNote(mx.lim, *c, mx.ctx, mx.out), ".")
 	if mx.err != nil {
-		return fmt.Sprintf(". Its token limits couldn't be read from its server (%v), so it has %d context and %d output tokens: set them by hand if they're wrong",
-			mx.err, c.ContextTokens, c.MaxOutputTokens)
+		msg += fmt.Sprintf(" (its server couldn't be asked: %v); set them by hand if they're wrong", mx.err)
 	}
-	return ". " + strings.TrimSuffix(limitsNote(mx.lim, *c), ".")
+	return msg
 }
 
-// limitsNote says which of c's limits are the model's maximums.
-func limitsNote(lim llm.Limits, c settings.LLM) string {
-	msg := fmt.Sprintf("Using the model's maximums: %d context tokens", c.ContextTokens)
-	if lim.Output > 0 {
-		return msg + fmt.Sprintf(" and %d output tokens.", c.MaxOutputTokens)
+// limitsNote says where the limits that were set (ctx, out) came from: the
+// model's maximums as its server reported them, half its window for the
+// output when it sets no separate cap, or the defaults when it didn't say.
+// A limit that wasn't set isn't mentioned.
+func limitsNote(lim llm.Limits, c settings.LLM, ctx, out bool) string {
+	var parts []string
+	if ctx {
+		if lim.Context > 0 {
+			parts = append(parts, fmt.Sprintf("%d context tokens, the model's maximum", c.ContextTokens))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d context tokens, the default (the server didn't report the model's window)", c.ContextTokens))
+		}
 	}
-	return msg + fmt.Sprintf(", and %d output tokens (the server sets no separate output cap, so half the window, leaving the other half for the prompt).", c.MaxOutputTokens)
+	if out {
+		switch {
+		case lim.Output > 0 && c.MaxOutputTokens >= lim.Output:
+			parts = append(parts, fmt.Sprintf("%d output tokens, the model's maximum", c.MaxOutputTokens))
+		case lim.Output > 0:
+			parts = append(parts, fmt.Sprintf("%d output tokens, half the context window (the model allows %d, but the other half is kept for the prompt)", c.MaxOutputTokens, lim.Output))
+		case lim.Context > 0:
+			parts = append(parts, fmt.Sprintf("%d output tokens, half the context window (the server sets no separate output cap, so the other half is kept for the prompt)", c.MaxOutputTokens))
+		default:
+			parts = append(parts, fmt.Sprintf("%d output tokens, the default (the server didn't report a cap)", c.MaxOutputTokens))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Token limits set: " + strings.Join(parts, "; ") + "."
 }
 
 func (s *Server) instanceModelsAction(w http.ResponseWriter, r *http.Request) {
