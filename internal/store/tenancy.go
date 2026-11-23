@@ -616,6 +616,7 @@ type ReviewStats struct {
 	Posted           int    // posted to GitHub
 	Errors           int    // failed
 	Approvals        int    // posted as an approval
+	ChangesRequested int    // posted as a change request
 	PRs              int    // distinct pull requests reviewed
 	Repos            int    // distinct repositories reviewed
 	Comments         int    // inline comments posted
@@ -637,6 +638,7 @@ func (s *Store) ReviewStatsSince(accountID, since int64) (ReviewStats, error) {
 	var avg sql.NullFloat64
 	err := s.db.QueryRow(`SELECT COUNT(*),
   COALESCE(SUM(status='posted'),0), COALESCE(SUM(status='error'),0), COALESCE(SUM(event='APPROVE'),0),
+  COALESCE(SUM(event='REQUEST_CHANGES'),0),
   COUNT(DISTINCT CASE WHEN status='posted' THEN repo||'#'||number END),
   COUNT(DISTINCT CASE WHEN status='posted' THEN repo END),
   COALESCE(SUM(comments),0), COALESCE(SUM(notes),0), COALESCE(SUM(fixed),0),
@@ -645,19 +647,22 @@ func (s *Store) ReviewStatsSince(accountID, since int64) (ReviewStats, error) {
   COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
   AVG(CASE WHEN status='posted' AND finished_at>=started_at THEN finished_at-started_at END)
 FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?)`, since, accountID, accountID).Scan(
-		&r.Reviews, &r.Posted, &r.Errors, &r.Approvals, &r.PRs, &r.Repos, &r.Comments, &r.Notes, &r.Fixed,
+		&r.Reviews, &r.Posted, &r.Errors, &r.Approvals, &r.ChangesRequested, &r.PRs, &r.Repos, &r.Comments, &r.Notes, &r.Fixed,
 		&r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.Undetailed, &r.PromptTokens, &r.CompletionTokens, &avg)
 	r.AvgSeconds = int(avg.Float64)
 	return r, err
 }
 
-// DayStats is one day's reviews (UTC).
+// DayStats is one day's reviews (UTC), or several days' (Span).
 type DayStats struct {
-	Day      time.Time
+	Day      time.Time // the (first) day
+	Span     int       // days covered: 0 or 1 for a day; charts of long periods sum up weeks
 	Posted   int
 	Errors   int
 	Findings int
-	Serious  int // P1 and P2 findings
+	Serious  int    // P1 and P2 findings
+	Sev      [5]int // findings by level P1..P5
+	Fixed    int    // earlier findings confirmed fixed
 }
 
 // ReviewsPerDay returns one entry per day for the last `days` days (UTC), oldest first.
@@ -665,7 +670,9 @@ func (s *Store) ReviewsPerDay(accountID int64, days int, now time.Time) ([]DaySt
 	today := now.UTC().Truncate(24 * time.Hour)
 	start := time.Unix(DayWindowStart(days, now), 0).UTC()
 	rows, err := s.db.Query(`SELECT date(started_at,'unixepoch'), COALESCE(SUM(status='posted'),0), COALESCE(SUM(status='error'),0),
-  COALESCE(SUM(comments+notes),0), COALESCE(SUM(sev_p1+sev_p2),0)
+  COALESCE(SUM(comments+notes),0), COALESCE(SUM(sev_p1+sev_p2),0),
+  COALESCE(SUM(sev_p1),0), COALESCE(SUM(sev_p2),0), COALESCE(SUM(sev_p3),0), COALESCE(SUM(sev_p4),0), COALESCE(SUM(sev_p5),0),
+  COALESCE(SUM(fixed),0)
 FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY 1`, start.Unix(), accountID, accountID)
 	if err != nil {
 		return nil, err
@@ -675,7 +682,8 @@ FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY 1`, start.U
 	for rows.Next() {
 		var day string
 		var d DayStats
-		if err := rows.Scan(&day, &d.Posted, &d.Errors, &d.Findings, &d.Serious); err != nil {
+		if err := rows.Scan(&day, &d.Posted, &d.Errors, &d.Findings, &d.Serious,
+			&d.Sev[0], &d.Sev[1], &d.Sev[2], &d.Sev[3], &d.Sev[4], &d.Fixed); err != nil {
 			return nil, err
 		}
 		byDay[day] = d
@@ -694,20 +702,49 @@ FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY 1`, start.U
 
 // RepoStats summarizes one repository's reviews.
 type RepoStats struct {
-	Repo     string
-	Reviews  int
-	PRs      int
-	Findings int
-	Serious  int // P1 and P2
-	Errors   int
-	Last     int64
+	AccountID        int64
+	Org              string // the owning organization's login ("" if it isn't stored)
+	Repo             string
+	Reviews          int // posted
+	PRs              int
+	Findings         int
+	Serious          int    // P1 and P2
+	Sev              [5]int // findings by level P1..P5
+	Fixed            int    // earlier findings confirmed fixed
+	Approvals        int
+	ChangesRequested int
+	Errors           int
+	Last             int64
 }
 
-// RepoStatsSince ranks repositories by reviews since a time.
+// FixRate is the share of the period's findings confirmed fixed in it, in
+// percent (see fixRate).
+func (r RepoStats) FixRate() int { return fixRate(r.Fixed, r.Findings) }
+
+// FixRate is the share of the period's findings confirmed fixed in it, in percent.
+func (r ReviewStats) FixRate() int { return fixRate(r.Fixed, r.Findings()) }
+
+// fixRate is fixed as a percentage of found, capped at 100: a fix confirmed
+// in the period may be of a finding from before it, so it's an estimate.
+func fixRate(fixed, found int) int {
+	if found <= 0 {
+		return 0
+	}
+	return min(100, fixed*100/found)
+}
+
+// RepoStatsSince ranks repositories by reviews posted since a time. With
+// AllAccounts it ranks every organization's together: a name another account
+// had before is a row of its own.
 func (s *Store) RepoStatsSince(accountID, since int64, limit int) ([]RepoStats, error) {
-	rows, err := s.db.Query(`SELECT repo, COALESCE(SUM(status='posted'),0), COUNT(DISTINCT CASE WHEN status='posted' THEN number END),
-  COALESCE(SUM(comments+notes),0), COALESCE(SUM(sev_p1+sev_p2),0), COALESCE(SUM(status='error'),0), MAX(started_at)
-FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY repo ORDER BY 2 DESC, 7 DESC LIMIT ?`,
+	rows, err := s.db.Query(`SELECT r.account_id, COALESCE(o.login,''), r.repo, COALESCE(SUM(r.status='posted'),0),
+  COUNT(DISTINCT CASE WHEN r.status='posted' THEN r.number END),
+  COALESCE(SUM(r.comments+r.notes),0), COALESCE(SUM(r.sev_p1+r.sev_p2),0),
+  COALESCE(SUM(r.sev_p1),0), COALESCE(SUM(r.sev_p2),0), COALESCE(SUM(r.sev_p3),0), COALESCE(SUM(r.sev_p4),0), COALESCE(SUM(r.sev_p5),0),
+  COALESCE(SUM(r.fixed),0), COALESCE(SUM(r.event='APPROVE'),0), COALESCE(SUM(r.event='REQUEST_CHANGES'),0),
+  COALESCE(SUM(r.status='error'),0), MAX(r.started_at)
+FROM reviews r LEFT JOIN orgs o ON o.id=r.account_id
+WHERE r.started_at>=? AND (?=-1 OR r.account_id=?) GROUP BY r.account_id, r.repo ORDER BY 4 DESC, 6 DESC, 17 DESC LIMIT ?`,
 		since, accountID, accountID, limit)
 	if err != nil {
 		return nil, err
@@ -716,7 +753,9 @@ FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY repo ORDER 
 	var out []RepoStats
 	for rows.Next() {
 		var r RepoStats
-		if err := rows.Scan(&r.Repo, &r.Reviews, &r.PRs, &r.Findings, &r.Serious, &r.Errors, &r.Last); err != nil {
+		if err := rows.Scan(&r.AccountID, &r.Org, &r.Repo, &r.Reviews, &r.PRs, &r.Findings, &r.Serious,
+			&r.Sev[0], &r.Sev[1], &r.Sev[2], &r.Sev[3], &r.Sev[4], &r.Fixed, &r.Approvals, &r.ChangesRequested,
+			&r.Errors, &r.Last); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

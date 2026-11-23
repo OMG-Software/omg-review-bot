@@ -304,6 +304,121 @@ func (o *ollama) Models(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// ---------- model limits ----------
+
+// Limits are a model's token limits as its server reports them; 0 means
+// the server didn't say.
+type Limits struct {
+	Context int // the context window: prompt and output together
+	Output  int // the most output tokens one answer can have
+}
+
+// LimitReader is a Client that can ask its server for the model's limits.
+type LimitReader interface {
+	Limits(ctx context.Context) (Limits, error)
+}
+
+// errNoLimits: the server answered but didn't report the model's limits.
+var errNoLimits = errors.New("the server doesn't report the model's token limits")
+
+// Limits asks the server for the model's limits. LM Studio reports them on
+// its own REST API; other OpenAI-compatible servers on their model list, by
+// whichever name they use (OpenRouter, vLLM, LiteLLM, ...), and llama.cpp's
+// server on /props.
+func (o *openAI) Limits(ctx context.Context) (Limits, error) {
+	if o.cfg.Model == "" {
+		return Limits{}, errors.New("no model selected")
+	}
+	root := strings.TrimSuffix(o.base, "/v1")
+	var firstErr error
+	note := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if o.cfg.Provider == "lmstudio" {
+		var m map[string]any
+		err := doJSON(ctx, o.hc, http.MethodGet, root+"/api/v0/models/"+strings.ReplaceAll(url.PathEscape(o.cfg.Model), "%2F", "/"), o.cfg.APIKey, nil, &m)
+		if err == nil {
+			if l := limitsFrom(m); l.Context > 0 {
+				return l, nil
+			}
+		}
+		note(err)
+	}
+	var list struct {
+		Data []map[string]any `json:"data"`
+	}
+	err := doJSON(ctx, o.hc, http.MethodGet, o.base+"/models", o.cfg.APIKey, nil, &list)
+	if err == nil {
+		for _, m := range list.Data {
+			if id, _ := m["id"].(string); id == o.cfg.Model {
+				if l := limitsFrom(m); l.Context > 0 || l.Output > 0 {
+					return l, nil
+				}
+			}
+		}
+	}
+	note(err)
+	var props struct {
+		Settings struct {
+			NCtx int `json:"n_ctx"`
+		} `json:"default_generation_settings"`
+	}
+	if err := doJSON(ctx, o.hc, http.MethodGet, root+"/props", o.cfg.APIKey, nil, &props); err == nil && props.Settings.NCtx > 0 {
+		return Limits{Context: props.Settings.NCtx}, nil
+	}
+	if firstErr != nil {
+		return Limits{}, firstErr
+	}
+	return Limits{}, errNoLimits
+}
+
+// limitsFrom reads the limits from one model's entry in a server's model
+// list, under the names servers use for them.
+func limitsFrom(m map[string]any) Limits {
+	num := func(m map[string]any, keys ...string) int {
+		for _, k := range keys {
+			if f, ok := m[k].(float64); ok && f > 0 {
+				return int(f)
+			}
+		}
+		return 0
+	}
+	l := Limits{
+		Context: num(m, "max_context_length", "context_length", "max_model_len", "context_window"),
+		Output:  num(m, "max_completion_tokens", "max_output_tokens"),
+	}
+	if tp, ok := m["top_provider"].(map[string]any); ok { // OpenRouter
+		l.Context = max(l.Context, num(tp, "context_length"))
+		if l.Output == 0 {
+			l.Output = num(tp, "max_completion_tokens")
+		}
+	}
+	return l
+}
+
+// Limits asks Ollama for the model's context window, which /api/show gives
+// in its model_info as "<architecture>.context_length". Ollama has no
+// separate output cap: an answer can use what the prompt leaves.
+func (o *ollama) Limits(ctx context.Context) (Limits, error) {
+	if o.cfg.Model == "" {
+		return Limits{}, errors.New("no model selected")
+	}
+	var out struct {
+		ModelInfo map[string]any `json:"model_info"`
+	}
+	if err := doJSON(ctx, o.hc, http.MethodPost, o.base+"/api/show", o.cfg.APIKey, map[string]any{"model": o.cfg.Model}, &out); err != nil {
+		return Limits{}, err
+	}
+	for k, v := range out.ModelInfo {
+		if f, ok := v.(float64); ok && f > 0 && strings.HasSuffix(k, ".context_length") {
+			return Limits{Context: int(f)}, nil
+		}
+	}
+	return Limits{}, errNoLimits
+}
+
 // ---------- output helpers ----------
 
 // ErrReasoningExhausted means a reasoning model spent its whole output budget

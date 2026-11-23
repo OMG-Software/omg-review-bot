@@ -9,6 +9,7 @@
   <span class="pill">{{if eq .Role "admin"}}administrator{{else}}{{.Role}}{{end}}</span>
   <nav class="tabs">
     <a href="{{$b}}" class="{{if eq .Tab "overview"}}active{{end}}">Overview</a>
+    <a href="{{$b}}/metrics" class="{{if eq .Tab "metrics"}}active{{end}}">Metrics</a>
     <a href="{{$b}}/prs" class="{{if eq .Tab "prs"}}active{{end}}">Pull requests</a>
     <a href="{{$b}}/reviews" class="{{if eq .Tab "reviews"}}active{{end}}">Reviews</a>
     <a href="{{$b}}/repos" class="{{if eq .Tab "repos"}}active{{end}}">Repositories</a>
@@ -73,10 +74,10 @@
 
 {{define "day-chart"}}
 <figure class="chart">
-  <figcaption><b>Reviews posted per day</b> <span class="muted">(UTC; hover a day for its findings)</span></figcaption>
+  {{$u := periodUnit .}}<figcaption><b>Reviews posted per {{$u}}</b> <span class="muted">(UTC; hover a {{$u}} for its findings)</span></figcaption>
   {{dayChart .}}
   <details class="table-view"><summary>Show as a table</summary>
-    <table><thead><tr><th>Day</th><th>Reviews posted</th><th>Findings</th><th>P1–P2</th><th>Failed</th></tr></thead><tbody>
+    <table><thead><tr><th>{{if eq $u "week"}}Week of{{else}}Day{{end}}</th><th>Reviews posted</th><th>Findings</th><th>P1–P2</th><th>Failed</th></tr></thead><tbody>
     {{range .}}<tr><td>{{.Day.Format "Mon 2 Jan"}}</td><td>{{.Posted}}</td><td>{{.Findings}}</td><td>{{.Serious}}</td><td>{{.Errors}}</td></tr>{{end}}
     </tbody></table>
   </details>

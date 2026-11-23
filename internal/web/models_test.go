@@ -1,8 +1,10 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -13,6 +15,10 @@ import (
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
+// Model forms in these tests give their token limits: left empty, saving
+// asks the model's server for them (see TestModelMaximums), and these
+// servers are made up or real ones the tests mustn't reach.
+//
 // TestOrgOwnModels: an organization's owners bring their own model. Only a
 // public https server is accepted; the key is stored sealed and never shown;
 // while the organization has one, the daily limit doesn't apply; members
@@ -26,7 +32,7 @@ func TestOrgOwnModels(t *testing.T) {
 		t.Fatalf("GET /orgs/acme/models = %d", code)
 	}
 	add := func(base string) string {
-		_, hdr := s.post("/orgs/acme/models/add", url.Values{"provider": {"openai"}, "base_url": {base}, "model": {"gpt-x"},
+		_, hdr := s.post("/orgs/acme/models/add", url.Values{"context": {"32768"}, "max_output": {"4096"}, "provider": {"openai"}, "base_url": {base}, "model": {"gpt-x"},
 			"api_key": {"sk-very-secret-123"}})
 		return hdr.Get("Location")
 	}
@@ -66,14 +72,14 @@ func TestOrgOwnModels(t *testing.T) {
 	}
 
 	// Changing it without a key keeps the saved key.
-	s.post("/orgs/acme/models/m1/update", url.Values{"provider": {"openai"}, "base_url": {"https://api.example.com/v1"}, "model": {"gpt-y"}})
+	s.post("/orgs/acme/models/m1/update", url.Values{"context": {"32768"}, "max_output": {"4096"}, "provider": {"openai"}, "base_url": {"https://api.example.com/v1"}, "model": {"gpt-y"}})
 	if m, _ := s.b.OrgModels(acmeID); m.Configs[0].Model != "gpt-y" || m.Configs[0].APIKey != "sk-very-secret-123" {
 		t.Errorf("after update: %+v", m.Configs)
 	}
 	// Ollama Cloud needs a key: refused without one, and once saved, an
 	// update that leaves the key field empty keeps it and passes.
 	cloud := func(path, key string) string {
-		_, hdr := s.post(path, url.Values{"provider": {"ollama-cloud"}, "base_url": {"https://ollama.com"}, "model": {"big"}, "api_key": {key}})
+		_, hdr := s.post(path, url.Values{"context": {"32768"}, "max_output": {"4096"}, "provider": {"ollama-cloud"}, "base_url": {"https://ollama.com"}, "model": {"big"}, "api_key": {key}})
 		return hdr.Get("Location")
 	}
 	if loc := cloud("/orgs/acme/models/add", ""); !strings.Contains(loc, "err=") {
@@ -90,7 +96,7 @@ func TestOrgOwnModels(t *testing.T) {
 	}
 	// Pointed at another server without the key entered again, the saved key
 	// isn't carried along: it would go to a server it wasn't entered for.
-	s.post("/orgs/acme/models/m2/update", url.Values{"provider": {"openai"}, "base_url": {"https://other.example.com/v1"}, "model": {"big"}})
+	s.post("/orgs/acme/models/m2/update", url.Values{"context": {"32768"}, "max_output": {"4096"}, "provider": {"openai"}, "base_url": {"https://other.example.com/v1"}, "model": {"big"}})
 	if m, _ := s.b.OrgModels(acmeID); len(m.Configs) != 2 || m.Configs[1].APIKey != "" || m.Configs[1].BaseURL != "https://other.example.com/v1" {
 		t.Errorf("saved key kept for another server: %+v", m.Configs)
 	}
@@ -138,7 +144,7 @@ func TestModelEditsDontUndoEachOther(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			form := url.Values{"provider": {"openai"}, "base_url": {"https://api.example.com/v1"}, "model": {fmt.Sprintf("m%d", i)}}
+			form := url.Values{"context": {"32768"}, "max_output": {"4096"}, "provider": {"openai"}, "base_url": {"https://api.example.com/v1"}, "model": {fmt.Sprintf("m%d", i)}}
 			req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/orgs/acme/models/add", strings.NewReader(form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			req.Header.Set("Origin", s.ts.URL)
@@ -183,5 +189,66 @@ func TestOrgModelsPageUnreadable(t *testing.T) {
 	if !strings.Contains(body, "can't be read, so its pull requests aren't being reviewed") ||
 		strings.Contains(body, "uses the instance's models") || !strings.Contains(body, "Remove all of its own models") {
 		t.Errorf("org models page with unreadable models:\n%s", body)
+	}
+}
+
+// TestModelMaximums: a model added with its token limits left empty gets
+// the model's maximums from its server, or the fallbacks (and says so) when
+// the server can't tell. "Use model maximums" answers with them for the form.
+func TestModelMaximums(t *testing.T) {
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/show" {
+			_, _ = w.Write([]byte(`{"model_info":{"qwen3.context_length":40960}}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(ollamaSrv.Close)
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	if err := s.st.SetUserAdmin(aliceID, true); err != nil {
+		t.Fatal(err)
+	}
+	add := func(provider, base string) string {
+		t.Helper()
+		_, hdr := s.post("/settings/models/add", url.Values{"provider": {provider}, "base_url": {base}, "model": {"qwen3"},
+			"context": {""}, "max_output": {""}})
+		return hdr.Get("Location")
+	}
+	last := func() settings.LLM {
+		t.Helper()
+		st, err := settings.Load(s.st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Models.Configs[len(st.Models.Configs)-1]
+	}
+
+	loc := add("ollama", ollamaSrv.URL)
+	if c := last(); c.ContextTokens != 40960 || c.MaxOutputTokens != 20480 || !strings.Contains(loc, "maximums") {
+		t.Errorf("Ollama model: limits %d/%d, redirect %s; want 40960/20480 with a note", c.ContextTokens, c.MaxOutputTokens, loc)
+	}
+	loc = add("openai", ollamaSrv.URL+"/v1") // reports nothing on the OpenAI API
+	if c := last(); c.ContextTokens != settings.FallbackContextTokens || c.MaxOutputTokens != settings.FallbackOutputTokens ||
+		!strings.Contains(loc, "couldn") {
+		t.Errorf("unknown limits: %d/%d, redirect %s; want the fallbacks with a warning", c.ContextTokens, c.MaxOutputTokens, loc)
+	}
+
+	form := url.Values{"provider": {"ollama"}, "base_url": {ollamaSrv.URL}, "model": {"qwen3"}}
+	req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/settings/models/limits", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", s.ts.URL)
+	resp, err := s.cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		OK     bool           `json:"ok"`
+		Limits map[string]int `json:"limits"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || !out.OK || out.Limits["context"] != 40960 || out.Limits["max_output"] != 20480 {
+		t.Errorf("limits probe = %+v (%v)", out, err)
 	}
 }

@@ -138,6 +138,26 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
   received_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_time ON webhook_deliveries(received_at);
+-- One row per model call a job made (see RecordModelCall), for the metrics
+-- pages: which configured model each review and reply went to.
+CREATE TABLE IF NOT EXISTS model_calls (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                INTEGER NOT NULL,
+  account_id        INTEGER NOT NULL DEFAULT 0, -- the organization the job was for
+  review_id         INTEGER NOT NULL DEFAULT 0, -- the review it was part of (0 for replies)
+  kind              TEXT NOT NULL DEFAULT '',   -- review | reply | other
+  model_set         INTEGER NOT NULL DEFAULT 0, -- whose model: 0 = the instance's, else the organization's own
+  config_id         TEXT NOT NULL DEFAULT '',
+  label             TEXT NOT NULL DEFAULT '',
+  provider          TEXT NOT NULL DEFAULT '',
+  model             TEXT NOT NULL DEFAULT '',
+  ok                INTEGER NOT NULL DEFAULT 1,
+  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  duration_ms       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_model_calls_account ON model_calls(account_id, ts);
+CREATE INDEX IF NOT EXISTS idx_model_calls_set ON model_calls(model_set, ts);
 `
 
 // addedColumns were added after the first release. Opening an older database
@@ -230,6 +250,7 @@ type Store struct {
 	db         *sql.DB
 	logs       atomic.Int64 // activity writes, for pruning
 	deliveries atomic.Int64 // webhook deliveries recorded, for pruning
+	calls      atomic.Int64 // model calls recorded, for pruning
 }
 
 // Open opens (and migrates) the database at path.

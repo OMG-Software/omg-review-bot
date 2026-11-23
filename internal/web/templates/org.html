@@ -18,6 +18,11 @@
   <div class="card"><figure class="chart"><figcaption><b>Findings posted by level</b> <span class="muted">(last {{.D.Range}} days)</span>{{if .D.Stats.Undetailed}} <span class="muted">· not known for {{.D.Stats.Undetailed}} earlier {{if eq .D.Stats.Undetailed 1}}review{{else}}reviews{{end}}</span>{{end}}</figcaption>{{sevChart .D.Stats.Sev}}</figure></div>
 </div>
 
+{{if .D.RepoRows}}
+<div class="card"><figure class="chart"><figcaption><b>Most active repositories</b> <span class="muted">· reviews posted, last {{.D.Range}} days</span> <a class="small" href="{{orgPath .Org.Login}}/metrics?days={{.D.Range}}">metrics →</a></figcaption>
+  {{rankChart "Most active repositories by reviews posted" .D.RepoRows}}</figure></div>
+{{end}}
+
 <div class="card">
   <h2>Repositories <span class="muted small-h">last {{.D.Range}} days</span></h2>
   {{if .D.RepoStats}}

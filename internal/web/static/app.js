@@ -17,6 +17,13 @@
       const j = await res.json();
       out.textContent = j.message;
       out.className = "result " + (j.ok ? "ok" : "bad");
+      // "Use model maximums" answers with the limits to put in the form.
+      if (j.limits) {
+        for (const [name, v] of Object.entries(j.limits)) {
+          const field = form.querySelector(`input[name="${name}"]`);
+          if (field) field.value = v;
+        }
+      }
       const dl = btn.dataset.list && document.getElementById(btn.dataset.list);
       if (j.models && dl) {
         dl.replaceChildren(...j.models.map((m) => Object.assign(document.createElement("option"), { value: m })));

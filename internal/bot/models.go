@@ -137,6 +137,9 @@ func (b *Bot) modelsUnset(st settings.Settings, accountID int64) bool {
 type modelUse struct {
 	cfg settings.LLM
 	lc  llm.Client
+	set int64 // whose model: 0 = the instance's, else the organization's own (settings.OwnModels)
+	// meter, if set, records each call (see Bot.meterCall).
+	meter func(ctx context.Context, u modelUse, resp *llm.Response, err error, took time.Duration)
 }
 
 // modelClient is an llm.Client that can say which model answered.
@@ -174,7 +177,12 @@ func (t tuned) Chat(ctx context.Context, req llm.Request) (*llm.Response, error)
 	if req.MaxTokens <= 0 || req.MaxTokens > t.cfg.MaxOutputTokens {
 		req.MaxTokens = t.cfg.MaxOutputTokens
 	}
-	return t.lc.Chat(ctx, req)
+	start := time.Now()
+	resp, err := t.lc.Chat(ctx, req)
+	if t.meter != nil {
+		t.meter(ctx, t.modelUse, resp, err, time.Since(start))
+	}
+	return resp, err
 }
 
 func (t tuned) Models(ctx context.Context) ([]string, error) { return t.lc.Models(ctx) }
@@ -289,7 +297,7 @@ func modelUses(st settings.Settings) (uses []tuned, skipped, err error) {
 			errs = append(errs, fmt.Errorf("%s: %w", c.Label(), err))
 			continue
 		}
-		uses = append(uses, tuned{modelUse{cfg: c, lc: lc}})
+		uses = append(uses, tuned{modelUse{cfg: c, lc: lc, set: st.OwnModels}})
 	}
 	if len(uses) == 0 {
 		return nil, nil, errors.Join(errs...)
@@ -300,6 +308,9 @@ func modelUses(st settings.Settings) (uses []tuned, skipped, err error) {
 // usableModels is modelUses, logging the models left out.
 func (b *Bot) usableModels(st settings.Settings, pr *store.PR) ([]tuned, error) {
 	uses, skipped, err := modelUses(st)
+	for i := range uses {
+		uses[i].meter = b.meterCall
+	}
 	if skipped != nil {
 		if pr != nil {
 			b.logf("warn", pr.Repo, pr.Number, "model left out: %v", skipped)
@@ -467,4 +478,17 @@ func (b *Bot) ListModels(ctx context.Context, cfg settings.LLM, own bool) ([]str
 		return nil, err
 	}
 	return lc.Models(ctx)
+}
+
+// ModelLimits asks one configuration's server for its model's token limits.
+func (b *Bot) ModelLimits(ctx context.Context, cfg settings.LLM, own bool) (llm.Limits, error) {
+	lc, err := newClient(cfg, own)
+	if err != nil {
+		return llm.Limits{}, err
+	}
+	lr, ok := lc.(llm.LimitReader)
+	if !ok {
+		return llm.Limits{}, errors.New("this kind of server can't report its models' token limits")
+	}
+	return lr.Limits(ctx)
 }

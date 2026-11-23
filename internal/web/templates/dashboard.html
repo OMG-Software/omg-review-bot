@@ -34,6 +34,11 @@
   <div class="card"><figure class="chart"><figcaption><b>Findings posted by level</b>{{if .D.Stats.Undetailed}} <span class="muted">· not known for {{.D.Stats.Undetailed}} earlier {{if eq .D.Stats.Undetailed 1}}review{{else}}reviews{{end}}</span>{{end}}</figcaption>{{sevChart .D.Stats.Sev}}</figure></div>
 </div>
 
+{{if .D.RepoRows}}
+<div class="card"><figure class="chart"><figcaption><b>Most active repositories</b> <span class="muted">· reviews posted, all organizations</span> <a class="small" href="/metrics">metrics →</a></figcaption>
+  {{rankChart "Most active repositories by reviews posted, all organizations" .D.RepoRows}}</figure></div>
+{{end}}
+
 <div class="card">
   <h2>Organizations <a class="small" href="/orgs">all →</a></h2>
   {{if .D.Orgs}}

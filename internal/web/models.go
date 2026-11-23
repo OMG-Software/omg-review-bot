@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/llm"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
@@ -75,7 +76,11 @@ func (s *Server) logModels(sc modelScope, r *http.Request, what string) {
 type modelView struct {
 	settings.LLM
 	HasKey bool
+	Usage  store.ConfigUsage // its use over the last usageDays days
 }
+
+// usageDays is the period the models page counts each model's use over.
+const usageDays = 30
 
 func (s *Server) instanceModelsPage(w http.ResponseWriter, r *http.Request) {
 	s.modelsPage(w, r, instanceModels(), page{Title: "Models", Nav: "settings"}, false)
@@ -100,16 +105,25 @@ func (s *Server) modelsPage(w http.ResponseWriter, r *http.Request, sc modelScop
 	shown := m
 	shown.Configs = make([]settings.LLM, len(m.Configs))
 	views := make([]modelView, len(m.Configs))
+	var set int64 // whose models' use to count: the instance's, or the organization's own
+	if sc.org != nil {
+		set = sc.org.ID
+	}
+	usage, uerr := s.store.ConfigUsageSince(set, store.DayWindowStart(usageDays, time.Now()))
+	if uerr != nil {
+		s.log.Warn("model usage", "err", uerr)
+	}
 	for i, c := range m.Configs {
 		key := c.APIKey != ""
 		c.APIKey = ""
 		shown.Configs[i] = c
-		views[i] = modelView{LLM: c, HasKey: key}
+		views[i] = modelView{LLM: c, HasKey: key, Usage: usage[store.ConfigKey(c.ID, c.Model)]}
 	}
 	d := map[string]any{
 		"Base": sc.base, "Own": sc.own, "M": shown, "Configs": views, "ReadOnly": readOnly,
 		"Strategies": settings.Strategies, "Providers": settings.Providers, "New": settings.NewLLM(),
 		"Max": settings.MaxModels, "Full": len(m.Configs) >= settings.MaxModels, "Unreadable": err != nil,
+		"UsageDays": usageDays, "UsageKnown": uerr == nil,
 	}
 	if sc.org != nil {
 		// Only the names of the instance's models: members can see this page.
@@ -217,32 +231,41 @@ func (s *Server) modelsAction(w http.ResponseWriter, r *http.Request, sc modelSc
 			return fmt.Sprintf("set %s to %q", where, m.StrategyInfo().Label), nil
 		})
 	case "add":
+		mx := s.formMaximums(r, sc, settings.NewLLM())
 		s.modelsChange(w, r, sc, func(m *settings.Models) (string, error) {
 			if len(m.Configs) >= settings.MaxModels {
 				return "", fmt.Errorf("a set can hold at most %d models", settings.MaxModels)
 			}
 			c := parseLLM(r, settings.NewLLM())
 			c.ID = ""
+			how := mx.apply(&c)
 			if err := sc.check(c); err != nil {
 				return "", err
 			}
 			m.Configs = append(m.Configs, c)
-			msg := fmt.Sprintf("added %s to %s", c.Label(), where)
+			msg := fmt.Sprintf("added %s to %s%s", c.Label(), where, how)
 			if sc.org != nil && len(m.Configs) == 1 {
 				msg += "; its reviews now use only its own models, with no daily review limit"
 			}
 			return msg, nil
 		})
 	case "update":
+		var mx maximums
+		if cur, err := s.loadModels(sc); err == nil {
+			if c, ok := cur.Get(id); ok {
+				mx = s.formMaximums(r, sc, c)
+			}
+		}
 		s.modelsChange(w, r, sc, func(m *settings.Models) (string, error) {
 			for i := range m.Configs {
 				if m.Configs[i].ID == id {
 					c := parseLLM(r, m.Configs[i])
+					how := mx.apply(&c)
 					if err := sc.check(c); err != nil {
 						return "", err
 					}
 					m.Configs[i] = c
-					return fmt.Sprintf("changed %s in %s", c.Label(), where), nil
+					return fmt.Sprintf("changed %s in %s%s", c.Label(), where, how), nil
 				}
 			}
 			return "", errors.New("that model is no longer there")
@@ -285,7 +308,7 @@ func (s *Server) modelsAction(w http.ResponseWriter, r *http.Request, sc modelSc
 			}
 			return "", errors.New("that model is no longer there")
 		})
-	case "test", "list":
+	case "test", "list", "limits":
 		s.modelsProbe(w, r, sc)
 	default:
 		s.notFound(w, r)
@@ -305,7 +328,7 @@ func (s *Server) modelsProbe(w http.ResponseWriter, r *http.Request, sc modelSco
 		}
 	}
 	c := parseLLM(r, cur)
-	if sc.own && r.PathValue("action") == "test" {
+	if sc.own && r.PathValue("action") != "list" {
 		if err := settings.CheckOwn(c); err != nil {
 			respond(w, "", err, nil)
 			return
@@ -322,10 +345,76 @@ func (s *Server) modelsProbe(w http.ResponseWriter, r *http.Request, sc modelSco
 		respond(w, msg, err, models)
 		return
 	}
+	if r.PathValue("action") == "limits" {
+		ctx, cancel := context.WithTimeout(r.Context(), limitsTimeout)
+		defer cancel()
+		lim, err := s.bot.ModelLimits(ctx, c, sc.own)
+		if err != nil {
+			respond(w, "", fmt.Errorf("couldn't read %s's token limits: %w", c.Model, err), nil)
+			return
+		}
+		c.SetMaximums(lim.Context, lim.Output, true, true)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": limitsNote(lim, c) + " Save to keep them.",
+			"limits": map[string]int{"context": c.ContextTokens, "max_output": c.MaxOutputTokens}})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(c.TimeoutSeconds)*time.Second)
 	defer cancel()
 	msg, err := s.bot.TestModel(ctx, c, sc.own)
 	respond(w, msg, err, nil)
+}
+
+// limitsTimeout bounds asking a model's server for its token limits.
+const limitsTimeout = 15 * time.Second
+
+// maximums are the token limits a model form left blank, which are set to
+// the model's maximums, and those maximums as its server reported them.
+type maximums struct {
+	ctx, out bool // the context / output limit was left blank
+	lim      llm.Limits
+	err      error // the server couldn't be asked, or didn't say
+}
+
+// formMaximums asks the model's server for its limits when the form leaves
+// either blank. It's a network call, so it's made before the models' lock
+// is taken. cur is the saved configuration the form edits (NewLLM to add
+// one), whose key a form with none uses.
+func (s *Server) formMaximums(r *http.Request, sc modelScope, cur settings.LLM) maximums {
+	mx := maximums{ctx: strings.TrimSpace(r.FormValue("context")) == "", out: strings.TrimSpace(r.FormValue("max_output")) == ""}
+	if !mx.ctx && !mx.out {
+		return mx
+	}
+	c := parseLLM(r, cur)
+	if err := sc.check(c); err != nil {
+		mx.err = err // the change itself reports it
+		return mx
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), limitsTimeout)
+	defer cancel()
+	mx.lim, mx.err = s.bot.ModelLimits(ctx, c, sc.own)
+	return mx
+}
+
+// apply sets c's blank limits and says how, for the change's message.
+func (mx maximums) apply(c *settings.LLM) string {
+	if !mx.ctx && !mx.out {
+		return ""
+	}
+	c.SetMaximums(mx.lim.Context, mx.lim.Output, mx.ctx, mx.out)
+	if mx.err != nil {
+		return fmt.Sprintf(". Its token limits couldn't be read from its server (%v), so it has %d context and %d output tokens: set them by hand if they're wrong",
+			mx.err, c.ContextTokens, c.MaxOutputTokens)
+	}
+	return ". " + strings.TrimSuffix(limitsNote(mx.lim, *c), ".")
+}
+
+// limitsNote says which of c's limits are the model's maximums.
+func limitsNote(lim llm.Limits, c settings.LLM) string {
+	msg := fmt.Sprintf("Using the model's maximums: %d context tokens", c.ContextTokens)
+	if lim.Output > 0 {
+		return msg + fmt.Sprintf(" and %d output tokens.", c.MaxOutputTokens)
+	}
+	return msg + fmt.Sprintf(", and %d output tokens (the server sets no separate output cap, so half the window, leaving the other half for the prompt).", c.MaxOutputTokens)
 }
 
 func (s *Server) instanceModelsAction(w http.ResponseWriter, r *http.Request) {

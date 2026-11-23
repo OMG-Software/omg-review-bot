@@ -472,6 +472,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	if id, err := b.store.CreateReview(rec); err == nil {
 		rec.ID = id
 	}
+	ctx = withCallTag(ctx, callTag{kind: store.CallReview, accountID: pr.AccountID, reviewID: rec.ID})
 	notice := reviewNotice{head: head, model: rec.Model, skill: sk.Name, started: time.Unix(rec.StartedAt, 0)}
 	var noticeID int64
 	if qn != nil {

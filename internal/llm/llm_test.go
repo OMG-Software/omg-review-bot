@@ -60,3 +60,57 @@ func TestDecodeJSON(t *testing.T) {
 		t.Error("expected error for non-JSON")
 	}
 }
+
+func TestLimits(t *testing.T) {
+	serve := func(routes map[string]string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, ok := routes[r.Method+" "+r.URL.Path]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	for _, c := range []struct {
+		name, provider, path string
+		routes               map[string]string
+		want                 Limits
+		wantErr              bool
+	}{
+		{"LM Studio", "lmstudio", "/v1", map[string]string{
+			"GET /api/v0/models/qwen/coder": `{"id":"qwen/coder","max_context_length":131072}`,
+		}, Limits{Context: 131072}, false},
+		{"OpenRouter", "openai", "/api/v1", map[string]string{
+			"GET /api/v1/models": `{"data":[{"id":"other","context_length":1},{"id":"qwen/coder","context_length":262144,"top_provider":{"context_length":262144,"max_completion_tokens":65536}}]}`,
+		}, Limits{Context: 262144, Output: 65536}, false},
+		{"vLLM", "openai", "/v1", map[string]string{
+			"GET /v1/models": `{"data":[{"id":"qwen/coder","max_model_len":32768}]}`,
+		}, Limits{Context: 32768}, false},
+		{"llama.cpp", "openai", "/v1", map[string]string{
+			"GET /v1/models": `{"data":[{"id":"qwen/coder"}]}`,
+			"GET /props":     `{"default_generation_settings":{"n_ctx":16384}}`,
+		}, Limits{Context: 16384}, false},
+		{"not reported", "openai", "/v1", map[string]string{
+			"GET /v1/models": `{"data":[{"id":"qwen/coder"}]}`,
+		}, Limits{}, true},
+		{"Ollama", "ollama", "", map[string]string{
+			"POST /api/show": `{"model_info":{"general.architecture":"qwen3","qwen3.context_length":40960,"qwen3.embedding_length":4096}}`,
+		}, Limits{Context: 40960}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := serve(c.routes)
+			cl, err := New(Config{Provider: c.provider, BaseURL: srv.URL + c.path, Model: "qwen/coder"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := cl.(LimitReader).Limits(context.Background())
+			if (err != nil) != c.wantErr || got != c.want {
+				t.Errorf("Limits() = %+v, %v; want %+v (error: %v)", got, err, c.want, c.wantErr)
+			}
+		})
+	}
+}
