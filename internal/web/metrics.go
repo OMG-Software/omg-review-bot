@@ -59,14 +59,14 @@ func byWeek(days []store.DayStats) []store.DayStats {
 // reviewed first.
 const repoTableRows = 50
 
-// hideInstanceModelNames keeps the instance's model names from an
-// organization's members: an instance model without a name of its own is
-// labelled with its model name, so it's shown as "Instance model" (numbered,
-// when there are several) instead. Named ones keep the administrators' name.
+// hideInstanceModelNames keeps the instance's models from an organization's
+// members: each is shown as "Instance model" (numbered, when there are
+// several), as its label is its model name when it has no name of its own,
+// and a name its administrators gave it can contain the model name too.
 func hideInstanceModelNames(ms []store.ModelUsage) {
 	var unnamed []int
 	for i, m := range ms {
-		if m.ModelSet == 0 && (m.Label == "" || m.Label == m.Model) {
+		if m.ModelSet == 0 {
 			unnamed = append(unnamed, i)
 		}
 	}

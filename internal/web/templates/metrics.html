@@ -62,7 +62,8 @@
     <tbody>
     {{range $d.Repos}}
     <tr>
-      <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}</span>{{else if and $d.All .Org}}<a href="{{query (printf "%s/reviews" (orgPath .Org)) "repo" .Repo}}">{{.Repo}}</a>{{else}}<a href="{{query (printf "%s/reviews" $d.Base) "repo" .Repo}}">{{.Repo}}</a>{{end}}</td>
+      {{$reviews := printf "%s/reviews" $d.Base}}{{if and $d.All .Org}}{{$reviews = printf "%s/reviews" (orgPath .Org)}}{{end}}
+      <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}</span>{{else}}<a href="{{query $reviews "repo" .Repo}}">{{.Repo}}</a>{{end}}</td>
       {{if $d.All}}<td>{{if .Org}}{{.Org}}{{else}}<span class="muted">(no organization)</span>{{end}}</td>{{end}}
       <td class="n">{{.Reviews}}</td><td class="n">{{.PRs}}</td><td class="n">{{.Findings}}</td>
       {{range $i, $n := .Sev}}<td class="n">{{if $n}}{{if lt $i 2}}<b>{{$n}}</b>{{else}}{{$n}}{{end}}{{else}}<span class="muted">0</span>{{end}}</td>{{end}}

@@ -15,7 +15,8 @@ func TestMetricsPages(t *testing.T) {
 	s := newTestSite(t)
 	s.seedOrgs()
 	for _, c := range []store.ModelCall{
-		{AccountID: acmeID, ReviewID: 1, Kind: store.CallReview, ConfigID: "m1", Label: "Shared model", Model: "shared-7b", OK: true, PromptTokens: 900},
+		// A name that contains the model name: members see neither.
+		{AccountID: acmeID, ReviewID: 1, Kind: store.CallReview, ConfigID: "m1", Label: "Production shared-7b", Model: "shared-7b", OK: true, PromptTokens: 900},
 		{AccountID: otherID, ReviewID: 2, Kind: store.CallReview, ModelSet: otherID, ConfigID: "m1", Label: "Secret own model", Model: "secret-70b", OK: true},
 		// An instance model with no name of its own is labelled with its
 		// model name: members see neither.
@@ -39,7 +40,7 @@ func TestMetricsPages(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("acme's metrics = %d", code)
 	}
-	for _, want := range []string{"Most active repositories", "acme/web", "Findings by repository and level", "Shared model",
+	for _, want := range []string{"Most active repositories", "acme/web", "Findings by repository and level", "Instance model 1", "Instance model 2",
 		"Reviews sent to each model", "Time to first review", `class="active">90 days`, "Instance model", "acme/broken"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("acme's metrics lack %q", want)
@@ -47,7 +48,7 @@ func TestMetricsPages(t *testing.T) {
 	}
 	// Another organization's repositories and models stay out of it, and an
 	// instance model's server isn't named to members.
-	for _, leak := range []string{"other/secret", "Secret own model", "secret-70b", "shared-7b", "plain-13b"} {
+	for _, leak := range []string{"other/secret", "Secret own model", "secret-70b", "shared-7b", "Production", "plain-13b"} {
 		if strings.Contains(body, leak) {
 			t.Errorf("acme's metrics show %q", leak)
 		}
@@ -70,7 +71,7 @@ func TestMetricsPages(t *testing.T) {
 		t.Fatalf("every organization's metrics for an administrator = %d", code)
 	}
 	for _, want := range []string{"acme/web", "other/secret", "Findings by organization and level", "Secret own model",
-		"secret-70b", "other's own", "plain-13b", "/orgs/acme/reviews?repo="} {
+		"secret-70b", "other's own", "plain-13b", "Production shared-7b", "/orgs/acme/reviews?repo="} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the administrators' metrics lack %q", want)
 		}
