@@ -105,6 +105,16 @@ func TestLimits(t *testing.T) {
 			"GET /v1/models": `{"data":[{"id":"qwen/coder"}]}`,
 			"GET /props":     `{"default_generation_settings":{"n_ctx":16384}}`,
 		}, Limits{Context: 16384}, false},
+		// /props describes the loaded model: another model's window isn't
+		// taken for this one's, nor one of several listed.
+		{"llama.cpp, another model loaded", "openai", "/v1", map[string]string{
+			"GET /v1/models": `{"data":[{"id":"other-8b"}]}`,
+			"GET /props":     `{"default_generation_settings":{"n_ctx":8192}}`,
+		}, Limits{}, true},
+		{"llama.cpp, several models", "openai", "/v1", map[string]string{
+			"GET /v1/models": `{"data":[{"id":"other-8b"},{"id":"qwen/coder"}]}`,
+			"GET /props":     `{"default_generation_settings":{"n_ctx":8192}}`,
+		}, Limits{}, true},
 		{"not reported", "openai", "/v1", map[string]string{
 			"GET /v1/models": `{"data":[{"id":"qwen/coder"}]}`,
 		}, Limits{}, true},

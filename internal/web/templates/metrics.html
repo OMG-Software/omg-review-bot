@@ -30,7 +30,13 @@
 
 <div class="grid2">
   <div class="card">{{template "day-chart" $d.Days}}</div>
-  <div class="card"><figure class="chart"><figcaption><b>Findings posted by level</b></figcaption>{{sevChart $s.Sev}}</figure></div>
+  <div class="card"><figure class="chart"><figcaption><b>Findings posted by level</b></figcaption>{{sevChart $s.Sev}}
+    <details class="table-view"><summary>Show as a table</summary>
+      <div class="table-scroll"><table class="num"><thead><tr><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th></tr></thead><tbody>
+      <tr>{{range $s.Sev}}<td class="n">{{.}}</td>{{end}}</tr>
+      </tbody></table></div>
+    </details>
+  </figure></div>
 </div>
 
 <div class="card">

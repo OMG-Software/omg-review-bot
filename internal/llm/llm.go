@@ -364,9 +364,11 @@ func (o *openAI) Limits(ctx context.Context) (Limits, error) {
 		Data []map[string]any `json:"data"`
 	}
 	err := doJSON(ctx, o.hc, http.MethodGet, o.base+"/models", o.cfg.APIKey, nil, &list)
+	listed := false
 	if err == nil {
 		for _, m := range list.Data {
 			if id, _ := m["id"].(string); id == o.cfg.Model {
+				listed = true
 				if l := limitsFrom(m); l.Context > 0 || l.Output > 0 {
 					return l, nil
 				}
@@ -374,6 +376,15 @@ func (o *openAI) Limits(ctx context.Context) (Limits, error) {
 		}
 	}
 	note(err)
+	// llama.cpp's /props takes no model: it describes the model the server
+	// has loaded. That's this one only when it's the one model listed;
+	// otherwise another model's window would be taken for this one's.
+	if !listed || len(list.Data) != 1 {
+		if firstErr != nil {
+			return Limits{}, firstErr
+		}
+		return Limits{}, errNoLimits
+	}
 	var props struct {
 		Settings struct {
 			NCtx int `json:"n_ctx"`
