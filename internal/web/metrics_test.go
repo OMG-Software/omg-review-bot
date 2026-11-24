@@ -199,6 +199,12 @@ func TestByWeek(t *testing.T) {
 	if periodUnit(w) != "week" || periodUnit(days) != "day" || periodLabel(w[1]) != "Week of Sun 4 Jan" {
 		t.Errorf("labels: %q %q %q", periodUnit(w), periodUnit(days), periodLabel(w[1]))
 	}
+	// The charts' names say the period they cover, by day or by week.
+	for _, got := range []string{string(dayChart(w)), string(sevDayChart(w)), string(dayChart(days))} {
+		if !strings.Contains(got, `, last 10 days"`) {
+			t.Errorf("a chart's name doesn't say it covers 10 days: %.160s", got)
+		}
+	}
 	// A year is 52 weeks and a day: the part week first is a day long, and
 	// the chart is still by week.
 	if y := byWeek(make([]store.DayStats, 365)); len(y) != 53 || y[0].Span != 1 || periodUnit(y) != "week" {

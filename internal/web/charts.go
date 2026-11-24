@@ -39,6 +39,16 @@ func barTop(x, y, w, h float64) string {
 		x, y+h, y+r, x, y, x+r, y, x+w-r, x+w, y, x+w, y+r, y+h)
 }
 
+// daysCovered is how many days a chart's days (or weeks) span, for its
+// accessible name.
+func daysCovered(days []store.DayStats) int {
+	n := 0
+	for _, d := range days {
+		n += max(1, d.Span)
+	}
+	return n
+}
+
 // dayChart is a column chart of posted reviews per day.
 func dayChart(days []store.DayStats) template.HTML {
 	if len(days) == 0 {
@@ -61,7 +71,7 @@ func dayChart(days []store.DayStats) template.HTML {
 	slot := plotW / float64(len(days))
 	labelEvery := dayLabelEvery(len(days)) // counted back from today
 	var sb strings.Builder
-	fmt.Fprintf(&sb, `<svg class="viz" viewBox="0 0 %.0f %.0f" role="img" aria-label="Reviews posted per %s">`, width, height, periodUnit(days))
+	fmt.Fprintf(&sb, `<svg class="viz" viewBox="0 0 %.0f %.0f" role="img" aria-label="Reviews posted per %s, last %d days">`, width, height, periodUnit(days), daysCovered(days))
 	for i := 0; i <= gridLines; i++ {
 		v := ymax * i / gridLines
 		y := top + plotH - plotH*float64(v)/float64(ymax)

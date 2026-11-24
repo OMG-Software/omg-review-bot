@@ -214,7 +214,7 @@ func sevDayChart(days []store.DayStats) template.HTML {
 	if slot*barShare < 4 {
 		thin = " thin" // too narrow for the gap between segments
 	}
-	fmt.Fprintf(&sb, `<svg class="viz%s" viewBox="0 0 %.0f %.0f" role="img" aria-label="Findings posted per %s by level">`, thin, width, height, periodUnit(days))
+	fmt.Fprintf(&sb, `<svg class="viz%s" viewBox="0 0 %.0f %.0f" role="img" aria-label="Findings posted per %s by level, last %d days">`, thin, width, height, periodUnit(days), daysCovered(days))
 	for i := 0; i <= gridLines; i++ {
 		v := ymax * i / gridLines
 		y := top + plotH - plotH*float64(v)/float64(ymax)
