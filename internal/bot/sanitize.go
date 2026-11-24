@@ -74,8 +74,10 @@ var (
 	// ("/usr/bin") or comment ("// x") isn't one.
 	codeCmdRE = regexp.MustCompile(`^(\s*)/([A-Za-z][\w-]*)(\s|$)`)
 	// A run that could open or close a fence somewhere the sanitizer doesn't
-	// trust one (see cleanLine).
-	fenceRunRE = regexp.MustCompile("(`{3,}|~{3,})")
+	// trust one (see cleanLine). A break already in front of it is taken in,
+	// so sanitizing twice (a finding is sanitized as it's found and again as
+	// it's posted, and a held one again each review) adds no more.
+	fenceRunRE = regexp.MustCompile("(?:" + zwsp + ")?(`{3,}|~{3,})")
 )
 
 // sanitizeModelText makes model-written markdown safe to post (see above).

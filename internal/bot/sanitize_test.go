@@ -196,3 +196,27 @@ func TestInjectedModelOutputIsInert(t *testing.T) {
 		t.Errorf("review body has %d notes markers, want 1", n)
 	}
 }
+
+// Sanitizing twice changes nothing: a finding is sanitized as it's found and
+// again as it's posted, and a held one again each review.
+func TestSanitizeIdempotent(t *testing.T) {
+	for _, in := range []string{
+		"if amount > order.balance && a < b",
+		"<details><summary>x</summary> <img src=x> </div>",
+		"@alice and @org/team, email a@b.c, &#64;bob &commat;carol",
+		"prbot: marker <!-- prbot:review -->",
+		"```suggestion\n/close now\nfoo\n```\n/approve\n ![img](x)",
+		"~~~\ncode\n~~~ and ``` inline ``` fence",
+		"use ``` here and ~~~ there",
+		"/merge please\n  /lgtm",
+		strings.Repeat("é", maxModelBody+50),
+		"line\r\nwith\rreturns",
+	} {
+		if once := sanitizeModelText(in); sanitizeModelText(once) != once {
+			t.Errorf("sanitizeModelText twice changes %q: %q", in, sanitizeModelText(once))
+		}
+		if once := sanitizeModelLine(in); sanitizeModelLine(once) != once {
+			t.Errorf("sanitizeModelLine twice changes %q: %q", in, sanitizeModelLine(once))
+		}
+	}
+}
