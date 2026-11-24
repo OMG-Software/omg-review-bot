@@ -1,6 +1,7 @@
 {{define "content"}}
 <div class="narrow card">
-  <h1>Welcome 👋</h1>
+  <img class="logo" src="/static/icon.svg" alt="" width="96" height="96">
+  <h1>Welcome to OMG Review Bot</h1>
   <p>Choose an admin password for this web UI. It protects your GitHub App key and model settings.</p>
   <form method="post" action="/setup" class="stack">
     <label>Password <input type="password" name="password" minlength="10" required autofocus autocomplete="new-password"></label>

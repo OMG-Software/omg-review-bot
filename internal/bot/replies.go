@@ -334,11 +334,26 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, mc *jobCl
 	return nil
 }
 
+// mentionPaths lists the PR files a mention reply's skill references are
+// chosen by: every changed file it may be asked about, as its prompt lists
+// them. Unlike reviewablePaths, a file GitHub sent no patch for counts: past
+// the first megabyte or so of a large PR's diff, it sends none.
+func mentionPaths(st settings.Settings, files []github.PRFile) []string {
+	ignore := compileGlobs(st.Review.IgnorePatterns)
+	paths := []string{} // non-nil: an empty list means "no languages", not "all"
+	for _, f := range files {
+		if f.Status != "removed" && !matchAny(ignore, f.Filename) {
+			paths = append(paths, f.Filename)
+		}
+	}
+	return paths
+}
+
 func (b *Bot) mentionReply(ctx context.Context, st settings.Settings, mc *jobClient, cl *github.Client, pr *store.PR, convo []github.IssueComment, login string) (string, error) {
 	files, filesErr := cl.PullFiles(ctx, pr.Repo, pr.Number)
 	var paths []string // nil (all references) if the file list is unavailable
 	if filesErr == nil {
-		paths = reviewablePaths(st, files)
+		paths = mentionPaths(st, files)
 	}
 	sk := b.loadSkill(st)
 	totalChars := (st.LLM.ContextTokens - st.LLM.MaxOutputTokens - 256) * charsPerToken

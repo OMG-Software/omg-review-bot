@@ -1,6 +1,7 @@
 {{define "content"}}
 <div class="narrow card">
-  <h1>🤖 OMG Review Bot</h1>
+  <img class="logo" src="/static/icon.svg" alt="" width="96" height="96">
+  <h1>OMG Review Bot</h1>
   <p class="hint">Administrator sign-in</p>
   <form method="post" action="/admin-login" class="stack">
     <input type="hidden" name="next" value="{{.D.Next}}">

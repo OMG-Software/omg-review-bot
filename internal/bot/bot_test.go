@@ -51,18 +51,21 @@ type fakeGitHub struct {
 	// requestDuring: the next installation listing asks for another sync
 	// as it starts (read and cleared outside mu, by the test's wrapper)
 	requestDuring bool
-	docRefs       []string         // refs project docs were read at
-	posted        []string         // PR conversation comments the bot posted
-	edited        map[int64]string // the latest text of each comment the bot edited
-	editLog       []string         // every edit, in order
-	failEdits     bool             // editing issue comments fails (a 502)
-	failList      bool             // listing the PR's conversation comments fails (a 502)
-	mainStatus    string           // main.go's status in the PR's files; "" = modified
-	extraFiles    []any            // more files in the PR, after main.go and go.sum
-	compareFiles  []any            // the files a compare lists; nil = main.go
-	compareGone   bool             // a compare fails: its base commit is gone (a force-push)
-	failReview    bool             // posting a review fails (a 400)
-	onReview      func()           // runs once after recording a review, before responding
+	docRefs       []string          // refs project docs were read at
+	posted        []string          // PR conversation comments the bot posted
+	edited        map[int64]string  // the latest text of each comment the bot edited
+	editLog       []string          // every edit, in order
+	failEdits     bool              // editing issue comments fails (a 502)
+	failList      bool              // listing the PR's conversation comments fails (a 502)
+	mainStatus    string            // main.go's status in the PR's files; "" = modified
+	extraFiles    []any             // more files in the PR, after main.go and go.sum
+	compareFiles  []any             // the files a compare lists; nil = main.go
+	compareGone   bool              // a compare fails: its base commit is gone (a force-push)
+	mergeBase     string            // the merge base a compare names; "" = none
+	fileAt        map[string]string // "ref:path" -> that file's contents; others get content
+	fileReads     []string          // "ref:path" of each file read, guideline docs aside
+	failReview    bool              // posting a review fails (a 400)
+	onReview      func()            // runs once after recording a review, before responding
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -185,11 +188,15 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			if f.compareFiles != nil {
-				send(map[string]any{"files": f.compareFiles})
-				return
+			files := f.compareFiles
+			if files == nil {
+				files = []any{map[string]any{"filename": "main.go"}}
 			}
-			send(map[string]any{"files": []any{map[string]any{"filename": "main.go"}}})
+			cmp := map[string]any{"files": files}
+			if f.mergeBase != "" {
+				cmp["merge_base_commit"] = map[string]any{"sha": f.mergeBase}
+			}
+			send(cmp)
 		case p == "/repos/acme/web/issues/7/comments" && r.Method == http.MethodPost:
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -230,6 +237,11 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			if doc, ok := projectDocs[name]; ok {
 				f.docRefs = append(f.docRefs, r.URL.Query().Get("ref"))
 				_, _ = io.WriteString(w, doc)
+				return
+			}
+			f.fileReads = append(f.fileReads, r.URL.Query().Get("ref")+":"+name)
+			if s, ok := f.fileAt[r.URL.Query().Get("ref")+":"+name]; ok {
+				_, _ = io.WriteString(w, s)
 				return
 			}
 			_, _ = io.WriteString(w, f.content)
