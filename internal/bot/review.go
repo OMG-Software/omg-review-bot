@@ -364,7 +364,11 @@ func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 			p.skipped = append(p.skipped, f.Filename+" (ignored by pattern)")
 			continue
 		case f.Patch == "":
-			p.skipped = append(p.skipped, f.Filename+" (binary or too large for a diff)")
+			why := f.NoDiff
+			if why == "" {
+				why = "binary or too large for a diff"
+			}
+			p.skipped = append(p.skipped, f.Filename+" ("+why+")")
 			continue
 		case p.reviewed >= st.Review.MaxFiles:
 			p.skipped = append(p.skipped, f.Filename+" (file limit reached)")
@@ -585,6 +589,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	if err != nil {
 		return nil, fmt.Errorf("list PR files: %w", err)
 	}
+	b.fillPatches(ctx, cl, st, pr, files, gp.Base.SHA, head)
 	existing, err := cl.ReviewComments(ctx, pr.Repo, pr.Number)
 	if err != nil {
 		return nil, fmt.Errorf("list review comments: %w", err)

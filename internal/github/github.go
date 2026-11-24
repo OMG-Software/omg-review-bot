@@ -90,6 +90,9 @@ type PRFile struct {
 	Deletions        int    `json:"deletions"`
 	Patch            string `json:"patch"`
 	PreviousFilename string `json:"previous_filename"`
+	// NoDiff says why the file has no patch, when the bot found out
+	// (it is binary, say); GitHub's own response never sets it.
+	NoDiff string `json:"-"`
 }
 
 type ReviewComment struct {
@@ -608,6 +611,25 @@ func (c *Client) CompareFiles(ctx context.Context, fullName, base, head string) 
 		return nil, errors.New("comparison lists 300 files, so it may be incomplete") // GitHub's cap
 	}
 	return r.Files, nil
+}
+
+// MergeBase returns the commit where head's history meets base's: what a
+// pull request's diff is taken from.
+func (c *Client) MergeBase(ctx context.Context, fullName, base, head string) (string, error) {
+	var r struct {
+		MergeBase struct {
+			SHA string `json:"sha"`
+		} `json:"merge_base_commit"`
+	}
+	// per_page cuts the commits listed, not the files; one is all it needs.
+	path := fmt.Sprintf("/repos/%s/compare/%s...%s?per_page=1", fullName, url.PathEscape(base), url.PathEscape(head))
+	if _, err := c.do(ctx, http.MethodGet, path, nil, nil, &r); err != nil {
+		return "", err
+	}
+	if r.MergeBase.SHA == "" {
+		return "", errors.New("comparison names no merge base")
+	}
+	return r.MergeBase.SHA, nil
 }
 
 // TreePaths lists every file path in the repository at ref (a SHA or branch).
