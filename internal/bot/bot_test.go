@@ -60,6 +60,7 @@ type fakeGitHub struct {
 	mainStatus    string           // main.go's status in the PR's files; "" = modified
 	extraFiles    []any            // more files in the PR, after main.go and go.sum
 	compareFiles  []any            // the files a compare lists; nil = main.go
+	compareGone   bool             // a compare fails: its base commit is gone (a force-push)
 	onReview      func()           // runs once after recording a review, before responding
 }
 
@@ -177,6 +178,10 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 				"path": "main.go", "created_at": time.Now().Format(time.RFC3339)})
 			send(map[string]any{"id": id})
 		case strings.HasPrefix(p, "/repos/acme/web/compare/"):
+			if f.compareGone {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			if f.compareFiles != nil {
 				send(map[string]any{"files": f.compareFiles})
 				return

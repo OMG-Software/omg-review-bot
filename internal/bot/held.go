@@ -108,7 +108,14 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 			f.Path = np
 		}
 		if !status.inPR(f.Path) {
-			continue // the PR no longer changes the file
+			// Dropped once it's known the PR no longer changes the file. If
+			// the comparison failed, it may just have been renamed since,
+			// to a name we can't tell: kept, as it was (it can't be checked,
+			// and is posted as a note).
+			if changed == nil && status.status[f.Path] != "removed" {
+				kept = append(kept, f)
+			}
+			continue
 		}
 		if changed != nil && !changed[f.Path] && !changed[old] {
 			kept = append(kept, f)

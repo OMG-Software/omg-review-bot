@@ -510,3 +510,24 @@ func TestToolCallsPerTurnCapped(t *testing.T) {
 		t.Fatalf("tool results: %d run, %d refused; want %d and 2", ran, refused, maxCallsPerStep)
 	}
 }
+
+// If the commit the findings were held on can't be compared with (a
+// force-push dropped it, say), a finding on a file the PR doesn't list may
+// just have been renamed: it's kept and posted as a note, not dropped. One
+// on a file the PR deletes still goes.
+func TestHeldFindingKeptWhenRenameUnknown(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.gh.compareGone = true
+	e.gh.extraFiles = []any{map[string]any{"filename": "gone.go", "status": "removed"}}
+	seedHeld(t, e, "zzz000",
+		finding{Path: "renamed.go", Line: 4, Severity: "P2", Title: "Unchecked error from Close", Body: "Check it."},
+		finding{Path: "gone.go", Line: 4, Severity: "P2", Title: "Leaked file handle", Body: "Close it."})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	if body := e.gh.reviews[0].Body; !strings.Contains(body, "Unchecked error from Close") || strings.Contains(body, "Leaked file handle") {
+		t.Fatalf("want the finding on the unknown file posted as a note, and the deleted file's dropped:\n%s", body)
+	}
+}
