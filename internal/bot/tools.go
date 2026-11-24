@@ -68,6 +68,7 @@ type toolFile struct {
 
 type toolTree struct {
 	paths     []string
+	sizes     map[string]int // each file's size in bytes, from the listing
 	truncated bool
 	err       error
 }
@@ -207,7 +208,13 @@ func (rt *repoTools) tree(ctx context.Context, ref string) toolTree {
 	if ok {
 		return t
 	}
-	t.paths, t.truncated, t.err = rt.cl.TreePaths(ctx, rt.repo, ref)
+	var files []github.TreeFile
+	files, t.truncated, t.err = rt.cl.TreeFiles(ctx, rt.repo, ref)
+	t.sizes = make(map[string]int, len(files))
+	for _, f := range files {
+		t.paths = append(t.paths, f.Path)
+		t.sizes[f.Path] = f.Size
+	}
 	if settled(t.err) {
 		c.mu.Lock()
 		c.trees[ref] = t
@@ -345,6 +352,12 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem; wg.Done() }()
+			// The listing gives sizes, so a file too large to search isn't
+			// downloaded (again, on every search) just to find that out.
+			if t.sizes[p] > maxToolFileBytes {
+				results[i].read, results[i].large = true, true
+				return
+			}
 			content, err := rt.file(ctx, ref, p)
 			results[i].read = err == nil
 			if len(content) > maxToolFileBytes {

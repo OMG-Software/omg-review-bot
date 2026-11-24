@@ -384,8 +384,8 @@ func reviewBody(ri reviewInfo) string {
 		fmt.Fprintf(&sb, "**Findings:** %s\n\n", severityCounts(append(append([]finding{}, ri.inline...), ri.notes...)))
 	}
 	if len(ri.held) > 0 {
-		fmt.Fprintf(&sb, "**Held for the next review:** %s. This review posts at most %d findings, most severe first; the rest are posted with the next review, if they still apply:\n\n",
-			severityCounts(ri.held), ri.maxComments)
+		fmt.Fprintf(&sb, "**Held for the next review:** %s. This review posts at most %s, most severe first; the rest are posted with the next review, if they still apply:\n\n",
+			severityCounts(ri.held), findingCount(ri.maxComments))
 		// Named, so what holds back approval can be fixed before then.
 		for i, f := range ri.held {
 			if i == maxHeldListed {
@@ -550,4 +550,12 @@ func fileView(content string, around []int, budget int) string {
 		sb.WriteString("  ... |\n")
 	}
 	return textutil.Truncate(sb.String(), budget)
+}
+
+// findingCount is "1 finding" or "n findings".
+func findingCount(n int) string {
+	if n == 1 {
+		return "1 finding"
+	}
+	return fmt.Sprintf("%d findings", n)
 }

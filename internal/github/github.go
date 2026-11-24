@@ -610,10 +610,26 @@ func (c *Client) CompareFiles(ctx context.Context, fullName, base, head string) 
 // TreePaths lists every file path in the repository at ref (a SHA or branch).
 // truncated is true when GitHub cut the listing short (very large repositories).
 func (c *Client) TreePaths(ctx context.Context, fullName, ref string) (paths []string, truncated bool, err error) {
+	files, truncated, err := c.TreeFiles(ctx, fullName, ref)
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	return paths, truncated, err
+}
+
+// TreeFile is a file in a repository's tree, and its size in bytes.
+type TreeFile struct {
+	Path string
+	Size int
+}
+
+// TreeFiles is TreePaths with each file's size.
+func (c *Client) TreeFiles(ctx context.Context, fullName, ref string) (files []TreeFile, truncated bool, err error) {
 	var r struct {
 		Tree []struct {
 			Path string `json:"path"`
 			Type string `json:"type"`
+			Size int    `json:"size"`
 		} `json:"tree"`
 		Truncated bool `json:"truncated"`
 	}
@@ -623,10 +639,10 @@ func (c *Client) TreePaths(ctx context.Context, fullName, ref string) (paths []s
 	}
 	for _, e := range r.Tree {
 		if e.Type == "blob" {
-			paths = append(paths, e.Path)
+			files = append(files, TreeFile{Path: e.Path, Size: e.Size})
 		}
 	}
-	return paths, r.Truncated, nil
+	return files, r.Truncated, nil
 }
 
 // graphqlURL derives the GraphQL endpoint from the REST base URL

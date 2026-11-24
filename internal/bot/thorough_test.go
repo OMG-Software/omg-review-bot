@@ -198,7 +198,7 @@ func TestHeldFindingsPostedNextReview(t *testing.T) {
 	if len(first.Comments) != 1 || !strings.Contains(first.Comments[0].Body, "Division by zero") {
 		t.Fatalf("first review should post only the P2: %+v", first.Comments)
 	}
-	for _, want := range []string{"**Held for the next review:**", "at most 1 findings", "- `main.go:12` 🟡 [P3] MINOR (Defect): Result printed to stdout instead of logged", "<!-- prbot:review notes= held=P3 -->"} {
+	for _, want := range []string{"**Held for the next review:**", "at most 1 finding, most severe first", "- `main.go:12` 🟡 [P3] MINOR (Defect): Result printed to stdout instead of logged", "<!-- prbot:review notes= held=P3 -->"} {
 		if !strings.Contains(first.Body, want) {
 			t.Errorf("first review body missing %q:\n%s", want, first.Body)
 		}
@@ -782,5 +782,18 @@ func TestBatchPromptKeepsRoomForFound(t *testing.T) {
 	}
 	if !strings.Contains(out, "an earlier review's comment") || !strings.Contains(out, "more\n") {
 		t.Error("the earlier comments should fill the rest of the room, and say how many more there are")
+	}
+}
+
+// A search doesn't download a file the listing says is too large to search.
+func TestSearchSkipsLargeFilesByListedSize(t *testing.T) {
+	// The cached content would match: if it's read, the size wasn't used.
+	rt := cachedTools(map[string]string{"big.go": "caller()\n", "a.go": "package a\n"}, nil, false)
+	tr := rt.cache.trees["h"]
+	tr.sizes = map[string]int{"big.go": maxToolFileBytes + 1, "a.go": 10}
+	rt.cache.trees["h"] = tr
+	out := rt.search(context.Background(), "h", "caller", "")
+	if strings.Contains(out, "big.go:1") || !strings.Contains(out, "1 of the 2 files are too large to search") {
+		t.Errorf("search = %q; want big.go skipped by its listed size", out)
 	}
 }
