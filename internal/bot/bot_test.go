@@ -63,6 +63,7 @@ type fakeGitHub struct {
 	compareGone   bool              // a compare fails: its base commit is gone (a force-push)
 	mergeBase     string            // the merge base a compare names; "" = none
 	fileAt        map[string]string // "ref:path" -> that file's contents; others get content
+	fileReads     []string          // "ref:path" of each file read, guideline docs aside
 	failReview    bool              // posting a review fails (a 400)
 	onReview      func()            // runs once after recording a review, before responding
 }
@@ -238,6 +239,7 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 				_, _ = io.WriteString(w, doc)
 				return
 			}
+			f.fileReads = append(f.fileReads, r.URL.Query().Get("ref")+":"+name)
 			if s, ok := f.fileAt[r.URL.Query().Get("ref")+":"+name]; ok {
 				_, _ = io.WriteString(w, s)
 				return

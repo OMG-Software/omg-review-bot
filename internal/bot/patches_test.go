@@ -1,8 +1,12 @@
 package bot
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/OMG-Software/omg-review-bot/internal/github"
+	"github.com/OMG-Software/omg-review-bot/internal/settings"
 )
 
 // GitHub sends no patch for the files past the first megabyte or so of a
@@ -48,6 +52,60 @@ func TestRebuildsPatchesGitHubLeftOut(t *testing.T) {
 	body := e.gh.reviews[0].Body
 	if !strings.Contains(body, "logo.png (binary)") || strings.Contains(body, "late.go (") || strings.Contains(body, "fresh.go (") {
 		t.Errorf("files not reviewed should list only logo.png, as binary:\n%s", body)
+	}
+}
+
+// A file that can't be rebuilt (binary, or too large) doesn't take one of the
+// review's file slots: the next is rebuilt in its place. A file too large at
+// head is known from its first megabyte, and its old version isn't fetched.
+func TestFailedRebuildsLeaveRoom(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), func(cfg *settings.Settings) {
+		noApproval(cfg)
+		cfg.Review.MaxFiles = 2 // main.go, and one more
+	})
+	e.gh.mergeBase = "mmm333"
+	e.gh.extraFiles = []any{
+		map[string]any{"filename": "logo.png", "status": "modified"},
+		map[string]any{"filename": "huge.go", "status": "modified"},
+		map[string]any{"filename": "late.go", "status": "modified"},
+		map[string]any{"filename": "extra.go", "status": "modified"},
+	}
+	e.gh.fileAt = map[string]string{
+		"mmm333:logo.png": "\x89PNG\x00",
+		"aaa111:logo.png": "\x89PNG\x00\x01",
+		"aaa111:huge.go":  strings.Repeat("// padding line\n", 70000),
+		"mmm333:late.go":  "package late\n",
+		"aaa111:late.go":  "package late\n\nfunc Late() {}\n",
+		"mmm333:extra.go": "package extra\n",
+		"aaa111:extra.go": "package extra\n\nfunc Extra() {}\n",
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+
+	prompts := strings.Join(e.lm.prompts["code_review"], "\n")
+	if !strings.Contains(prompts, "+ func Late() {}") || strings.Contains(prompts, "Extra") {
+		t.Errorf("want late.go reviewed in the slot left, and extra.go not:\n%s", prompts)
+	}
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	body := e.gh.reviews[0].Body
+	for _, want := range []string{"logo.png (binary)", "huge.go (too large for a diff)", "extra.go (file limit reached)"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("files not reviewed lacks %q:\n%s", want, body)
+		}
+	}
+	if slices.Contains(e.gh.fileReads, "mmm333:huge.go") {
+		t.Errorf("fetched the old version of a file already too large at head: %v", e.gh.fileReads)
+	}
+}
+
+// A file whose only change is lines removed has no line to comment on; it
+// is listed as not reviewed rather than dropped without a word.
+func TestRemovalOnlyFileIsListed(t *testing.T) {
+	p := buildPlan(settings.Defaults(), []github.PRFile{{Filename: "gone.go", Status: "modified", Patch: "@@ -1,2 +0,0 @@\n-x\n-y"}}, 2000)
+	if len(p.batches) != 0 || len(p.skipped) != 1 || p.skipped[0] != "gone.go (only lines removed)" {
+		t.Fatalf("batches=%d skipped=%v; want gone.go listed as only lines removed", len(p.batches), p.skipped)
 	}
 }
 

@@ -29,8 +29,9 @@ const (
 
 // fillPatches gives each file in files that GitHub sent no patch for a patch
 // built from its contents, or, where that can't be done, a NoDiff saying why.
-// Deleted and ignored files are left alone, and no more files are rebuilt
-// than the review could take.
+// Deleted and ignored files are left alone. Files are rebuilt until there
+// are as many patches as the review could take; one that can't be (a binary
+// file, say) doesn't count, so the next is tried in its place.
 func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Settings, pr *store.PR, files []github.PRFile, base, head string) {
 	ignore := compileGlobs(st.Review.IgnorePatterns)
 	var todo []int
@@ -42,19 +43,18 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 			have++
 		default:
 			todo = append(todo, i)
+			needBase = needBase || f.Status != "added"
 		}
 	}
 	if len(todo) == 0 {
 		return
 	}
-	if room := max(st.Review.MaxFiles-have, 0); len(todo) > room {
-		for _, i := range todo[room:] {
+	room := max(st.Review.MaxFiles-have, 0)
+	if room == 0 {
+		for _, i := range todo {
 			files[i].NoDiff = "file limit reached"
 		}
-		todo = todo[:room]
-	}
-	for _, i := range todo {
-		needBase = needBase || files[i].Status != "added"
+		return
 	}
 	mergeBase := ""
 	if needBase {
@@ -65,6 +65,16 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 		mergeBase = mb
 	}
 
+	// Each file is handed out only while fewer patches than room have been
+	// rebuilt, so the workers in flight overshoot by at most a few files,
+	// which the review's own file limit then leaves out.
+	var mu sync.Mutex
+	rebuilt := 0
+	full := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return rebuilt >= room
+	}
 	work := make(chan int)
 	var wg sync.WaitGroup
 	for range min(rebuildWorkers, len(todo)) {
@@ -72,21 +82,23 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 			for i := range work {
 				f := &files[i]
 				f.Patch, f.Additions, f.Deletions, f.NoDiff = rebuildPatch(ctx, cl, pr.Repo, *f, mergeBase, head)
+				if f.Patch != "" {
+					mu.Lock()
+					rebuilt++
+					mu.Unlock()
+				}
 			}
 		})
 	}
 	for _, i := range todo {
+		if full() {
+			files[i].NoDiff = "file limit reached"
+			continue
+		}
 		work <- i
 	}
 	close(work)
 	wg.Wait()
-
-	rebuilt := 0
-	for _, i := range todo {
-		if files[i].Patch != "" {
-			rebuilt++
-		}
-	}
 	b.logf("info", pr.Repo, pr.Number, "GitHub sent no diff for %d file(s); rebuilt %d from their contents", len(todo), rebuilt)
 }
 
@@ -97,9 +109,23 @@ func rebuildPatch(ctx context.Context, cl *github.Client, repo string, f github.
 	if f.Status != "added" && mergeBase == "" {
 		return "", 0, 0, unread
 	}
-	newText, err := cl.FileContent(ctx, repo, f.Filename, head)
-	if err != nil {
-		return "", 0, 0, unread
+	// One byte past the limit is enough to tell a file is too large, and
+	// head is checked before the old version is fetched at all.
+	read := func(path, ref string) (text, noDiff string) {
+		text, err := cl.FileContentUpTo(ctx, repo, path, ref, maxRebuildBytes+1)
+		switch {
+		case err != nil:
+			return "", unread
+		case binary(text):
+			return "", "binary"
+		case len(text) > maxRebuildBytes:
+			return "", "too large for a diff"
+		}
+		return text, ""
+	}
+	newText, why := read(f.Filename, head)
+	if why != "" {
+		return "", 0, 0, why
 	}
 	oldText := ""
 	if f.Status != "added" {
@@ -107,15 +133,9 @@ func rebuildPatch(ctx context.Context, cl *github.Client, repo string, f github.
 		if f.PreviousFilename != "" {
 			name = f.PreviousFilename
 		}
-		if oldText, err = cl.FileContent(ctx, repo, name, mergeBase); err != nil {
-			return "", 0, 0, unread
+		if oldText, why = read(name, mergeBase); why != "" {
+			return "", 0, 0, why
 		}
-	}
-	switch {
-	case binary(newText) || binary(oldText):
-		return "", 0, 0, "binary"
-	case len(newText) > maxRebuildBytes || len(oldText) > maxRebuildBytes:
-		return "", 0, 0, "too large for a diff"
 	}
 	patch, added, removed = diff.Unified(oldText, newText, patchContext)
 	if patch == "" {

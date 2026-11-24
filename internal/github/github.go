@@ -273,7 +273,15 @@ func sameOrigin(base string, u *url.URL) bool {
 	return err == nil && b.Host != "" && strings.EqualFold(b.Scheme, u.Scheme) && strings.EqualFold(b.Host, u.Host)
 }
 
+// maxBody is the most of a response body send reads.
+const maxBody = 64 << 20
+
 func (a *App) send(ctx context.Context, method, urlOrPath, auth string, body any, hdr map[string]string) (*http.Response, []byte, error) {
+	return a.sendUpTo(ctx, method, urlOrPath, auth, body, hdr, maxBody)
+}
+
+// sendUpTo is send reading at most limit bytes of the response body.
+func (a *App) sendUpTo(ctx context.Context, method, urlOrPath, auth string, body any, hdr map[string]string, limit int64) (*http.Response, []byte, error) {
 	u := urlOrPath
 	if strings.HasPrefix(u, "/") {
 		u = a.base + u
@@ -312,7 +320,7 @@ func (a *App) send(ctx context.Context, method, urlOrPath, auth string, body any
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return resp, nil, err
 	}
@@ -762,6 +770,13 @@ func (c *Client) ResolveReviewThread(ctx context.Context, threadID string) error
 
 // FileContent returns a file's raw content at ref.
 func (c *Client) FileContent(ctx context.Context, fullName, filePath, ref string) (string, error) {
+	return c.FileContentUpTo(ctx, fullName, filePath, ref, maxBody)
+}
+
+// FileContentUpTo is FileContent reading at most limit bytes: a longer file
+// comes back cut short at limit, so asking for one byte more than wanted
+// tells a file that fits from one that doesn't, without downloading it all.
+func (c *Client) FileContentUpTo(ctx context.Context, fullName, filePath, ref string, limit int64) (string, error) {
 	tok, err := c.app.token(ctx, c.inst)
 	if err != nil {
 		return "", err
@@ -774,7 +789,7 @@ func (c *Client) FileContent(ctx context.Context, fullName, filePath, ref string
 		segs[i] = url.PathEscape(s)
 	}
 	p := "/repos/" + fullName + "/contents/" + strings.Join(segs, "/") + "?ref=" + url.QueryEscape(ref)
-	_, data, err := c.app.send(ctx, http.MethodGet, p, "token "+tok, nil, map[string]string{"Accept": "application/vnd.github.raw+json"})
+	_, data, err := c.app.sendUpTo(ctx, http.MethodGet, p, "token "+tok, nil, map[string]string{"Accept": "application/vnd.github.raw+json"}, limit)
 	if err != nil {
 		return "", err
 	}

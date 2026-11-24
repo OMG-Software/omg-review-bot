@@ -376,6 +376,8 @@ func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 		}
 		df := diff.Parse(f.Filename, f.Patch)
 		if df.Empty() {
+			// Only lines removed, with no line left beside them to comment on.
+			p.skipped = append(p.skipped, f.Filename+" (only lines removed)")
 			continue
 		}
 		p.files[f.Filename] = df
