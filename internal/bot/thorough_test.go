@@ -197,7 +197,7 @@ func TestHeldFindingsPostedNextReview(t *testing.T) {
 	if len(first.Comments) != 1 || !strings.Contains(first.Comments[0].Body, "Division by zero") {
 		t.Fatalf("first review should post only the P2: %+v", first.Comments)
 	}
-	for _, want := range []string{"**Held for the next review:**", "at most 1 findings", "<!-- prbot:review notes= held=P3 -->"} {
+	for _, want := range []string{"**Held for the next review:**", "at most 1 findings", "- `main.go:12` 🟡 [P3] MINOR (Defect): Result printed to stdout instead of logged", "<!-- prbot:review notes= held=P3 -->"} {
 		if !strings.Contains(first.Body, want) {
 			t.Errorf("first review body missing %q:\n%s", want, first.Body)
 		}
@@ -566,5 +566,27 @@ func TestNothingToReviewFollowsRename(t *testing.T) {
 	data, _, err := e.st.HeldFindings(500, "acme/web", 7)
 	if err != nil || !strings.Contains(data, `"path":"c.go"`) {
 		t.Fatalf("held = %q (err %v); want the finding kept under c.go", data, err)
+	}
+}
+
+// A held finding whose check failed keeps the commit its line is from, so
+// the next review compares from there instead of trusting the old line.
+func TestUncheckedHeldFindingKeepsItsCommit(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(divFinding), func(cfg *settings.Settings) {
+		cfg.Review.MaxComments = 1 // the new P2 is posted; the held P3 is held again
+		noApproval(cfg)
+	})
+	seedHeld(t, e, "zzz000", finding{Path: "main.go", Line: 40, Severity: "P3", Title: "Printed to stdout", Body: "Log it."})
+	e.lm.held = "not JSON" // the check fails
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	data, _, _ := e.st.HeldFindings(500, "acme/web", 7)
+	var held []finding
+	_ = json.Unmarshal([]byte(data), &held)
+	if len(held) != 1 || held[0].Line != 40 || held[0].Seen != "zzz000" {
+		t.Fatalf("held = %s; want the unchecked finding at line 40 as seen on zzz000", data)
 	}
 }

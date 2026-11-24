@@ -349,6 +349,9 @@ func severityCounts(fs []finding) string {
 	return strings.Join(parts, " · ")
 }
 
+// maxHeldListed is how many held findings a review body names.
+const maxHeldListed = 10
+
 func reviewBody(ri reviewInfo) string {
 	var sb strings.Builder
 	title := "Automated review"
@@ -371,8 +374,18 @@ func reviewBody(ri reviewInfo) string {
 		fmt.Fprintf(&sb, "**Findings:** %s\n\n", severityCounts(append(append([]finding{}, ri.inline...), ri.notes...)))
 	}
 	if len(ri.held) > 0 {
-		fmt.Fprintf(&sb, "**Held for the next review:** %s. This review posts at most %d findings, most severe first; the rest are posted with the next review, if they still apply.\n\n",
+		fmt.Fprintf(&sb, "**Held for the next review:** %s. This review posts at most %d findings, most severe first; the rest are posted with the next review, if they still apply:\n\n",
 			severityCounts(ri.held), ri.maxComments)
+		// Named, so what holds back approval can be fixed before then.
+		for i, f := range ri.held {
+			if i == maxHeldListed {
+				fmt.Fprintf(&sb, "- …and %d more\n", len(ri.held)-maxHeldListed)
+				break
+			}
+			s := settings.SeverityInfo(f.Severity)
+			fmt.Fprintf(&sb, "- `%s:%d` %s %s: %s\n", f.Path, f.Line, s.Icon, s.Label, f.Title)
+		}
+		sb.WriteString("\n")
 	}
 	if ri.fixed > 0 {
 		fmt.Fprintf(&sb, "✅ %d earlier finding(s) confirmed fixed and resolved.\n\n", ri.fixed)

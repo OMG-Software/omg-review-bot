@@ -20,9 +20,17 @@ import (
 // doesn't approve a PR with findings it hasn't shown yet.
 
 // saveHeld keeps a review's held findings for the next one (none clears them).
+// Each keeps the commit its line was last confirmed on; one found by this
+// review was found at head.
 func (b *Bot) saveHeld(pr *store.PR, head string, held []finding) error {
 	data := ""
 	if len(held) > 0 {
+		held = append([]finding(nil), held...)
+		for i := range held {
+			if held[i].Seen == "" {
+				held[i].Seen = head
+			}
+		}
 		j, err := json.Marshal(held)
 		if err != nil {
 			return err
@@ -76,17 +84,18 @@ Rules:
 // they can't be read, the review fails rather than go on without them.
 func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Client, cl *github.Client, rt *repoTools,
 	pr *store.PR, head string, files []github.PRFile, p plan, raw *strings.Builder) (kept []finding, usage llm.Response, err error) {
-	held, heldHead, err := b.loadHeld(pr)
+	held, _, err := b.loadHeld(pr)
 	if err != nil || len(held) == 0 {
 		return nil, usage, err
 	}
 	status := prFileStatus(files)
-	changed, moved := heldChanges(ctx, cl, pr.Repo, heldHead, head)
+	diffs := heldDiffs(ctx, cl, pr.Repo, head)
 
 	byPath := map[string][]finding{}
 	var paths []string
 	for _, f := range held {
 		old := f.Path
+		changed, moved := diffs(f.Seen)
 		f, inPR, keep := status.place(f, changed, moved)
 		if !inPR {
 			if keep { // unchecked, and posted as a note
@@ -95,6 +104,7 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 			continue
 		}
 		if changed != nil && !changed[f.Path] && !changed[old] {
+			f.Seen = head // the file hasn't changed since, so the line holds
 			kept = append(kept, f)
 			continue
 		}
@@ -152,8 +162,11 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 			if gone[i+1] {
 				continue
 			}
+			// Placed by the check: its line is now confirmed at head. One
+			// that's present but couldn't be placed keeps its old line,
+			// and the commit that line is from.
 			if l, ok := moved[i+1]; ok {
-				f.Line = l
+				f.Line, f.Seen = l, head
 			}
 			kept = append(kept, f)
 		}
@@ -180,6 +193,11 @@ func (b *Bot) loadHeld(pr *store.PR) ([]finding, string, error) {
 			return nil, "", fmt.Errorf("decode the findings held for this review: %w", err)
 		}
 	}
+	for i := range held {
+		if held[i].Seen == "" { // stored before findings kept their own
+			held[i].Seen = heldHead
+		}
+	}
 	return held, heldHead, nil
 }
 
@@ -204,6 +222,24 @@ func prFileStatus(files []github.PRFile) prFiles {
 func (s prFiles) inPR(path string) bool {
 	st, ok := s.status[path]
 	return ok && st != "removed"
+}
+
+// heldDiffs returns heldChanges from a commit to head, comparing each commit
+// once: held findings may have been confirmed on different commits.
+func heldDiffs(ctx context.Context, cl *github.Client, repo, head string) func(seen string) (map[string]bool, map[string]string) {
+	type diff struct {
+		changed map[string]bool
+		moved   map[string]string
+	}
+	memo := map[string]diff{}
+	return func(seen string) (map[string]bool, map[string]string) {
+		d, ok := memo[seen]
+		if !ok {
+			d.changed, d.moved = heldChanges(ctx, cl, repo, seen, head)
+			memo[seen] = d
+		}
+		return d.changed, d.moved
+	}
 }
 
 // heldChanges compares the commit findings were held on with head: the files
@@ -257,11 +293,12 @@ func (b *Bot) pruneHeld(ctx context.Context, cl *github.Client, pr *store.PR, he
 		return 0, err
 	}
 	status := prFileStatus(files)
-	changed, moved := heldChanges(ctx, cl, pr.Repo, heldHead, head)
+	diffs := heldDiffs(ctx, cl, pr.Repo, head)
 	var left []finding
 	same := true
 	for _, f := range held {
 		old := f.Path
+		changed, moved := diffs(f.Seen)
 		f, _, keep := status.place(f, changed, moved)
 		if keep {
 			left = append(left, f)

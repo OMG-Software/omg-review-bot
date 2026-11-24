@@ -30,6 +30,9 @@ type finding struct {
 	Severity string `json:"severity"`
 	Title    string `json:"title"`
 	Body     string `json:"body"`
+	// Seen is the commit Line was last confirmed on, for a held finding
+	// (stored with it). Never taken from a model's answer.
+	Seen string `json:"seen,omitempty"`
 }
 
 type modelOutput struct {
@@ -872,6 +875,7 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 			}
 			fresh := 0
 			for _, f := range out.Comments {
+				f.Seen = "" // set when it's held, not by the model
 				f, ok := normFinding(p, f)
 				if !ok || isDuplicate(f, in.mine) {
 					continue
