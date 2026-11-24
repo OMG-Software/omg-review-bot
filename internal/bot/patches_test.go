@@ -21,8 +21,11 @@ func TestRebuildsPatchesGitHubLeftOut(t *testing.T) {
 		map[string]any{"filename": "late.go", "status": "modified"},
 		map[string]any{"filename": "fresh.go", "status": "added"},
 		map[string]any{"filename": "logo.png", "status": "modified"},
+		map[string]any{"filename": "moved.go", "status": "renamed", "previous_filename": "old.go"},
 	}
 	e.gh.fileAt = map[string]string{
+		"mmm333:old.go":   "package moved\n",
+		"aaa111:moved.go": "package moved\n\nfunc Moved() {}\n",
 		"mmm333:late.go":  "package late\n\nfunc A() {}\n",
 		"aaa111:late.go":  "package late\n\nfunc A() {}\n\nfunc Late() { panic(1) }\n",
 		"aaa111:fresh.go": "package fresh\n",
@@ -38,6 +41,9 @@ func TestRebuildsPatchesGitHubLeftOut(t *testing.T) {
 		"     5 + func Late() { panic(1) }",
 		"### File: fresh.go (added, +1 -0)",
 		"     1 + package fresh",
+		// A renamed file is diffed against its old name at the merge base.
+		"### File: moved.go (renamed from old.go, +2 -0)",
+		"     3 + func Moved() {}",
 	} {
 		if !strings.Contains(prompts, want) {
 			t.Errorf("review prompt lacks %q:\n%s", want, prompts)
@@ -45,6 +51,9 @@ func TestRebuildsPatchesGitHubLeftOut(t *testing.T) {
 	}
 	if strings.Contains(prompts, "logo.png") {
 		t.Errorf("a binary file was sent for review:\n%s", prompts)
+	}
+	if slices.Contains(e.gh.fileReads, "mmm333:moved.go") {
+		t.Errorf("read a renamed file under its new name at the merge base: %v", e.gh.fileReads)
 	}
 	if len(e.gh.reviews) != 1 {
 		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
@@ -100,6 +109,41 @@ func TestFailedRebuildsLeaveRoom(t *testing.T) {
 	}
 }
 
+// With no file slot left, the files GitHub sent no diff for are listed at
+// the limit without being fetched.
+func TestNoRoomFetchesNothing(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), func(cfg *settings.Settings) {
+		noApproval(cfg)
+		cfg.Review.MaxFiles = 1 // main.go takes it
+	})
+	e.gh.mergeBase = "mmm333"
+	e.gh.extraFiles = []any{map[string]any{"filename": "late.go", "status": "modified"}}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	for _, r := range e.gh.fileReads {
+		if strings.HasSuffix(r, ":late.go") {
+			t.Errorf("fetched late.go with no room to review it: %v", e.gh.fileReads)
+		}
+	}
+	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.reviews[0].Body, "late.go (file limit reached)") {
+		t.Errorf("late.go should be listed at the file limit: %+v", e.gh.reviews)
+	}
+}
+
+// A mention reply chooses skill references by every changed file, so the
+// files past GitHub's cut, which come with no patch, still count.
+func TestMentionPathsIncludePatchlessFiles(t *testing.T) {
+	got := mentionPaths(settings.Defaults(), []github.PRFile{
+		{Filename: "a.go", Status: "modified", Patch: "@@ -1 +1 @@\n-x\n+y"},
+		{Filename: "late.rs", Status: "modified"}, // past the cut
+		{Filename: "gone.py", Status: "removed"},
+		{Filename: "go.sum", Status: "modified", Patch: "@@ -1 +1 @@\n-x\n+y"}, // ignored
+	})
+	if !slices.Equal(got, []string{"a.go", "late.rs"}) {
+		t.Fatalf("mentionPaths = %v; want [a.go late.rs]", got)
+	}
+}
+
 // A file whose only change is lines removed has no line to comment on; it
 // is listed as not reviewed rather than dropped without a word.
 func TestRemovalOnlyFileIsListed(t *testing.T) {
@@ -125,7 +169,7 @@ func TestRebuildsAddedFilesWithoutMergeBase(t *testing.T) {
 	if !strings.Contains(prompts, "     1 + package fresh") || strings.Contains(prompts, "late.go") {
 		t.Errorf("want fresh.go reviewed and late.go not:\n%s", prompts)
 	}
-	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.reviews[0].Body, "late.go (GitHub sent no diff, and its contents couldn't be read)") {
-		t.Errorf("late.go should be listed as unread: %+v", e.gh.reviews)
+	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.reviews[0].Body, "late.go (GitHub sent no diff, and the commit it branched from couldn't be found)") {
+		t.Errorf("late.go should be listed as missing its merge base: %+v", e.gh.reviews)
 	}
 }

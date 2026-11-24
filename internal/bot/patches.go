@@ -107,7 +107,7 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 func rebuildPatch(ctx context.Context, cl *github.Client, repo string, f github.PRFile, mergeBase, head string) (patch string, added, removed int, noDiff string) {
 	const unread = "GitHub sent no diff, and its contents couldn't be read"
 	if f.Status != "added" && mergeBase == "" {
-		return "", 0, 0, unread
+		return "", 0, 0, "GitHub sent no diff, and the commit it branched from couldn't be found"
 	}
 	// One byte past the limit is enough to tell a file is too large, and
 	// head is checked before the old version is fetched at all.
@@ -116,7 +116,7 @@ func rebuildPatch(ctx context.Context, cl *github.Client, repo string, f github.
 		switch {
 		case err != nil:
 			return "", unread
-		case binary(text):
+		case gitBinary(text):
 			return "", "binary"
 		case len(text) > maxRebuildBytes:
 			return "", "too large for a diff"
@@ -144,8 +144,10 @@ func rebuildPatch(ctx context.Context, cl *github.Client, repo string, f github.
 	return patch, added, removed, ""
 }
 
-// binary reports whether text looks like a binary file: a NUL byte near its
-// start, as git decides.
-func binary(text string) bool {
+// gitBinary reports whether text looks like a binary file as git decides:
+// a NUL byte in its first 8000 bytes. Unlike isBinary (a NUL anywhere, for
+// the size-capped files the model reads through its tools), it allows a
+// NUL further in, as git's own diff of the file would.
+func gitBinary(text string) bool {
 	return strings.IndexByte(text[:min(len(text), 8000)], 0) >= 0
 }
