@@ -76,12 +76,16 @@ func prHeader(gp *github.PullRequest) string {
 // previous are the bot's comments from earlier reviews; found are this
 // review's findings so far (earlier passes, and findings held from the last
 // review). Both lists together take at most listRoom characters, up to
-// half of it kept for found.
-func batchPrompt(header string, i, n int, bt batch, previous, found []string, pass, listRoom int) string {
+// half of it kept for found. A re-review's scope says which lines it may
+// raise findings on (nil: all of them).
+func batchPrompt(header string, i, n int, bt batch, previous, found []string, pass, listRoom int, scope *reviewScope) string {
 	var sb strings.Builder
 	sb.WriteString(header)
 	if n > 1 {
 		fmt.Fprintf(&sb, "\nThe diff is large, so it is split into %d parts. This is part %d of %d; review only the files in this part.\n", n, i+1, n)
+	}
+	if s := scope.describe(bt); s != "" {
+		fmt.Fprintf(&sb, "\nThis is a re-review after new commits. The rest of the pull request was reviewed before, at commit %s. Report only problems in the code changed since then, listed below, including problems those changes cause elsewhere; put each finding on one of these lines, or within %d lines of one. Findings anywhere else are discarded.\n%s", short(scope.since), scopeSlack, s)
 	}
 	if pass > 1 {
 		fmt.Fprintf(&sb, "\nThis is pass %d over the same code. Earlier passes found the issues listed below. Look again, carefully, for real issues they missed: other files and functions, and other angles (error handling, edge cases, concurrency, security, resource use, compatibility, tests). Report only issues not already listed. If there are none, return an empty \"comments\" array.\n", pass)
@@ -146,7 +150,7 @@ func previousFor(mine []github.ReviewComment, paths []string) []string {
 
 // reviewNotice is the PR comment posted when a review begins: which commit,
 // when (UTC), and the model and skill doing it. It's edited to say so if the
-// review fails, and a retry of the same commit reuses it.
+// review fails, and every later review of the PR reuses it.
 type reviewNotice struct {
 	head, model, skill string
 	started            time.Time
@@ -204,13 +208,18 @@ func (n reviewNotice) body(title, note string) string {
 		note, noticeMarker(n.head))
 }
 
-func noticeMarker(head string) string { return "<!-- prbot:review-started sha=" + head + " -->" }
+// noticeMarkerPrefix starts every review notice's marker, whatever its commit.
+const noticeMarkerPrefix = "<!-- prbot:review-started sha="
 
-// findNotice returns the bot's latest review notice for a commit (0 if none).
-func findNotice(comments []github.IssueComment, botLogin, head string) int64 {
+func noticeMarker(head string) string { return noticeMarkerPrefix + head + " -->" }
+
+// findNotice returns the bot's latest review notice on the PR, for any
+// commit (0 if none). Each review edits that one comment rather than posting
+// its own, so the conversation doesn't fill up with them.
+func findNotice(comments []github.IssueComment, botLogin string) int64 {
 	var id int64
 	for _, c := range comments {
-		if strings.EqualFold(c.User.Login, botLogin) && strings.Contains(c.Body, noticeMarker(head)) {
+		if strings.EqualFold(c.User.Login, botLogin) && strings.Contains(c.Body, noticeMarkerPrefix) {
 			id = c.ID
 		}
 	}
@@ -291,6 +300,7 @@ type reviewInfo struct {
 	dropped       int
 	model, skill  string
 	rereview      bool
+	since         string    // a scoped re-review's last reviewed commit: new findings are on the changes since
 	fixed         int       // earlier findings confirmed fixed and resolved during this review
 	verdict       string    // approval or change-request line; "" when there's nothing to say
 	round         int       // this review's number on the PR; 0 when it couldn't be counted
@@ -371,6 +381,9 @@ func reviewBody(ri reviewInfo) string {
 	fmt.Fprintf(&sb, "### 🤖 %s of `%s`\n\n", title, short(ri.head))
 	if l := roundLine(ri.round, ri.maxRounds); l != "" {
 		fmt.Fprintf(&sb, "_%s_\n\n", l)
+	}
+	if ri.since != "" {
+		fmt.Fprintf(&sb, "_New findings are only on code changed since the last review (`%s`); the rest was reviewed then._\n\n", short(ri.since))
 	}
 	fmt.Fprintf(&sb, "%s\n\n", strings.TrimSpace(ri.summary))
 

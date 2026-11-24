@@ -780,7 +780,7 @@ func TestBatchPromptKeepsRoomForFound(t *testing.T) {
 		previous = append(previous, fmt.Sprintf("main.go:%d: an earlier review's comment about this line", i))
 	}
 	found := []string{"main.go:11: Division by zero panics", "main.go:12: Result printed to stdout"}
-	out := batchPrompt("PR\n", 0, 1, batch{text: "diff\n"}, previous, found, 2, 2000)
+	out := batchPrompt("PR\n", 0, 1, batch{text: "diff\n"}, previous, found, 2, 2000, nil)
 	for _, f := range found {
 		if !strings.Contains(out, f) {
 			t.Errorf("prompt lacks this review's finding %q", f)

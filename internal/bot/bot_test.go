@@ -1418,7 +1418,8 @@ func TestReusedRepoName(t *testing.T) {
 
 // TestReviewNotice: the notice names the commit, time, model and skill; a
 // failed review says so (with no error details, which can name internal
-// hosts); and a retry finds the bot's own notice for the same commit.
+// hosts); and a later review finds the bot's own latest notice, whatever
+// its commit, to edit it.
 func TestReviewNotice(t *testing.T) {
 	n := reviewNotice{head: "abc1234567", model: "m`x", skill: "", started: time.Date(2026, 11, 20, 14, 3, 5, 0, time.UTC)}
 	started := n.startedBody()
@@ -1444,22 +1445,23 @@ func TestReviewNotice(t *testing.T) {
 	}
 
 	bot := github.User{Login: botLogin}
+	if id := findNotice([]github.IssueComment{{ID: 4, User: bot, Body: "unrelated"}}, botLogin); id != 0 {
+		t.Errorf("findNotice with no notice = %d, want 0", id)
+	}
 	cs := []github.IssueComment{
 		{ID: 1, User: bot, Body: noticeMarker("other")},
 		{ID: 2, User: github.User{Login: "mallory"}, Body: noticeMarker(n.head)}, // not the bot's
 		{ID: 3, User: bot, Body: started},
 		{ID: 4, User: bot, Body: "unrelated"},
 	}
-	if id := findNotice(cs, botLogin, n.head); id != 3 {
+	if id := findNotice(cs, botLogin); id != 3 {
 		t.Errorf("findNotice = %d, want 3", id)
 	}
-	// A notice edited after a failure is found too, so a retry reuses it.
-	cs = append(cs, github.IssueComment{ID: 5, User: bot, Body: n.failedBody(true)})
-	if id := findNotice(cs, botLogin, n.head); id != 5 {
-		t.Errorf("findNotice after a failure = %d, want 5", id)
-	}
-	if id := findNotice(cs, botLogin, "nothing"); id != 0 {
-		t.Errorf("findNotice for an unknown commit = %d, want 0", id)
+	// The latest notice is found whatever its commit, so a later review
+	// edits it rather than posting another.
+	cs = append(cs, github.IssueComment{ID: 5, User: bot, Body: n.failedBody(true)}, github.IssueComment{ID: 6, User: bot, Body: noticeMarker("later")})
+	if id := findNotice(cs, botLogin); id != 6 {
+		t.Errorf("findNotice after a later commit's notice = %d, want 6", id)
 	}
 }
 
@@ -1664,8 +1666,9 @@ func TestPausedOrgNotReviewedOrRepliedIn(t *testing.T) {
 }
 
 // TestInterruptedReviewReusesNotice: a review cut short by a restart starts
-// again with no failed attempts on record; it reuses the commit's notice
-// rather than posting a second one and leaving the first "under way".
+// again with no failed attempts on record; it reuses the PR's notice rather
+// than posting a second one and leaving the first "under way". A later
+// commit's review reuses it too.
 func TestInterruptedReviewReusesNotice(t *testing.T) {
 	gh := newFakeGitHub()
 	ghSrv := httptest.NewServer(gh.handler(t))
@@ -1714,12 +1717,14 @@ func TestInterruptedReviewReusesNotice(t *testing.T) {
 	if len(gh.posted) != 1 {
 		t.Errorf("%d notices posted when the first couldn't be edited; want it kept, not a second", len(gh.posted))
 	}
-	// A new commit gets a notice of its own.
+	// A new commit's review edits the same notice: one per PR, not one per
+	// review.
 	gh.mu.Unlock()
 	other := b.announceReview(ctx, cl, pr, reviewNotice{head: "bbb222", model: "m", skill: "s", started: time.Now()})
 	gh.mu.Lock()
-	if other == first || len(gh.posted) != 2 {
-		t.Errorf("notice for a new commit = %d, %d posted; want a new one", other, len(gh.posted))
+	if other != first || len(gh.posted) != 1 || !strings.Contains(gh.edited[first], noticeMarker("bbb222")) {
+		t.Errorf("notice for a new commit = %d (first %d), %d posted, now %q; want the first edited to name the new commit",
+			other, first, len(gh.posted), gh.edited[first])
 	}
 }
 

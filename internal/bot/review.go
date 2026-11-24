@@ -67,6 +67,9 @@ var reviewSchema = map[string]any{
 }
 
 func (b *Bot) handleReview(ctx context.Context, j job) {
+	// However the job ends (reviewed, failed, or stopped by a limit), thread
+	// replies that waited for it are let go, unless a review is still due.
+	defer b.releaseReplies(j)
 	// Before prMu: the queued comment may still be being posted.
 	qn := b.takeQueued(ctx, j)
 	b.prMu.Lock()
@@ -247,14 +250,15 @@ func (b *Bot) requeueForced(j job, wait time.Duration) {
 
 // announceReview posts the review-started notice (see announceNotice).
 func (b *Bot) announceReview(ctx context.Context, cl *github.Client, pr *store.PR, n reviewNotice) int64 {
-	return b.announceNotice(ctx, cl, pr, n.head, n.startedBody())
+	return b.announceNotice(ctx, cl, pr, n.startedBody())
 }
 
-// announceNotice posts a review notice for commit head, or, when that commit
-// already has one, edits it to body, so retries and reviews cut short by a
-// restart don't pile up comments (or leave one saying a review is queued or
-// under way). It returns the comment's ID (0 if it couldn't be posted).
-func (b *Bot) announceNotice(ctx context.Context, cl *github.Client, pr *store.PR, head, body string) int64 {
+// announceNotice posts the PR's review notice, or, when it already has one
+// (from an earlier commit's review, a retry, or a review cut short by a
+// restart), edits that one to body. One comment per PR, kept current, rather
+// than one per review piling up, or one left saying a review is queued or
+// under way. It returns the comment's ID (0 if it couldn't be posted).
+func (b *Bot) announceNotice(ctx context.Context, cl *github.Client, pr *store.PR, body string) int64 {
 	cs, err := cl.IssueComments(ctx, pr.Repo, pr.Number)
 	if err != nil {
 		// This commit may have a notice already (from before a restart), and
@@ -263,9 +267,9 @@ func (b *Bot) announceNotice(ctx context.Context, cl *github.Client, pr *store.P
 		b.logf("warn", pr.Repo, pr.Number, "could not check for an earlier review notice, so none is posted: %v", err)
 		return 0
 	}
-	if id := findNotice(cs, b.BotLogin(), head); id != 0 {
-		// Even if it can't be edited now, it's this commit's notice: a
-		// second one would leave this one behind, never updated again.
+	if id := findNotice(cs, b.BotLogin()); id != 0 {
+		// Even if it can't be edited now, it's the PR's notice: a second
+		// one would leave this one behind, never updated again.
 		// The edit when the review ends tries again.
 		if err := cl.UpdateIssueComment(ctx, pr.Repo, id, body); err != nil {
 			b.logf("warn", pr.Repo, pr.Number, "could not update the review notice: %v", err)
@@ -330,7 +334,8 @@ func (b *Bot) updateNotice(cl *github.Client, pr *store.PR, id int64, body strin
 type batch struct {
 	text  string
 	paths []string
-	files string // full contents of the part's changed files, where they fit
+	files string            // full contents of the part's changed files, where they fit
+	spans map[string][]span // the new-file lines of each file's hunks the part shows
 }
 
 type plan struct {
@@ -345,7 +350,10 @@ type plan struct {
 func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 	p := plan{files: map[string]*diff.File{}}
 	ignore := compileGlobs(st.Review.IgnorePatterns)
-	type unit struct{ path, text string }
+	type unit struct {
+		path, text string
+		spans      []span
+	}
 	var units []unit
 	for _, f := range files {
 		switch {
@@ -373,20 +381,24 @@ func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 			header = fmt.Sprintf("### File: %s (renamed from %s, +%d -%d)\n", f.Filename, f.PreviousFilename, f.Additions, f.Deletions)
 		}
 		cur, has := header, false
+		var spans []span
 		for i := range df.Hunks {
 			ht := df.Hunks[i].Render()
 			if len(header)+len(ht) > budget {
 				ht = textutil.Truncate(ht, budget-len(header)-64) + "\n(hunk truncated)\n"
 			}
 			if has && len(cur)+len(ht) > budget {
-				units = append(units, unit{f.Filename, cur})
-				cur, has = header+"(continued)\n", false
+				units = append(units, unit{f.Filename, cur, spans})
+				cur, has, spans = header+"(continued)\n", false, nil
 			}
 			cur += ht
 			has = true
+			if sp, ok := hunkSpan(df.Hunks[i]); ok {
+				spans = append(spans, sp)
+			}
 		}
 		if has {
-			units = append(units, unit{f.Filename, cur})
+			units = append(units, unit{f.Filename, cur, spans})
 		}
 	}
 	var cur batch
@@ -399,6 +411,10 @@ func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 		if len(cur.paths) == 0 || cur.paths[len(cur.paths)-1] != u.path {
 			cur.paths = append(cur.paths, u.path)
 		}
+		if cur.spans == nil {
+			cur.spans = map[string][]span{}
+		}
+		cur.spans[u.path] = append(cur.spans[u.path], u.spans...)
 	}
 	if cur.text != "" {
 		p.batches = append(p.batches, cur)
@@ -576,6 +592,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	login := b.BotLogin()
 	mine := botRoots(existing, login)
 	threads, threadsKnown := b.loadBotThreads(ctx, cl, pr, mine)
+	noteReplies(threads, existing, login)
 
 	// Context budget: the skill gets up to 35% of the input window and the
 	// diff gets what's left after the system prompt and PR header.
@@ -678,6 +695,17 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		return gp, nil
 	}
 
+	// An automatic re-review raises new findings only on what changed since
+	// the bot's last review; the rest was reviewed then. A review asked for
+	// by hand, or one after a review that was never posted (a baseline, say),
+	// looks at everything.
+	var scope *reviewScope
+	if !force && pr.ReviewedSHA != "" && pr.ReviewedSHA != head {
+		if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err == nil && n > 0 {
+			scope = b.changedSince(ctx, cl, pr, pr.ReviewedSHA, head)
+		}
+	}
+
 	// Findings an earlier review held back go first, where they still apply.
 	carried, hu, err := b.recheckHeld(ctx, st, aux, cl, rt, pr, head, files, &raw)
 	rec.PromptTokens += hu.PromptTokens
@@ -699,7 +727,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		go func() {
 			defer wg.Done()
 			passes[k] = b.reviewPass(ctx, st, pr, lc, len(lcs) > 1, p, reviewInputs{rt: rt.fork(), system: system, header: header,
-				mine: mine, seed: carried, listRoom: listRoom, toolRoom: toolRoom})
+				mine: mine, seed: carried, scope: scope, listRoom: listRoom, toolRoom: toolRoom})
 		}()
 	}
 	wg.Wait()
@@ -735,10 +763,12 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	round, limit := commentLimit(st, posted, err)
 	inline, notes, held, dropped := prepareFindings(st, p, append(carried, collateFindings(p, lists)...), mine, limit)
 	var summary string
-	switch len(summaries) {
-	case 0:
+	switch {
+	case len(summaries) == 0 && !scope.touchesPlan(p):
+		summary = fmt.Sprintf("None of the code reviewed here changed since the last review (`%s`), so there was nothing new to look at.", short(scope.since))
+	case len(summaries) == 0:
 		summary = "_The model did not produce a summary._"
-	case 1:
+	case len(summaries) == 1:
 		summary = summaries[0]
 	default:
 		summary = b.synthesizeSummary(ctx, aux, st, gp, summaries, append(append([]finding{}, inline...), notes...))
@@ -757,6 +787,9 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	ri := reviewInfo{summary: summary, head: head, inline: inline, notes: notes, held: held, plan: p, dropped: dropped,
 		model: rec.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed,
 		round: round, maxRounds: st.Review.MaxRounds, maxComments: limit}
+	if scope != nil {
+		ri.since = scope.since
+	}
 	post := func(ri reviewInfo, event string) (*github.Review, []github.DraftComment, error) {
 		ri.verdict = verdictLine(st, event, blocking, requesting)
 		drafts := make([]github.DraftComment, 0, len(ri.inline))
@@ -838,8 +871,24 @@ type reviewInputs struct {
 	header   string
 	mine     []github.ReviewComment // the bot's findings from earlier reviews
 	seed     []finding              // found already: held from the last review
+	scope    *reviewScope           // a re-review's: the changes since the last review (nil: everything)
 	listRoom int                    // characters for the lists of findings so far
 	toolRoom int                    // characters for tool results
+}
+
+// passRank is the lowest level (as a rank) whose new findings send a part
+// through another pass: the approval level, or the request-changes level when
+// the bot doesn't approve, or else the comment level, and never past the
+// comment level. Less severe findings are still posted, but don't make the
+// review look again: there are always more of them to find.
+func passRank(st settings.Settings) int {
+	comment := settings.SeverityRank(st.Review.CommentLevel)
+	for _, level := range []string{st.Review.ApprovalLevel, st.Review.RequestChangesLevel} {
+		if r := settings.SeverityRank(level); r > 0 {
+			return min(r, comment)
+		}
+	}
+	return comment
 }
 
 // reviewPass is one model's review of the whole diff, batch by batch.
@@ -854,16 +903,29 @@ type reviewPass struct {
 
 // reviewPass runs the plan's batches through lc. Each part is reviewed again
 // and again, told what's been found so far, until a pass finds nothing new
-// worth posting: one review should find everything there is, not leave it
-// for the next push. many: other models review the same diff alongside, so
+// that would hold back approval (see passRank): one review should find
+// everything that matters, not leave it for the next push. A re-review
+// (in.scope set) only looks at the parts with code changed since the last
+// review, and keeps only findings on those changes. many: other models
+// review the same diff alongside, so
 // the output names the model.
 func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR, lc modelClient, many bool,
 	p plan, in reviewInputs) (ps reviewPass) {
 	var raw strings.Builder
 	defer func() { ps.label, ps.raw = lc.Label(), raw.String() }()
 	all := append([]finding(nil), in.seed...)
-	maxRank := settings.SeverityRank(st.Review.CommentLevel)
+	maxRank := passRank(st)
+	outside := 0 // findings on code that didn't change since the last review
+	defer func() {
+		if outside > 0 {
+			fmt.Fprintf(&raw, "%d finding(s) left out: not on code changed since %s\n\n", outside, short(in.scope.since))
+		}
+	}()
 	for i, bt := range p.batches {
+		if !in.scope.touches(bt) {
+			fmt.Fprintf(&raw, "===== part %d/%d: unchanged since %s, so not reviewed again =====\n\n", i+1, len(p.batches), short(in.scope.since))
+			continue
+		}
 		inPart := map[string]bool{}
 		for _, path := range bt.paths {
 			inPart[path] = true
@@ -882,7 +944,7 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 					found = append(found, findingLine(f))
 				}
 			}
-			user := batchPrompt(in.header, i, len(p.batches), bt, previousFor(in.mine, bt.paths), found, pass, in.listRoom)
+			user := batchPrompt(in.header, i, len(p.batches), bt, previousFor(in.mine, bt.paths), found, pass, in.listRoom, in.scope)
 			var out modelOutput
 			usage, rawOut, err := b.chatTools(ctx, lc, st, in.rt, reviewSchema, "code_review", in.system, user, in.toolRoom, &out)
 			fmt.Fprintf(&raw, "===== %s =====\n%s\n\n", label, rawOut)
@@ -905,6 +967,10 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 				f.Seen, f.SeenPath = "", "" // set when it's held, not by the model
 				f, ok := normFinding(p, f)
 				if !ok || isDuplicate(f, in.mine) {
+					continue
+				}
+				if !in.scope.covers(f) {
+					outside++
 					continue
 				}
 				if k := sameIndex(f, all); k >= 0 {

@@ -13,7 +13,8 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
   activity. Org owners manage their members and can give the org its own review settings. An
   administrator sees everything.
 - **Reviews every push.** New PRs are reviewed, and each new commit triggers a re-review after
-  a short wait. It doesn't repeat issues it has already raised.
+  a short wait. A re-review raises new findings only on the code changed since the last review,
+  and doesn't repeat issues it has already raised.
 - **Inline comments, graded P1–P5.** Each finding is posted on the exact changed line, labelled
   `[P1] CRITICAL`, `[P2] MAJOR`, `[P3] MINOR (Defect)`, `[P4] MINOR (Quality)` or `[P5] NIT`,
   with a summary on top. You choose the lowest level that gets posted.
@@ -487,8 +488,8 @@ event checks it for replies, so polling only catches anything missed.
    review has started, with the commit, the start time (UTC), the model and the review skill.
    A PR with nothing reviewable gets no such comment. When the review is posted, the comment is
    edited to say so, with a link to it. If the review fails, the comment is edited to say that
-   instead (without the error, which is on the PR's page in the bot), and a retry of the same
-   commit reuses it.
+   instead (without the error, which is on the PR's page in the bot). It's one comment per PR:
+   retries and the reviews of later pushes edit it rather than posting another.
 3. Each part gets the diff and, where they fit beside it, the **full contents of its changed
    files** at the head commit. The model also gets **read-only tools** over the repository at the
    head (or base) commit: `read_file`, `search_code` (a grep) and `list_files`. It uses them for
@@ -505,8 +506,14 @@ event checks it for replies, so polling only catches anything missed.
    to give the diff that room. The prompt tells the model to ignore any limit in the skill on how
    many findings to report.
 4. The model returns JSON findings. The bot then asks again about the **same code**, listing
-   what's been found so far, until a pass finds nothing new worth posting (at most 5 passes per
-   part), so one review finds what there is rather than leaving it for later pushes. The bot
+   what's been found so far, until a pass finds nothing new at the *approval level* or above
+   (at most 5 passes per part), so one review finds what matters rather than leaving it for later
+   pushes. With approvals off, the *request-changes level* decides, and with both off, the
+   *comment level*. Less severe findings from any pass are still posted. On an automatic
+   re-review, the model is told which lines changed since the bot's last posted review, and only
+   findings on those lines (or within 3 lines of them) are kept: the rest of the PR was reviewed
+   then. Parts with no such changes aren't sent to the model again. A review asked for with
+   **Review now**, or the first one the bot posts on a PR, covers everything. The bot
    checks each finding's file and line against the diff, moving it to the nearest changed line
    up to 3 lines away if needed. It drops findings the bot already raised in an earlier review,
    and findings below the *comment level*. Past the comment cap, the least severe findings are
@@ -518,8 +525,10 @@ event checks it for replies, so polling only catches anything missed.
 5. On a re-review, it first checks its unresolved findings on files that changed since the last
    review. For each file it gives the model the current file and the earlier findings, and asks
    which are fixed. For each confirmed fix it **replies in the thread** ("✅ Confirmed fixed in
-   `abc1234`…") **and then resolves the thread**. A finding whose file the PR no longer changes is
-   closed the same way. Anything the model isn't sure about stays open.
+   `abc1234`…") **and then resolves the thread**. When someone has already answered the finding
+   since the bot last spoke in its thread ("Fixed in abc1234"), the thread is resolved without
+   the reply: their answer says why. A finding whose file the PR no longer changes is closed the
+   same way. Anything the model isn't sure about stays open.
 6. It posts **one** GitHub review: inline comments plus a summary. Findings that can't be placed
    on a changed line go in the summary. If GitHub rejects an inline position, the review is
    reposted with every finding in the summary, so nothing is lost.
@@ -581,7 +590,9 @@ thread. It's given the diff hunk, the current code around the line (±30 lines) 
 thread (for an outdated comment, ±60 lines). It can agree that an issue is resolved, defend its
 comment, or answer the question. When it agrees the concern no longer applies, because the code
 now fixes it or the person showed it isn't a real problem, it says so in its reply and then
-resolves the thread.
+resolves the thread. A reply posted while a new push waits for its review ("Fixed in
+abc1234") is answered after that review: if the review's fix check confirms the fix, the thread
+is resolved with no answer, and otherwise the reply is answered against the new code.
 When someone writes `@<app-name>` in the PR conversation, the bot answers there, using the
 changed-file list, its latest review summary and the recent comments.
 
