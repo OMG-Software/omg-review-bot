@@ -873,6 +873,9 @@ Notes:
 
 ## Security
 
+To report a vulnerability, see [SECURITY.md](SECURITY.md). Please report it privately, not in
+a public issue.
+
 - The UI listens on `127.0.0.1` only by default. Until an admin password is set, anyone who can
   open the UI can set one, so set it right away if you change `-listen`.
 - The GitHub App private key and model API key are stored unencrypted in `data/prbot.db`. Keep
