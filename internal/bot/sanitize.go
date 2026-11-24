@@ -80,15 +80,51 @@ var (
 
 // sanitizeModelText makes model-written markdown safe to post (see above).
 // Sanitizing twice changes nothing (a finding is sanitized as it's found, as
-// it's posted, and if held, each review): the breaks are taken out first and
-// the text is cut to its cap without them, so it's the same text each time.
+// it's posted, and if held, each review). Outside code, the breaks are taken
+// out first, so they're added the same way each time; inside it, what's added
+// is left alone by a second pass anyway, and the code is kept as written (a
+// suggestion is applied as it's posted). And the text is cut so that all of
+// it, with the breaks taken out and any fence it closes, is within the cap,
+// so a second pass doesn't cut it again.
 func sanitizeModelText(s string) string {
-	s = strings.ReplaceAll(s, zwsp, "")
 	// Every line ending CommonMark knows, so these lines are GitHub's lines:
 	// a lone "\r" ends one too.
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
-	lines := strings.Split(textutil.Truncate(strings.TrimSpace(s), maxModelBody), "\n")
+	s = stripBreaks(strings.TrimSpace(s))
+	for cut := maxModelBody; ; {
+		out := sanitizeLines(strings.Split(textutil.Truncate(s, cut), "\n"))
+		over := len(stripBreaks(out)) - maxModelBody
+		if over <= 0 || cut <= over {
+			return out
+		}
+		cut -= over
+	}
+}
 
+// stripBreaks takes the zero-width breaks out of text outside code blocks,
+// finding the blocks as sanitizeLines does.
+func stripBreaks(s string) string {
+	if !strings.Contains(s, zwsp) {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	fence := ""
+	for i, l := range lines {
+		if fence != "" {
+			if closesFence(l, fence) {
+				fence = ""
+			}
+			continue
+		}
+		lines[i] = strings.ReplaceAll(l, zwsp, "")
+		if opensFence(lines[i]) {
+			fence = fenceOpenRE.FindStringSubmatch(lines[i])[1]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func sanitizeLines(lines []string) string {
 	out := make([]string, 0, len(lines)+1)
 	for i := 0; i < len(lines); i++ {
 		if !opensFence(lines[i]) {

@@ -214,6 +214,9 @@ func TestSanitizeIdempotent(t *testing.T) {
 		strings.Repeat("@alice ", maxModelBody/7),
 		strings.Repeat("@a ", maxModelTitle),
 		"text with a model's own " + z + "break, " + z + "@bob and prbot" + z + ":x",
+		// A fence the cap leaves open is closed: that must fit too.
+		strings.Repeat("@a ", maxModelBody/3-2) + "\n```\nx",
+		strings.Repeat("x", maxModelBody-2) + "\n~~~~~~~~\ny",
 		"line\r\nwith\rreturns",
 	} {
 		if once := sanitizeModelText(in); sanitizeModelText(once) != once {
@@ -221,6 +224,25 @@ func TestSanitizeIdempotent(t *testing.T) {
 		}
 		if once := sanitizeModelLine(in); sanitizeModelLine(once) != once {
 			t.Errorf("sanitizeModelLine twice changes %q: %q", in, sanitizeModelLine(once))
+		}
+	}
+}
+
+// Code is kept as written, zero-width characters and all: a suggestion is
+// applied as it's posted. Outside code, the text fits the cap once broken.
+func TestSanitizeKeepsCodeAndCap(t *testing.T) {
+	in := "Fix the separator:\n```suggestion\nsep := \"a" + z + "b\"\n```\nthen @bob" + z + " can merge."
+	out := sanitizeModelText(in)
+	if !strings.Contains(out, "```suggestion\nsep := \"a"+z+"b\"\n```") {
+		t.Errorf("the suggestion's code was changed:\n%q", out)
+	}
+	for _, in := range []string{
+		strings.Repeat("@a ", maxModelBody),
+		strings.Repeat("@a ", maxModelBody/3-2) + "\n```\nx",
+		strings.Repeat("y", maxModelBody*2),
+	} {
+		if n := len(stripBreaks(sanitizeModelText(in))); n > maxModelBody {
+			t.Errorf("sanitized text is %d bytes without its breaks; the cap is %d", n, maxModelBody)
 		}
 	}
 }
