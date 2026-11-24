@@ -855,6 +855,7 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 		for _, path := range bt.paths {
 			inPart[path] = true
 		}
+		summarized := false // a part's summary is the first a pass gives
 		for pass := 1; pass <= maxFindPasses; pass++ {
 			label := fmt.Sprintf("part %d/%d, pass %d", i+1, len(p.batches), pass)
 			if many {
@@ -883,8 +884,8 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 				b.logf("warn", pr.Repo, pr.Number, "review pass %d of part %d/%d by %s failed, so the part ends there: %v", pass, i+1, len(p.batches), lc.Label(), err)
 				break
 			}
-			if s := strings.TrimSpace(out.Summary); s != "" && pass == 1 {
-				ps.summaries = append(ps.summaries, s)
+			if s := strings.TrimSpace(out.Summary); s != "" && !summarized {
+				ps.summaries, summarized = append(ps.summaries, s), true
 			}
 			fresh := 0
 			for _, f := range out.Comments {

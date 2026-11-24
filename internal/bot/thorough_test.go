@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/OMG-Software/omg-review-bot/internal/diff"
@@ -811,5 +813,63 @@ func TestHeldFindingOnBinaryFileNotChecked(t *testing.T) {
 	}
 	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.reviews[0].Body+fmt.Sprint(e.gh.reviews[0].Comments), "Printed to stdout") {
 		t.Fatalf("the held finding should still be posted: %+v", e.gh.reviews)
+	}
+}
+
+// A search the ignore patterns kept from every file that could match says
+// so, rather than "No matches.".
+func TestSearchSaysWhenIgnoredFilesWerentSearched(t *testing.T) {
+	rt := cachedTools(map[string]string{"api.pb.go": "caller()\n", "a.go": "package a\n"}, nil, false)
+	rt.ignore = []*regexp.Regexp{regexp.MustCompile(`\.pb\.go$`)}
+	out := rt.search(context.Background(), "h", "caller", "")
+	if strings.Contains(out, "No matches.\n") || !strings.Contains(out, "1 files the review ignores") {
+		t.Errorf("search = %q; want it to say the ignored file wasn't searched", out)
+	}
+	if out := rt.search(context.Background(), "h", "caller", "*.pb.go"); !strings.Contains(out, "api.pb.go:1") {
+		t.Errorf("a path_glob should search the ignored file: %q", out)
+	}
+}
+
+// Models reading the same file at once share one fetch.
+func TestToolCacheFetchesOnce(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.b.pollOnce(e.ctx) // sets up the App
+	drain(e.ctx, e.b)
+	e.gh.mu.Lock()
+	before := len(e.gh.docRefs)
+	e.gh.mu.Unlock()
+	rt := newRepoTools(e.b.app.Installation(10), settings.Defaults(), "acme/web", "h", "")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if c, err := rt.fork().file(e.ctx, "h", "CONTRIBUTING.md"); err != nil || c != projectDocs["CONTRIBUTING.md"] {
+				t.Errorf("read = %q, %v", c, err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	e.gh.mu.Lock()
+	defer e.gh.mu.Unlock()
+	if n := len(e.gh.docRefs) - before; n != 1 {
+		t.Errorf("fetched %d times; want once", n)
+	}
+	if rt.cache.bytes != len(projectDocs["CONTRIBUTING.md"]) {
+		t.Errorf("cache counts %d bytes; want the file once", rt.cache.bytes)
+	}
+}
+
+// A part's summary is the first a pass gives, not only the first pass's.
+func TestSummaryFromALaterPass(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.lm.reviews = []string{`{"summary":"","comments":[` + divFinding + `]}`, `{"summary":"Adds a division.","comments":[]}`}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.reviews[0].Body, "Adds a division.") {
+		t.Fatalf("the second pass's summary should be posted: %+v", e.gh.reviews)
 	}
 }

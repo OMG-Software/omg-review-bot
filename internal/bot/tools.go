@@ -52,6 +52,10 @@ type toolCache struct {
 	files map[string]toolFile
 	bytes int // size of the cached files
 	trees map[string]toolTree
+	// loading holds the files being fetched, closed when the fetch ends:
+	// models share the cache and read in parallel, and a second reader of a
+	// file waits for the first rather than fetching it again.
+	loading map[string]chan struct{}
 }
 
 // fork returns tools for another model in the same review: they share what
@@ -172,24 +176,44 @@ func cleanRepoPath(p string) string {
 func (rt *repoTools) file(ctx context.Context, ref, path string) (string, error) {
 	key := ref + "\x00" + path
 	c := rt.cache
-	c.mu.Lock()
-	f, ok := c.files[key]
-	c.mu.Unlock()
-	if ok {
-		return f.content, f.err
-	}
-	content, err := rt.cl.FileContent(ctx, rt.repo, path, ref)
-	if settled(err) {
+	var done chan struct{}
+	for done == nil {
 		c.mu.Lock()
-		// What's cached in a review is capped: past it, files are read again.
-		// Files too large to search aren't cached, so they can't crowd out
-		// the many smaller ones a search reads.
-		if len(content) <= maxToolFileBytes && c.bytes+len(content) <= maxCacheBytes {
-			c.files[key] = toolFile{content, err}
-			c.bytes += len(content)
+		if f, ok := c.files[key]; ok {
+			c.mu.Unlock()
+			return f.content, f.err
+		}
+		wait, busy := c.loading[key]
+		if !busy {
+			if c.loading == nil {
+				c.loading = map[string]chan struct{}{}
+			}
+			done = make(chan struct{})
+			c.loading[key] = done
 		}
 		c.mu.Unlock()
+		if busy {
+			// Look again once it's fetched: cached then, unless it couldn't
+			// be (too large, or a failed read), and then it's read here.
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
 	}
+	content, err := rt.cl.FileContent(ctx, rt.repo, path, ref)
+	c.mu.Lock()
+	// What's cached in a review is capped: past it, files are read again.
+	// Files too large to search aren't cached, so they can't crowd out the
+	// many smaller ones a search reads.
+	if settled(err) && len(content) <= maxToolFileBytes && c.bytes+len(content) <= maxCacheBytes {
+		c.files[key] = toolFile{content, err}
+		c.bytes += len(content)
+	}
+	delete(c.loading, key)
+	close(done)
+	c.mu.Unlock()
 	return content, err
 }
 
@@ -326,8 +350,13 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		}
 	}
 	var cands []string
+	ignored := 0 // skipped by the review's ignore patterns
 	for _, p := range t.paths {
-		if binaryExt.MatchString(p) || (only == nil && matchAny(rt.ignore, p)) || (only != nil && !only.MatchString(p)) {
+		if only == nil && matchAny(rt.ignore, p) {
+			ignored++
+			continue
+		}
+		if binaryExt.MatchString(p) || (only != nil && !only.MatchString(p)) {
 			continue
 		}
 		cands = append(cands, p)
@@ -401,7 +430,7 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		}
 	}
 	switch {
-	case all == 0 && unread+large > 0:
+	case all == 0 && unread+large+ignored > 0:
 		sb.WriteString("No matches in the files searched.\n")
 	case all == 0:
 		sb.WriteString("No matches.\n")
@@ -410,6 +439,9 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 	}
 	if unread > 0 {
 		fmt.Fprintf(&sb, "(%d of the %d files couldn't be read just now, so they weren't searched: try again, or read_file them.)\n", unread, len(cands))
+	}
+	if all == 0 && ignored > 0 {
+		fmt.Fprintf(&sb, "(%d files the review ignores (generated, vendored and the like) weren't searched: give a path_glob to search them.)\n", ignored)
 	}
 	if large > 0 {
 		fmt.Fprintf(&sb, "(%d of the %d files are too large to search (over %d MB), so they weren't searched: read_file them if they matter.)\n", large, len(cands), maxToolFileBytes>>20)
