@@ -140,4 +140,14 @@ func TestLimits(t *testing.T) {
 			}
 		})
 	}
+
+	// A name the model list doesn't have is said to be missing, not quiet;
+	// one listed without limits is "not reported".
+	for name, list := range map[string]string{"no model named \"qwen/coder\"": `{"data":[{"id":"qwen/coderr"}]}`, "doesn't report": `{"data":[{"id":"qwen/coder"}]}`} {
+		srv := serve(map[string]string{"GET /v1/models": list})
+		cl, _ := New(Config{Provider: "openai", BaseURL: srv.URL + "/v1", Model: "qwen/coder"})
+		if _, err := cl.(LimitReader).Limits(context.Background()); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("list %s: error %v, want one saying %q", list, err, name)
+		}
+	}
 }

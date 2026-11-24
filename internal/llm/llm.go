@@ -376,6 +376,12 @@ func (o *openAI) Limits(ctx context.Context) (Limits, error) {
 		}
 	}
 	note(err)
+	// A model list without this model most likely means a misspelt name;
+	// saying so beats the defaults' "not reported". (LM Studio lists only
+	// loaded models there, and its own API was asked about this one above.)
+	if err == nil && !listed && firstErr == nil && o.cfg.Provider != "lmstudio" {
+		return Limits{}, fmt.Errorf("the server's model list has no model named %q; check the name", o.cfg.Model)
+	}
 	// llama.cpp's /props takes no model: it describes the model the server
 	// has loaded. That's this one only when it's the one model listed;
 	// otherwise another model's window would be taken for this one's.
