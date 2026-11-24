@@ -427,7 +427,9 @@ func (b *Bot) addFileContents(ctx context.Context, rt *repoTools, p *plan, files
 				continue
 			}
 			content, err := rt.file(ctx, rt.head, path)
-			if err != nil || isBinary(content) {
+			// Numbering only lengthens a file, so one that doesn't fit as it
+			// is isn't numbered just to be thrown away.
+			if err != nil || len(content) >= room || isBinary(content) {
 				continue
 			}
 			block := fmt.Sprintf("### Full file: %s\n```\n%s```\n\n", path, numberedFile(content))

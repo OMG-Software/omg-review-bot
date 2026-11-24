@@ -797,3 +797,19 @@ func TestSearchSkipsLargeFilesByListedSize(t *testing.T) {
 		t.Errorf("search = %q; want big.go skipped by its listed size", out)
 	}
 }
+
+// A held finding on a file that's now binary isn't sent to the model to
+// check: there's nothing it could check, so the finding is kept as it was.
+func TestHeldFindingOnBinaryFileNotChecked(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.gh.content = "func main() {\x00\x01\x02}\n"
+	seedHeld(t, e, "zzz000", finding{Path: "main.go", Line: 11, Severity: "P2", Title: "Printed to stdout", Body: "Log it."})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if n := len(e.lm.prompts["held_check"]); n != 0 {
+		t.Fatalf("sent %d held checks of a binary file", n)
+	}
+	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.reviews[0].Body+fmt.Sprint(e.gh.reviews[0].Comments), "Printed to stdout") {
+		t.Fatalf("the held finding should still be posted: %+v", e.gh.reviews)
+	}
+}

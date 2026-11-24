@@ -118,7 +118,7 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 		fs := byPath[path]
 		b.setCurrent(ctx, pr, "Checking held findings in %s on %s#%d", path, pr.Repo, pr.Number)
 		content, err := rt.file(ctx, head, path)
-		if err != nil {
+		if err != nil || isBinary(content) { // nothing a model can check: kept as they are
 			kept = append(kept, fs...)
 			continue
 		}
