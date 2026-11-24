@@ -427,7 +427,7 @@ func (b *Bot) addFileContents(ctx context.Context, rt *repoTools, p *plan, files
 				continue
 			}
 			content, err := rt.file(ctx, rt.head, path)
-			if err != nil || strings.ContainsRune(textutil.Truncate(content, 8000), 0) {
+			if err != nil || isBinary(content) {
 				continue
 			}
 			block := fmt.Sprintf("### Full file: %s\n```\n%s```\n\n", path, numberedFile(content))

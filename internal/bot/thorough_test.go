@@ -645,3 +645,14 @@ func TestLastRoundHoldsNothing(t *testing.T) {
 		t.Errorf("held %q on the last review", data)
 	}
 }
+
+// A file is binary if it holds a NUL anywhere, not only near the start.
+func TestIsBinaryScansWholeFile(t *testing.T) {
+	late := strings.Repeat("text\n", 5000) + "\x00tail"
+	if !isBinary(late) {
+		t.Error("a NUL 25,000 bytes in should make the file binary")
+	}
+	if isBinary(strings.Repeat("text\n", 5000)) {
+		t.Error("plain text is not binary")
+	}
+}

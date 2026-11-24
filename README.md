@@ -499,8 +499,11 @@ event checks it for replies, so polling only catches anything missed.
    skips them unless the model gives a path pattern, and `read_file` opens any file, so the
    model can still read generated or vendored code for context. Turn them off with *Let the model
    read the repository* in a model's settings: a review offers them only if every model it may
-   use has it on. A model server that refuses tools gets the review without them. The prompt
-   tells the model to ignore any limit in the skill on how many findings to report.
+   use has it on. With them on, a quarter of each part's context is kept for what the tools
+   return, so parts carry less diff; a model server that refuses tools gets the review without
+   them, but its parts stay that size, so turn the setting off for a model without tool support
+   to give the diff that room. The prompt tells the model to ignore any limit in the skill on how
+   many findings to report.
 4. The model returns JSON findings. The bot then asks again about the **same code**, listing
    what's been found so far, until a pass finds nothing new worth posting (at most 5 passes per
    part), so one review finds what there is rather than leaving it for later pushes. The bot

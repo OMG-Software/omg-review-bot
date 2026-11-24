@@ -224,7 +224,7 @@ func (rt *repoTools) readFile(ctx context.Context, ref, path string, from, to, l
 		}
 		return fmt.Sprintf("Error: couldn't read %s.", path)
 	}
-	if strings.ContainsRune(textutil.Truncate(content, 8000), 0) {
+	if isBinary(content) {
 		return fmt.Sprintf("%s is a binary file.", path)
 	}
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
@@ -342,7 +342,7 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 			defer func() { <-sem; wg.Done() }()
 			content, err := rt.file(ctx, ref, p)
 			results[i].read = err == nil
-			if err != nil || len(content) > maxToolFileBytes || strings.ContainsRune(textutil.Truncate(content, 8000), 0) {
+			if err != nil || len(content) > maxToolFileBytes || isBinary(content) {
 				return
 			}
 			for n, l := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
@@ -528,3 +528,8 @@ func flattenTools(msgs []llm.Message) []llm.Message {
 	}
 	return merged
 }
+
+// isBinary reports whether content holds a NUL byte anywhere: binary data
+// can start past any prefix (a generated file, a fixture), and the whole of
+// a file read here is at most maxToolFileBytes, so all of it is checked.
+func isBinary(content string) bool { return strings.IndexByte(content, 0) >= 0 }
