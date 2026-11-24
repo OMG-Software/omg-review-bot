@@ -713,18 +713,11 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	}
 	rec.Model = strings.Join(answered, " + ")
 
-	// Past its comment limit a review holds the least severe findings for
-	// the next one, except the last automatic review, which has no next.
-	// If the reviews so far can't be counted, this may be the last: nothing
-	// is held, since no later review might post it.
-	round := 0
-	limit := st.Review.MaxComments
-	if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err != nil {
+	posted, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number)
+	if err != nil {
 		b.logf("warn", pr.Repo, pr.Number, "could not count the bot's reviews of this PR, so this one posts every finding: %v", err)
-		limit = 0
-	} else if round = n + 1; round >= st.Review.MaxRounds { // this one isn't "posted" yet
-		limit = 0
 	}
+	round, limit := commentLimit(st, posted, err)
 	inline, notes, held, dropped := prepareFindings(st, p, append(carried, collateFindings(p, lists)...), mine, limit)
 	var summary string
 	switch len(summaries) {
@@ -1247,4 +1240,21 @@ func short(sha string) string {
 		return sha[:7]
 	}
 	return sha
+}
+
+// commentLimit is a review's round (0 if unknown) and how many findings it
+// may post (0: all of them), given how many reviews the bot has posted on
+// the PR (posted, or err if they couldn't be counted). Past its limit a
+// review holds the least severe findings for the next one, except the last
+// automatic review, which has no next. If the reviews can't be counted,
+// this may be the last: nothing is held, since no later review might post it.
+func commentLimit(st settings.Settings, posted int, err error) (round, limit int) {
+	if err != nil {
+		return 0, 0
+	}
+	round = posted + 1 // this one isn't "posted" yet
+	if round >= st.Review.MaxRounds {
+		return round, 0
+	}
+	return round, st.Review.MaxComments
 }

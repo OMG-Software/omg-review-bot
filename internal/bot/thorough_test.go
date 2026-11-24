@@ -656,3 +656,25 @@ func TestIsBinaryScansWholeFile(t *testing.T) {
 		t.Error("plain text is not binary")
 	}
 }
+
+// A review holds findings past its limit only when a later automatic review
+// will post them: not on the last round, and not when the reviews so far
+// can't be counted.
+func TestCommentLimit(t *testing.T) {
+	st := settings.Defaults()
+	st.Review.MaxComments, st.Review.MaxRounds = 3, 5
+	for _, c := range []struct {
+		posted       int
+		err          error
+		round, limit int
+	}{
+		{0, nil, 1, 3},
+		{3, nil, 4, 3},
+		{4, nil, 5, 0}, // the last round
+		{2, errors.New("database is locked"), 0, 0},
+	} {
+		if round, limit := commentLimit(st, c.posted, c.err); round != c.round || limit != c.limit {
+			t.Errorf("commentLimit(%d, %v) = %d, %d; want %d, %d", c.posted, c.err, round, limit, c.round, c.limit)
+		}
+	}
+}

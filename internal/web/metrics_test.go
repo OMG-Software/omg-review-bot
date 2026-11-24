@@ -248,24 +248,33 @@ func TestStopReviewsButton(t *testing.T) {
 	}
 }
 
-// While reviews are stopped with a job still running, the dashboard says so
-// (it isn't yet safe to restart) and still offers Resume.
+// While reviews are stopped with jobs still running, the dashboard says how
+// many (it isn't yet safe to restart) and still offers Resume.
 func TestStoppedDashboardWithJobRunning(t *testing.T) {
 	s := newTestSite(t)
-	var buf bytes.Buffer
-	err := s.srv.pages["dashboard.html"].ExecuteTemplate(&buf, "layout", page{Title: "Dashboard", Nav: "dash", Auth: true, V: &viewer{Admin: true},
-		Status: bot.Status{Stopped: true, Working: []bot.Activity{{What: "Reviewing", Repo: "acme/web", Number: 7}}},
-		D:      s.srv.dashboardData()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := buf.String()
-	for _, want := range []string{"New reviews are stopped", "1 job is still running", `action="/reviews/resume"`, "Resume reviews"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("dashboard lacks %q", want)
+	job := bot.Activity{What: "Reviewing", Repo: "acme/web", Number: 7}
+	for _, c := range []struct {
+		working []bot.Activity
+		says    string
+	}{
+		{[]bot.Activity{job}, "1 job is still running"},
+		{[]bot.Activity{job, job}, "2 jobs are still running"},
+	} {
+		var buf bytes.Buffer
+		err := s.srv.pages["dashboard.html"].ExecuteTemplate(&buf, "layout", page{Title: "Dashboard", Nav: "dash", Auth: true, V: &viewer{Admin: true},
+			Status: bot.Status{Stopped: true, Working: c.working},
+			D:      s.srv.dashboardData()})
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if strings.Contains(body, "safe to upgrade and restart") {
-		t.Error("says it's safe to restart with a job still running")
+		body := buf.String()
+		for _, want := range []string{"New reviews are stopped", c.says, `action="/reviews/resume"`, "Resume reviews"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("dashboard with %d jobs lacks %q", len(c.working), want)
+			}
+		}
+		if strings.Contains(body, "safe to upgrade and restart") {
+			t.Errorf("says it's safe to restart with %d jobs still running", len(c.working))
+		}
 	}
 }
