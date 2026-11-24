@@ -218,6 +218,10 @@ func TestSanitizeIdempotent(t *testing.T) {
 		strings.Repeat("@a ", maxModelBody/3-2) + "\n```\nx",
 		strings.Repeat("x", maxModelBody-2) + "\n~~~~~~~~\ny",
 		"line\r\nwith\rreturns",
+		// A fence as long as the cap: closed with a copy, it couldn't fit.
+		strings.Repeat("~", maxModelBody),
+		strings.Repeat("`", maxModelBody/2) + "\nx",
+		strings.Repeat("x", maxModelBody-70) + "\n" + strings.Repeat("~", maxFenceRun) + "\ny",
 	} {
 		if once := sanitizeModelText(in); sanitizeModelText(once) != once {
 			t.Errorf("sanitizeModelText twice changes %q: %q", in, sanitizeModelText(once))
@@ -240,9 +244,25 @@ func TestSanitizeKeepsCodeAndCap(t *testing.T) {
 		strings.Repeat("@a ", maxModelBody),
 		strings.Repeat("@a ", maxModelBody/3-2) + "\n```\nx",
 		strings.Repeat("y", maxModelBody*2),
+		strings.Repeat("~", maxModelBody),
+		strings.Repeat("`", maxModelBody/2) + "\nx",
+		strings.Repeat("x", maxModelBody-70) + "\n" + strings.Repeat("~", maxFenceRun) + "\ny",
 	} {
 		if n := len(stripBreaks(sanitizeModelText(in))); n > maxModelBody {
 			t.Errorf("sanitized text is %d bytes without its breaks; the cap is %d", n, maxModelBody)
 		}
+	}
+}
+
+// A fence up to maxFenceRun long is code; a longer run is broken like any
+// other, so GitHub doesn't see a fence either.
+func TestLongFenceRunNotTrusted(t *testing.T) {
+	ok := strings.Repeat("~", maxFenceRun)
+	if out := sanitizeModelText(ok + "\n@a\n" + ok); !strings.Contains(out, ok+"\n@a\n") {
+		t.Errorf("a %d-character fence should keep its code as written: %q", maxFenceRun, out)
+	}
+	long := strings.Repeat("~", maxFenceRun+1)
+	if out := sanitizeModelText(long + "\n@a\n" + long); !strings.HasPrefix(out, z+long) || !strings.Contains(out, "@"+z+"a") {
+		t.Errorf("a %d-character fence should be broken and its lines cleaned: %q", maxFenceRun+1, out)
 	}
 }

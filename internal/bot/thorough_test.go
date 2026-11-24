@@ -1013,3 +1013,72 @@ func TestNumberedFileEndsAtLastLine(t *testing.T) {
 		t.Errorf("fileView numbers a line past the end: %q", got)
 	}
 }
+
+// A review's tools stop reading from GitHub once they've made
+// maxFetches reads; what's been read can still be read again.
+func TestToolReadsHaveABudget(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.b.pollOnce(e.ctx) // sets up the App
+	drain(e.ctx, e.b)
+	rt := newRepoTools(e.b.app.Installation(10), settings.Defaults(), "acme/web", "h", "")
+	rt.cache.maxFetches = 2
+	read := func(p string) string { return rt.readFile(e.ctx, "h", p, 0, 0, 10000) }
+	for _, p := range []string{"CLAUDE.md", "CONTRIBUTING.md"} {
+		if out := read(p); !strings.Contains(out, projectDocs[p]) {
+			t.Fatalf("read %s = %q", p, out)
+		}
+	}
+	e.gh.mu.Lock()
+	before := len(e.gh.docRefs)
+	e.gh.mu.Unlock()
+	if out := read("README.md"); !strings.Contains(out, "read as many files as it may") {
+		t.Errorf("a read past the budget = %q; want it refused", out)
+	}
+	if out := read("CLAUDE.md"); !strings.Contains(out, projectDocs["CLAUDE.md"]) {
+		t.Errorf("a file already read should still read: %q", out)
+	}
+	e.gh.mu.Lock()
+	defer e.gh.mu.Unlock()
+	if n := len(e.gh.docRefs) - before; n != 0 {
+		t.Errorf("%d GitHub reads past the budget", n)
+	}
+
+	// A search says which files the budget kept it from.
+	st := cachedTools(map[string]string{"a.go": "caller()\n"}, nil, false)
+	st.cache.trees["h"] = toolTree{paths: []string{"a.go", "b.go"}}
+	if out := st.search(e.ctx, "h", "caller", ""); !strings.Contains(out, "a.go:1") || !strings.Contains(out, "1 of the 2 files weren't searched: this review has read as many files as it may") {
+		t.Errorf("search = %q; want a.go's match and a note for b.go", out)
+	}
+}
+
+// A model whose context can't spare the room the tools take reviews without
+// them rather than failing the review.
+func TestSmallContextReviewsWithoutTools(t *testing.T) {
+	fellBack := false
+	for tokens := 1500; tokens <= 12000 && !fellBack; tokens += 250 {
+		e := newReviewEnv(t, reviewOf(), func(cfg *settings.Settings) {
+			noApproval(cfg)
+			cfg.LLM.ContextTokens, cfg.LLM.MaxOutputTokens = tokens, 512
+		})
+		e.b.pollOnce(e.ctx)
+		drain(e.ctx, e.b)
+		if len(e.gh.reviews) == 0 || e.lm.toolOffers > 0 {
+			continue // too small even without tools, or large enough for them
+		}
+		rs, err := e.st.RecentReviews(500, 1)
+		if err != nil || len(rs) != 1 {
+			t.Fatalf("recent reviews: %v, %v", rs, err)
+		}
+		r, err := e.st.GetReview(rs[0].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(r.Raw, "repository tools: off, the model's context has no room for them") {
+			t.Errorf("at %d tokens the review ran without tools, but the raw log doesn't say why", tokens)
+		}
+		fellBack = true
+	}
+	if !fellBack {
+		t.Error("no context size reviewed without tools: too small for them, the review fails")
+	}
+}

@@ -54,6 +54,7 @@ const (
 	maxModelBody  = 12000 // a finding body, summary or reply
 	maxModelTitle = 200
 	zwsp          = "​"
+	maxFenceRun   = 64 // longest fence trusted (see opensFence); real ones are a few characters
 )
 
 var (
@@ -193,10 +194,13 @@ func afterPrefix(prefix, text string) string {
 	return prefix + " " + text
 }
 
-// opensFence reports whether a line opens a fenced code block GitHub is sure to see.
+// opensFence reports whether a line opens a fenced code block GitHub is sure
+// to see. A fence longer than maxFenceRun isn't trusted (it's broken like any
+// other run): one left open is closed with a copy of it, and a copy that long
+// could take the text over the cap however much of the rest is cut.
 func opensFence(l string) bool {
 	m := fenceOpenRE.FindStringSubmatch(l)
-	return m != nil && !(m[1][0] == '`' && strings.Contains(m[2], "`"))
+	return m != nil && len(m[1]) <= maxFenceRun && !(m[1][0] == '`' && strings.Contains(m[2], "`"))
 }
 
 func breakMarkers(s string) string {

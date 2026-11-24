@@ -613,6 +613,17 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		toolRoom = totalChars / 4
 	}
 	budget := totalChars - len(system(rt.on())) - len(header) - 3000 - listRoom - toolRoom
+	if budget < 2000 && rt.on() {
+		// The tools are context this model can't spare: it reviews without
+		// them, as it did before they existed, rather than not at all.
+		rt.disable()
+		toolRoom = 0
+		budget = totalChars - len(system(false)) - len(header) - 3000 - listRoom
+		if budget >= 2000 {
+			b.logf("warn", pr.Repo, pr.Number, "model context (%d tokens) has no room for the repository tools, so the model reviews without them", st.LLM.ContextTokens)
+			fmt.Fprintf(&raw, "repository tools: off, the model's context has no room for them\n\n")
+		}
+	}
 	if budget < 2000 {
 		return nil, fmt.Errorf("model context (%d tokens) is too small for the skill and PR description; raise 'Context tokens' in Settings or shorten the skill", st.LLM.ContextTokens)
 	}

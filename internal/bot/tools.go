@@ -22,15 +22,22 @@ import (
 // repository through the installation's API: nothing runs, nothing is
 // written, and nothing leaves for another host.
 const (
-	maxToolSteps      = 16      // model turns per question before it must answer
-	maxCallsPerStep   = 8       // tool calls run per model turn; the rest are refused
-	maxSearchFiles    = 300     // files one search_code call may read
-	maxSearchHits     = 80      // matching lines one search_code call returns
-	maxListPaths      = 400     // paths one list_files call returns
-	maxToolFileBytes  = 1 << 20 // larger files aren't searched
-	maxCacheBytes     = 64 << 20
+	maxToolSteps     = 16      // model turns per question before it must answer
+	maxCallsPerStep  = 8       // tool calls run per model turn; the rest are refused
+	maxSearchFiles   = 300     // files one search_code call may read
+	maxSearchHits    = 80      // matching lines one search_code call returns
+	maxListPaths     = 400     // paths one list_files call returns
+	maxToolFileBytes = 1 << 20 // larger files aren't searched
+	maxCacheBytes    = 64 << 20
+	// GitHub reads of files one review may make: the installation's hourly
+	// quota (5,000 calls) is shared with every other review and with posting.
+	maxReviewFetches  = 1000
 	searchConcurrency = 8
 )
+
+// errReadBudget is a read refused because the review has made all the GitHub
+// reads it may (maxReviewFetches).
+var errReadBudget = errors.New("this review has used up its repository reads")
 
 type repoTools struct {
 	cl         *github.Client
@@ -56,6 +63,9 @@ type toolCache struct {
 	// fetch ends: models share the cache and read in parallel, and a second
 	// reader waits for the first rather than fetching it again (see claim).
 	loading map[string]chan struct{}
+	// fetches counts the files read from GitHub; past maxFetches, reads fail
+	// with errReadBudget and only what's cached can be read.
+	fetches, maxFetches int
 }
 
 // fork returns tools for another model in the same review: they share what
@@ -82,7 +92,7 @@ func newRepoTools(cl *github.Client, st settings.Settings, repo, head, base stri
 		base = head
 	}
 	return &repoTools{cl: cl, repo: repo, head: head, base: base, ignore: compileGlobs(st.Review.IgnorePatterns),
-		cache: &toolCache{files: map[string]toolFile{}, trees: map[string]toolTree{}}}
+		cache: &toolCache{files: map[string]toolFile{}, trees: map[string]toolTree{}, maxFetches: maxReviewFetches}}
 }
 
 // on reports whether tools are offered (rt may be nil: none).
@@ -184,6 +194,14 @@ func (rt *repoTools) file(ctx context.Context, ref, path string) (string, error)
 	if done == nil {
 		return f.content, f.err
 	}
+	c.mu.Lock()
+	if c.fetches >= c.maxFetches {
+		c.release(key, done)
+		c.mu.Unlock()
+		return "", errReadBudget
+	}
+	c.fetches++
+	c.mu.Unlock()
 	content, err := rt.cl.FileContent(ctx, rt.repo, path, ref)
 	c.mu.Lock()
 	// What's cached in a review is capped: past it, files are read again.
@@ -278,6 +296,9 @@ func (rt *repoTools) readFile(ctx context.Context, ref, path string, from, to, l
 	if err != nil {
 		if github.IsStatus(err, 404) {
 			return fmt.Sprintf("Error: %s does not exist at this version. list_files shows the paths that do.", path)
+		}
+		if errors.Is(err, errReadBudget) {
+			return fmt.Sprintf("Error: this review has read as many files as it may (%d), so %s can't be read. Files already read can still be read again: work from those.", maxReviewFetches, path)
 		}
 		return fmt.Sprintf("Error: couldn't read %s.", path)
 	}
@@ -391,6 +412,7 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		count int
 		read  bool // false: the file couldn't be read
 		large bool // too large to search
+		spent bool // not read: the review's reads are used up
 	}
 	results := make([]hit, len(cands))
 	sem := make(chan struct{}, searchConcurrency)
@@ -408,6 +430,7 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 			}
 			content, err := rt.file(ctx, ref, p)
 			results[i].read = err == nil
+			results[i].spent = errors.Is(err, errReadBudget)
 			if len(content) > maxToolFileBytes {
 				results[i].large = true
 				return
@@ -431,10 +454,13 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 	}
 
 	var sb strings.Builder
-	hits, all, unread, large := 0, 0, 0, 0
+	hits, all, unread, large, spent := 0, 0, 0, 0, 0
 	for _, r := range results {
 		all += r.count
-		if !r.read {
+		switch {
+		case r.spent:
+			spent++
+		case !r.read:
 			unread++
 		}
 		if r.large {
@@ -449,7 +475,7 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		}
 	}
 	switch {
-	case all == 0 && unread+large+ignored > 0:
+	case all == 0 && unread+large+ignored+spent > 0:
 		sb.WriteString("No matches in the files searched.\n")
 	case all == 0:
 		sb.WriteString("No matches.\n")
@@ -458,6 +484,9 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 	}
 	if unread > 0 {
 		fmt.Fprintf(&sb, "(%d of the %d files couldn't be read just now, so they weren't searched: try again, or read_file them.)\n", unread, len(cands))
+	}
+	if spent > 0 {
+		fmt.Fprintf(&sb, "(%d of the %d files weren't searched: this review has read as many files as it may (%d). Only files already read can be searched or read now.)\n", spent, len(cands), maxReviewFetches)
 	}
 	if all == 0 && ignored > 0 {
 		fmt.Fprintf(&sb, "(%d files the review ignores (generated, vendored and the like) weren't searched: give a path_glob to search them.)\n", ignored)
