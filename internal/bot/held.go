@@ -319,12 +319,12 @@ func (s prFiles) place(f finding, changed map[string]bool, moved map[string]stri
 // pruneHeld is for a review with nothing to review: it can't check the held
 // findings, so it drops only those it knows are on files the PR no longer
 // changes, and keeps the rest (renamed, with the commit they were found on
-// and their file's name there) for the next review. It returns how many
-// are left.
-func (b *Bot) pruneHeld(ctx context.Context, cl *github.Client, pr *store.PR, head string, files []github.PRFile) (int, error) {
+// and their file's name there) for the next review. It returns the findings
+// left.
+func (b *Bot) pruneHeld(ctx context.Context, cl *github.Client, pr *store.PR, head string, files []github.PRFile) ([]finding, error) {
 	held, heldHead, err := b.loadHeld(pr)
 	if err != nil || len(held) == 0 {
-		return 0, err
+		return nil, err
 	}
 	status := prFileStatus(files)
 	diffs := heldDiffs(ctx, cl, pr.Repo, head)
@@ -340,7 +340,7 @@ func (b *Bot) pruneHeld(ctx context.Context, cl *github.Client, pr *store.PR, he
 		same = same && keep && f.Path == old
 	}
 	if same {
-		return len(left), nil
+		return left, nil
 	}
-	return len(left), b.saveHeld(pr, heldHead, left)
+	return left, b.saveHeld(pr, heldHead, left)
 }

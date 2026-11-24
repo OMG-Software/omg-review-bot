@@ -672,7 +672,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 			// file), and nothing else would lift it: syncApproval only acts
 			// on a commit the bot posted a review for.
 			b.dismissStanding(ctx, st, cl, pr, login, standing{
-				liftRequest: countOpen(st.Review.RequestChangesLevel, threads) == 0 && heldLeft == 0 && pr.ReviewedSHA != "",
+				liftRequest: countOpen(st.Review.RequestChangesLevel, threads) == 0 && countFindings(st.Review.RequestChangesLevel, heldLeft) == 0 && pr.ReviewedSHA != "",
 			}, nil)
 		}
 		return gp, nil

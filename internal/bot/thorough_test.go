@@ -1092,3 +1092,45 @@ func TestNumberedExcerptEndsAtLastLine(t *testing.T) {
 		t.Errorf("line 3 of a 2-line file = %q; want nothing", got)
 	}
 }
+
+// With nothing to review, a held finding keeps the change request only if
+// it's at or above the request-changes level, as a reviewed one would.
+func TestNothingToReviewHeldBelowRequestLevel(t *testing.T) {
+	for _, c := range []struct {
+		sev  string
+		lift bool
+	}{{"P5", true}, {"P2", false}} {
+		t.Run(c.sev, func(t *testing.T) {
+			e := newReviewEnv(t, `{"summary":"Adds a division.","comments":[`+
+				`{"path":"main.go","line":11,"severity":"P1","title":"Division by zero","body":"This always panics."}]}`,
+				func(cfg *settings.Settings) {
+					cfg.Review.CommentLevel = "P5"
+					cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = "P3", "P3"
+				})
+			e.b.pollOnce(e.ctx)
+			drain(e.ctx, e.b)
+			if len(e.gh.reviews) != 1 || e.gh.reviews[0].Event != "REQUEST_CHANGES" {
+				t.Fatalf("first review = %+v", e.gh.reviews)
+			}
+			// The finding's file goes, and what's left has no patch to review;
+			// a finding held on that file waits for the next review.
+			e.gh.mu.Lock()
+			e.gh.mainStatus = "removed"
+			e.gh.extraFiles = []any{map[string]any{"filename": "big.go", "status": "modified", "additions": 5000}}
+			e.gh.mu.Unlock()
+			seedHeld(t, e, "zzz000", finding{Path: "big.go", Line: 3, Severity: c.sev, Title: "Unchecked error", Body: "Check it."})
+			e.push("bbb222", e.gh.patch, e.gh.content, `{"summary":"x","comments":[]}`, "2026-01-01T00:10:00Z")
+			e.b.pollOnce(e.ctx)
+			drain(e.ctx, e.b)
+			if len(e.gh.reviews) != 1 {
+				t.Fatalf("posted a review with nothing to review: %+v", e.gh.reviews[len(e.gh.reviews)-1])
+			}
+			if data, _, _ := e.st.HeldFindings(500, "acme/web", 7); !strings.Contains(data, "big.go") {
+				t.Fatalf("the held finding should wait for the next review: %q", data)
+			}
+			if lifted := fmt.Sprint(e.gh.dismissed) == "[501]"; lifted != c.lift {
+				t.Errorf("held %s finding: dismissed = %v; want the change request lifted: %v", c.sev, e.gh.dismissed, c.lift)
+			}
+		})
+	}
+}
