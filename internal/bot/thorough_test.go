@@ -408,7 +408,7 @@ func TestToolEdgeCases(t *testing.T) {
 	if strings.Count(out, "\n") > maxSearchHits+4 || !strings.Contains(out, "more matches") || !strings.Contains(out, "couldn't be read") {
 		t.Errorf("search = %q", textutil.Truncate(out, 400))
 	}
-	if out := rt.search(ctx, "h", "match", "gone.go"); !strings.Contains(out, "No matches in the files read") {
+	if out := rt.search(ctx, "h", "match", "gone.go"); !strings.Contains(out, "No matches in the files searched") {
 		t.Errorf("search of an unreadable file = %q", out)
 	}
 
@@ -675,6 +675,23 @@ func TestCommentLimit(t *testing.T) {
 	} {
 		if round, limit := commentLimit(st, c.posted, c.err); round != c.round || limit != c.limit {
 			t.Errorf("commentLimit(%d, %v) = %d, %d; want %d, %d", c.posted, c.err, round, limit, c.round, c.limit)
+		}
+	}
+}
+
+// A file too large to search isn't taken as having no matches, and "." is
+// the repository's root, like "".
+func TestSearchSkipsLargeFilesAndListsDot(t *testing.T) {
+	ctx := context.Background()
+	big := strings.Repeat("caller()\n", maxToolFileBytes/9+1)
+	rt := cachedTools(map[string]string{"gen.go": big, "pkg/a.go": "package pkg\n"}, nil, false)
+	out := rt.search(ctx, "h", "caller", "gen.go")
+	if strings.Contains(out, "No matches.\n") || !strings.Contains(out, "No matches in the files searched") || !strings.Contains(out, "too large to search") {
+		t.Errorf("search of a file too large to search = %q", out)
+	}
+	for _, dir := range []string{".", "./", ""} {
+		if out := rt.list(ctx, "h", dir); !strings.Contains(out, "pkg/a.go") {
+			t.Errorf("list %q = %q; want the repository's files", dir, out)
 		}
 	}
 }

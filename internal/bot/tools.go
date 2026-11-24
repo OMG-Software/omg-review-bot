@@ -161,7 +161,11 @@ func (rt *repoTools) run(ctx context.Context, call llm.ToolCall, limit int) stri
 func cleanRepoPath(p string) string {
 	p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
 	p = strings.TrimPrefix(strings.TrimPrefix(p, "./"), "/")
-	return strings.TrimSuffix(p, "/")
+	p = strings.TrimSuffix(p, "/")
+	if p == "." { // the repository's root, like ""
+		return ""
+	}
+	return p
 }
 
 func (rt *repoTools) file(ctx context.Context, ref, path string) (string, error) {
@@ -331,6 +335,7 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		lines []string
 		count int
 		read  bool // false: the file couldn't be read
+		large bool // too large to search
 	}
 	results := make([]hit, len(cands))
 	sem := make(chan struct{}, searchConcurrency)
@@ -342,7 +347,11 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 			defer func() { <-sem; wg.Done() }()
 			content, err := rt.file(ctx, ref, p)
 			results[i].read = err == nil
-			if err != nil || len(content) > maxToolFileBytes || isBinary(content) {
+			if len(content) > maxToolFileBytes {
+				results[i].large = true
+				return
+			}
+			if err != nil || isBinary(content) {
 				return
 			}
 			for n, l := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
@@ -361,11 +370,14 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 	}
 
 	var sb strings.Builder
-	hits, all, unread := 0, 0, 0
+	hits, all, unread, large := 0, 0, 0, 0
 	for _, r := range results {
 		all += r.count
 		if !r.read {
 			unread++
+		}
+		if r.large {
+			large++
 		}
 		for _, l := range r.lines {
 			if hits == maxSearchHits {
@@ -376,8 +388,8 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		}
 	}
 	switch {
-	case all == 0 && unread > 0:
-		sb.WriteString("No matches in the files read.\n")
+	case all == 0 && unread+large > 0:
+		sb.WriteString("No matches in the files searched.\n")
 	case all == 0:
 		sb.WriteString("No matches.\n")
 	case all > hits:
@@ -385,6 +397,9 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 	}
 	if unread > 0 {
 		fmt.Fprintf(&sb, "(%d of the %d files couldn't be read just now, so they weren't searched: try again, or read_file them.)\n", unread, len(cands))
+	}
+	if large > 0 {
+		fmt.Fprintf(&sb, "(%d of the %d files are too large to search (over %d MB), so they weren't searched: read_file them if they matter.)\n", large, len(cands), maxToolFileBytes>>20)
 	}
 	if total > len(cands) {
 		fmt.Fprintf(&sb, "(Searched the first %d of %d files: give a path_glob to search the rest.)\n", len(cands), total)
