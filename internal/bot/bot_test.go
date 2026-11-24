@@ -258,8 +258,16 @@ type fakeLLM struct {
 	calls   int
 	review  string // code_review reply
 	verify  string // fix_check reply
+	held    string // held_check reply
 	prompts map[string][]string
 	systems map[string][]string
+
+	// A request offering tools is a review (only reviews offer them).
+	reviews     []string         // replies for successive reviews, before review
+	toolCalls   []map[string]any // calls made, one per tool-offering request, before any review reply
+	toolResults []string         // "tool" messages the bot sent back
+	toolOffers  int              // requests that offered tools
+	refuseTools bool             // reject requests offering tools, as a server without tool support does
 }
 
 func (l *fakeLLM) handler(t *testing.T) http.Handler {
@@ -272,6 +280,7 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 		l.calls++
 		var req struct {
 			Messages []struct {
+				Role    string `json:"role"`
 				Content string `json:"content"`
 			} `json:"messages"`
 			ResponseFormat *struct {
@@ -279,11 +288,35 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 					Name string `json:"name"`
 				} `json:"json_schema"`
 			} `json:"response_format"`
+			Tools []any `json:"tools"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		kind := "text"
 		if req.ResponseFormat != nil {
 			kind = req.ResponseFormat.JSONSchema.Name
+		}
+		if len(req.Tools) > 0 {
+			kind = "code_review"
+			l.toolOffers++
+			if l.refuseTools {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"model does not support tools"}`)
+				return
+			}
+			if len(l.toolCalls) > 0 {
+				call := l.toolCalls[0]
+				l.toolCalls = l.toolCalls[1:]
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{"message": map[string]any{"content": "", "tool_calls": []any{call}}, "finish_reason": "tool_calls"}},
+					"usage":   map[string]any{"prompt_tokens": 100, "completion_tokens": 10},
+				})
+				return
+			}
+		}
+		for _, m := range req.Messages {
+			if m.Role == "tool" {
+				l.toolResults = append(l.toolResults, m.Content)
+			}
 		}
 		user := req.Messages[1].Content
 		if l.prompts == nil {
@@ -297,9 +330,15 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 			if strings.Contains(user, "go.sum") {
 				t.Errorf("ignored file go.sum was sent to the model")
 			}
-			content = "<think>let me look</think>```json\n" + l.review + "\n```"
+			reply := l.review
+			if len(l.reviews) > 0 {
+				reply, l.reviews = l.reviews[0], l.reviews[1:]
+			}
+			content = "<think>let me look</think>```json\n" + reply + "\n```"
 		case "fix_check":
 			content = l.verify
+		case "held_check":
+			content = l.held
 		case "thread_reply":
 			content = `{"reply":"Good point. Dividing by a constant zero will panic at runtime, so please guard it.","resolved":false}`
 		}

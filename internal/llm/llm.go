@@ -24,22 +24,101 @@ import (
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// ToolCalls are the calls an assistant message made (see Response).
+	ToolCalls []ToolCall `json:"-"`
+	// ToolCallID and ToolName say which call a "tool" message answers.
+	ToolCallID string `json:"-"`
+	ToolName   string `json:"-"`
+}
+
+// Tool is a function the model may call. Parameters is its JSON schema.
+type Tool struct {
+	Name        string
+	Description string
+	Parameters  map[string]any
+}
+
+// ToolCall is one call the model asked for. Arguments is a JSON object.
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
 }
 
 type Request struct {
 	Messages    []Message
 	Schema      map[string]any // when set (and structured output is on), constrain output to this JSON schema
 	SchemaName  string
+	Tools       []Tool // offered to the model; its calls come back in Response.ToolCalls
 	Temperature float64
 	MaxTokens   int
 }
 
 type Response struct {
 	Content          string
+	ToolCalls        []ToolCall
 	PromptTokens     int
 	CompletionTokens int
 	Truncated        bool // the model hit its output token limit
 	Duration         time.Duration
+}
+
+// ErrToolsUnsupported means the server or model refused a request because it
+// offered tools. The caller can ask again without them.
+var ErrToolsUnsupported = errors.New("the model or server does not support tool calls")
+
+// toolsRefused wraps err as ErrToolsUnsupported when a request that offered
+// tools was rejected as a bad request that mentions them.
+func toolsRefused(req Request, err error) error {
+	var he *httpError
+	if len(req.Tools) > 0 && errors.As(err, &he) && he.status >= 400 && he.status < 500 &&
+		strings.Contains(strings.ToLower(he.body), "tool") {
+		return fmt.Errorf("%w: %v", ErrToolsUnsupported, err)
+	}
+	return err
+}
+
+type httpError struct {
+	method, url string
+	status      int
+	body        string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("%s %s: HTTP %d: %s", e.method, e.url, e.status, e.body)
+}
+
+func toolDefs(tools []Tool) []map[string]any {
+	out := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, map[string]any{"type": "function", "function": map[string]any{
+			"name": t.Name, "description": t.Description, "parameters": t.Parameters,
+		}})
+	}
+	return out
+}
+
+// rawArgs reads a call's arguments, which servers send either as a JSON
+// object or as a string holding one.
+func rawArgs(r json.RawMessage) string {
+	var s string
+	if json.Unmarshal(r, &s) == nil {
+		return s
+	}
+	if len(r) == 0 || string(r) == "null" {
+		return "{}"
+	}
+	return string(r)
+}
+
+// argsObject is a call's arguments as a JSON value to send back. Arguments
+// that aren't a JSON object are sent as an empty one.
+func argsObject(s string) json.RawMessage {
+	var m map[string]any
+	if json.Unmarshal([]byte(s), &m) != nil {
+		return json.RawMessage("{}")
+	}
+	return json.RawMessage(s)
 }
 
 type Config struct {
@@ -140,7 +219,7 @@ func doJSON(ctx context.Context, hc *http.Client, method, u, apiKey string, in, 
 		return err
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: HTTP %d: %s", method, u, resp.StatusCode, textutil.Truncate(strings.TrimSpace(string(data)), 500))
+		return &httpError{method: method, url: u, status: resp.StatusCode, body: textutil.Truncate(strings.TrimSpace(string(data)), 500)}
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -164,12 +243,15 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	body := map[string]any{
 		"model":       o.cfg.Model,
-		"messages":    req.Messages,
+		"messages":    openAIMessages(req.Messages),
 		"stream":      false,
 		"temperature": req.Temperature,
 	}
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
+	}
+	if len(req.Tools) > 0 {
+		body["tools"] = toolDefs(req.Tools)
 	}
 	if req.Schema != nil && o.cfg.Structured {
 		name := req.SchemaName
@@ -186,6 +268,13 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 			Message struct {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -196,22 +285,55 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	start := time.Now()
 	if err := doJSON(ctx, o.hc, http.MethodPost, o.base+"/chat/completions", o.cfg.APIKey, body, &out); err != nil {
-		return nil, err
+		return nil, toolsRefused(req, err)
 	}
 	if len(out.Choices) == 0 {
 		return nil, errors.New("model returned no choices")
 	}
 	c := out.Choices[0]
-	if err := reasoningExhausted(c.Message.Content, c.Message.ReasoningContent, c.FinishReason == "length", req.MaxTokens); err != nil {
-		return nil, err
+	var calls []ToolCall
+	for i, tc := range c.Message.ToolCalls {
+		id := tc.ID
+		if id == "" {
+			id = fmt.Sprintf("call_%d", i)
+		}
+		calls = append(calls, ToolCall{ID: id, Name: tc.Function.Name, Arguments: rawArgs(tc.Function.Arguments)})
+	}
+	if len(calls) == 0 {
+		if err := reasoningExhausted(c.Message.Content, c.Message.ReasoningContent, c.FinishReason == "length", req.MaxTokens); err != nil {
+			return nil, err
+		}
 	}
 	return &Response{
-		Content:          out.Choices[0].Message.Content,
+		Content:          c.Message.Content,
+		ToolCalls:        calls,
 		PromptTokens:     out.Usage.PromptTokens,
 		CompletionTokens: out.Usage.CompletionTokens,
-		Truncated:        out.Choices[0].FinishReason == "length",
+		Truncated:        c.FinishReason == "length",
 		Duration:         time.Since(start),
 	}, nil
+}
+
+// openAIMessages encodes messages for /v1/chat/completions, with tool calls
+// and their results in OpenAI's shape.
+func openAIMessages(msgs []Message) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		e := map[string]any{"role": m.Role, "content": m.Content}
+		if len(m.ToolCalls) > 0 {
+			var tcs []map[string]any
+			for _, tc := range m.ToolCalls {
+				tcs = append(tcs, map[string]any{"id": tc.ID, "type": "function",
+					"function": map[string]any{"name": tc.Name, "arguments": string(argsObject(tc.Arguments))}})
+			}
+			e["tool_calls"] = tcs
+		}
+		if m.Role == "tool" {
+			e["tool_call_id"] = m.ToolCallID
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func (o *openAI) Models(ctx context.Context) ([]string, error) {
@@ -255,17 +377,27 @@ func (o *ollama) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	body := map[string]any{
 		"model":    o.cfg.Model,
-		"messages": req.Messages,
+		"messages": ollamaMessages(req.Messages),
 		"stream":   false,
 		"options":  opts,
 	}
 	if req.Schema != nil && o.cfg.Structured {
 		body["format"] = req.Schema
 	}
+	if len(req.Tools) > 0 {
+		body["tools"] = toolDefs(req.Tools)
+	}
 	var out struct {
 		Message struct {
-			Content  string `json:"content"`
-			Thinking string `json:"thinking"`
+			Content   string `json:"content"`
+			Thinking  string `json:"thinking"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Function struct {
+					Name      string          `json:"name"`
+					Arguments json.RawMessage `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"message"`
 		DoneReason      string `json:"done_reason"`
 		PromptEvalCount int    `json:"prompt_eval_count"`
@@ -273,18 +405,50 @@ func (o *ollama) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	start := time.Now()
 	if err := doJSON(ctx, o.hc, http.MethodPost, o.base+"/api/chat", o.cfg.APIKey, body, &out); err != nil {
-		return nil, err
+		return nil, toolsRefused(req, err)
 	}
-	if err := reasoningExhausted(out.Message.Content, out.Message.Thinking, out.DoneReason == "length", req.MaxTokens); err != nil {
-		return nil, err
+	var calls []ToolCall
+	for i, tc := range out.Message.ToolCalls {
+		id := tc.ID
+		if id == "" {
+			id = fmt.Sprintf("call_%d", i)
+		}
+		calls = append(calls, ToolCall{ID: id, Name: tc.Function.Name, Arguments: rawArgs(tc.Function.Arguments)})
+	}
+	if len(calls) == 0 {
+		if err := reasoningExhausted(out.Message.Content, out.Message.Thinking, out.DoneReason == "length", req.MaxTokens); err != nil {
+			return nil, err
+		}
 	}
 	return &Response{
 		Content:          out.Message.Content,
+		ToolCalls:        calls,
 		PromptTokens:     out.PromptEvalCount,
 		CompletionTokens: out.EvalCount,
 		Truncated:        out.DoneReason == "length",
 		Duration:         time.Since(start),
 	}, nil
+}
+
+// ollamaMessages encodes messages for /api/chat, where a call's arguments
+// are an object and a tool result names its tool.
+func ollamaMessages(msgs []Message) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		e := map[string]any{"role": m.Role, "content": m.Content}
+		if len(m.ToolCalls) > 0 {
+			var tcs []map[string]any
+			for _, tc := range m.ToolCalls {
+				tcs = append(tcs, map[string]any{"function": map[string]any{"name": tc.Name, "arguments": argsObject(tc.Arguments)}})
+			}
+			e["tool_calls"] = tcs
+		}
+		if m.Role == "tool" && m.ToolName != "" {
+			e["tool_name"] = m.ToolName
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func (o *ollama) Models(ctx context.Context) ([]string, error) {

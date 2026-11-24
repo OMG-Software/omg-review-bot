@@ -29,6 +29,7 @@
   <label>Timeout (s) <input name="timeout" type="number" min="30" value="{{.C.TimeoutSeconds}}"></label>
 </div>
 <label class="check"><input type="checkbox" name="structured" {{if .C.StructuredOutput}}checked{{end}}> Enforce JSON schema output (recommended; turn off if the server rejects <code>response_format</code>/<code>format</code>)</label>
+<label class="check"><input type="checkbox" name="tools" {{if not .C.NoTools}}checked{{end}}> Let the model read the repository during a review (read-only <code>list_files</code>, <code>read_file</code> and <code>search_code</code> tools; turned off for the rest of a review if the model doesn't support tools)</label>
 {{end}}
 
 {{define "content"}}

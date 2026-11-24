@@ -489,19 +489,34 @@ event checks it for replies, so polling only catches anything missed.
    edited to say so, with a link to it. If the review fails, the comment is edited to say that
    instead (without the error, which is on the PR's page in the bot), and a retry of the same
    commit reuses it.
-3. The model returns JSON findings. The bot checks each finding's file and line against the
-   diff, moving it to the nearest changed line up to 3 lines away if needed. It drops findings
-   the bot already raised in an earlier review. It drops findings below the *comment level* and
-   applies the comment cap.
-4. On a re-review, it first checks its unresolved findings on files that changed since the last
+3. Each part gets the diff and, where they fit beside it, the **full contents of its changed
+   files** at the head commit. The model also gets **read-only tools** over the repository at the
+   head (or base) commit: `read_file`, `search_code` (a grep) and `list_files`. It uses them for
+   the skill's context and verification steps: reading definitions, finding callers, and checking
+   a finding against the real code before reporting it. The tools only read the PR's own
+   repository through the installation's API; nothing is run. Turn them off with *Let the model
+   read the repository* on a model's settings (any model that may review with it off turns them off); a model server that refuses tools gets the review without
+   them. The prompt tells the model to ignore any limit in the skill on how many findings to
+   report.
+4. The model returns JSON findings. The bot then asks again about the **same code**, listing
+   what's been found so far, until a pass finds nothing new worth posting (at most 5 passes per
+   part), so one review finds what there is rather than leaving it for later pushes. The bot
+   checks each finding's file and line against the diff, moving it to the nearest changed line
+   up to 3 lines away if needed. It drops findings the bot already raised in an earlier review,
+   and findings below the *comment level*. Past the comment cap, the least severe findings are
+   **held for the next review** rather than dropped: the review says how many, they count as
+   open (so the bot doesn't approve), and the next review checks they still apply, at the line
+   they're on now, and posts them first. The last automatic review has no next one, so it posts
+   everything.
+5. On a re-review, it first checks its unresolved findings on files that changed since the last
    review. For each file it gives the model the current file and the earlier findings, and asks
    which are fixed. For each confirmed fix it **replies in the thread** ("✅ Confirmed fixed in
    `abc1234`…") **and then resolves the thread**. A finding whose file the PR no longer changes is
    closed the same way. Anything the model isn't sure about stays open.
-5. It posts **one** GitHub review: inline comments plus a summary. Findings that can't be placed
+6. It posts **one** GitHub review: inline comments plus a summary. Findings that can't be placed
    on a changed line go in the summary. If GitHub rejects an inline position, the review is
    reposted with every finding in the summary, so nothing is lost.
-6. With a *request-changes level* set, the review **requests changes** while a finding at that
+7. With a *request-changes level* set, the review **requests changes** while a finding at that
    level or above is open: an unresolved earlier thread or a new finding. Otherwise, with an
    *approval level* set, the review is an **approval** when no finding at that level or above is
    open. Anything in between is a comment that says how many findings hold back approval. A later
@@ -513,12 +528,12 @@ event checks it for replies, so polling only catches anything missed.
    approval, and the next review requests changes again. A reply in the PR triggers the
    check within a poll; a thread resolved by hand with no new comment isn't visible in the PR list,
    so it's picked up by the 15-minute re-check instead.
-7. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
+8. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
    until the next push or **Review now**. Clicking **Review now** while an automatic review of the
    PR is already queued turns that queued review into the manual one, so the request isn't lost,
    and a manual review that has to wait (for example, when its org's settings can't be read) keeps
    its place even if the queue is full when it's retried.
-8. Each posted review counts as one round on the PR, and its body says which ("Bot review number
+9. Each posted review counts as one round on the PR, and its body says which ("Bot review number
    3 of 10"). Once the bot has posted *Most reviews per PR* reviews, the next push isn't reviewed:
    the PR shows `limit` and gets one comment saying the limit is reached. Later pushes aren't
    reviewed either, and the comment isn't repeated. Raising the limit gets the latest push reviewed
@@ -580,7 +595,7 @@ defaults; an org owner can override them for their org (see
 | Setting | Default | |
 |---|---|---|
 | Wait after push | 60 s | Delay before reviewing, so several quick pushes trigger one review |
-| Max comments per review | 20 | The most severe findings are kept |
+| Max comments per review | 20 | The most severe findings are posted; the rest are held for the next review (the last automatic review posts them all) |
 | Post comments at | `[P5] NIT` and above | Lower levels are counted in the summary, not posted. Replaces *Minimum severity*: a saved `nit`/`minor`/`major`/`critical` becomes P5/P4/P2/P1. |
 | Approve when nothing is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never approve*. Can't be broader than the comment level. For example, comments at P4 with approval at P3: the bot approves when no P1–P3 finding is open, even with open P4 comments. An instance that saved *Never approve* before P3 became the default keeps it. |
 | Request changes while anything is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never request changes*. Can't be broader than the approval level, since a finding that requests changes must also hold back approval. With the defaults (both P3), an open P1–P3 finding requests changes and the bot approves when none is open. Make the request-changes level more severe than the approval level, for example P2 with approval at P3, and an open P3 only holds back approval. Saved settings and org policies from before this setting existed get P3 (an org gets the instance's level). |
@@ -884,8 +899,9 @@ a public issue.
   permissions above are the minimum it needs.
 - PR titles, descriptions and code are untrusted. They're given to the model as data, and the
   prompts tell it to ignore instructions inside them. If an injected instruction got through
-  anyway, the worst outcome is a misleading comment: the model has no tools and can't take
-  actions.
+  anyway, the worst outcome is a misleading comment: the model's only tools read files of the
+  PR's own repository (at its head or base commit) through the bot's installation, so it can't
+  run anything, write anything or reach another repository or host.
 - Everything the model writes (findings, summaries, thread replies, `@<app-name>` answers and
   fix confirmations) is made inert before the bot posts it under its own name. Raw HTML is
   escaped and Markdown images become plain links, so nothing loads (or leaks data in its URL)

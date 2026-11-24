@@ -326,6 +326,7 @@ func (b *Bot) updateNotice(cl *github.Client, pr *store.PR, id int64, body strin
 type batch struct {
 	text  string
 	paths []string
+	files string // full contents of the part's changed files, where they fit
 }
 
 type plan struct {
@@ -399,6 +400,50 @@ func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 		p.batches = append(p.batches, cur)
 	}
 	return p
+}
+
+// addFileContents gives each part the full contents of its changed files at
+// head, as far as they fit in the part's budget beside its diff, so the
+// model sees the code around each hunk, not just the hunk. Added files are
+// left out: their diff is the whole file. It returns the paths sent.
+func (b *Bot) addFileContents(ctx context.Context, rt *repoTools, p *plan, files []github.PRFile, budget int) []string {
+	added := map[string]bool{}
+	for _, f := range files {
+		added[f.Filename] = f.Status == "added"
+	}
+	var sent []string
+	for i := range p.batches {
+		bt := &p.batches[i]
+		for _, path := range bt.paths {
+			room := budget - len(bt.text) - len(bt.files)
+			if room < 1000 {
+				break
+			}
+			if added[path] {
+				continue
+			}
+			content, err := rt.file(ctx, rt.head, path)
+			if err != nil || strings.ContainsRune(textutil.Truncate(content, 8000), 0) {
+				continue
+			}
+			block := fmt.Sprintf("### Full file: %s\n```\n%s```\n\n", path, numberedFile(content))
+			if len(block) > room {
+				continue
+			}
+			bt.files += block
+			sent = append(sent, path)
+		}
+	}
+	return sent
+}
+
+// maxFindPasses bounds how often one part is reviewed again for findings
+// the earlier passes missed.
+const maxFindPasses = 5
+
+// findingLine names a finding for the "already reported" list.
+func findingLine(f finding) string {
+	return fmt.Sprintf("%s:%d [%s] %s", f.Path, f.Line, f.Severity, textutil.Truncate(f.Title, 160))
 }
 
 // reviewablePaths lists the PR files the model will actually see, which
@@ -545,13 +590,30 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	guide, docsUsed := b.guidelinesFor(ctx, st, cl, pr.Repo, pr.Number, baseRef,
 		fmt.Sprintf("%s at %s", gp.Base.Ref, short(baseRef)), changedPaths, 15)
 	fmt.Fprintf(&raw, "skill references sent: %s\nproject guidelines sent: %s\n\n", listOrNone(refs), listOrNone(docsUsed))
-	system := reviewSystemPrompt(sk.Name, skillText) + guide
+	rt := newRepoTools(cl, st, pr.Repo, head, gp.Base.SHA)
+	if st.LLM.NoTools {
+		rt.disable()
+	}
+	// The prompt says whether the tools are there; a server that refuses
+	// them turns them off for the rest of that model's review.
+	system := func(rt *repoTools) string { return reviewSystemPrompt(sk.Name, skillText, rt.on()) + guide }
 	header := prHeader(gp)
-	budget := totalChars - len(system) - len(header) - 3000
+	// Besides the system prompt and header, each part's prompt holds the
+	// findings already reported (listRoom) and, with tools, what the model
+	// reads through them (toolRoom). The diff and full files get the rest.
+	listRoom := min(8000, totalChars/10)
+	toolRoom := 0
+	if rt.on() {
+		toolRoom = totalChars / 4
+	}
+	budget := totalChars - len(system(rt)) - len(header) - 3000 - listRoom - toolRoom
 	if budget < 2000 {
 		return nil, fmt.Errorf("model context (%d tokens) is too small for the skill and PR description; raise 'Context tokens' in Settings or shorten the skill", st.LLM.ContextTokens)
 	}
 	p := buildPlan(st, files, budget)
+	if sent := b.addFileContents(ctx, rt, &p, files, budget); len(sent) > 0 {
+		fmt.Fprintf(&raw, "full files sent: %s\n\n", strings.Join(sent, ", "))
+	}
 	rec.Batches = len(p.batches)
 	if len(p.batches) > 0 {
 		// Only when there's code to review, so a PR with nothing reviewable
@@ -579,6 +641,11 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		rec.Status = "nothing to review"
 		rec.Summary = "No reviewable changes (all files were deleted, binary or ignored)."
 		b.logf("info", pr.Repo, pr.Number, "nothing to review at %s", short(head))
+		// Findings held from an earlier review were on files that are now
+		// gone or ignored.
+		if err := b.store.SetHeldFindings(pr.AccountID, pr.Repo, pr.Number, head, ""); err != nil {
+			b.logf("warn", pr.Repo, pr.Number, "could not clear the findings held for this review: %v", err)
+		}
 		if threadsKnown {
 			// No review is posted, but the fix check may have resolved what
 			// the bot's change request was about (say, by the PR deleting the
@@ -594,6 +661,10 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	if len(lcs) > 1 {
 		b.setCurrent(ctx, pr, "Reviewing %s#%d with %d models", pr.Repo, pr.Number, len(lcs))
 	}
+	// Findings an earlier review held back go first, where they still apply.
+	carried, hu := b.recheckHeld(ctx, st, aux, cl, rt, pr, head, files, p, &raw)
+	rec.PromptTokens += hu.PromptTokens
+	rec.CompletionTokens += hu.CompletionTokens
 	// Each model reviews the whole diff; with several (collate), side by side.
 	passes := make([]reviewPass, len(lcs))
 	var wg sync.WaitGroup
@@ -601,7 +672,8 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			passes[k] = b.reviewPass(ctx, st, pr, lc, len(lcs) > 1, p, system, header, mine)
+			passes[k] = b.reviewPass(ctx, st, pr, lc, len(lcs) > 1, p, reviewInputs{rt: rt.fork(), system: system, header: header,
+				mine: mine, seed: carried, listRoom: listRoom, toolRoom: toolRoom})
 		}()
 	}
 	wg.Wait()
@@ -630,7 +702,17 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	}
 	rec.Model = strings.Join(answered, " + ")
 
-	inline, notes, dropped := prepareFindings(st, p, collateFindings(p, lists), mine)
+	// Past its comment limit a review holds the least severe findings for
+	// the next one, except the last automatic review, which has no next.
+	round := 0
+	if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err == nil {
+		round = n + 1 // this one isn't "posted" yet
+	}
+	limit := st.Review.MaxComments
+	if round >= st.Review.MaxRounds {
+		limit = 0
+	}
+	inline, notes, held, dropped := prepareFindings(st, p, append(carried, collateFindings(p, lists)...), mine, limit)
 	var summary string
 	switch len(summaries) {
 	case 0:
@@ -645,17 +727,15 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	// Request changes while anything at or above the request-changes level is
 	// open; otherwise approve when nothing at or above the approval level is:
 	// no unresolved earlier thread and no new finding.
+	// Held findings count too: they're real, just not posted yet.
 	open := func(level string) int {
-		return countOpen(level, threads) + countFindings(level, inline) + countFindings(level, notes)
+		return countOpen(level, threads) + countFindings(level, inline) + countFindings(level, notes) + countFindings(level, held)
 	}
 	blocking, requesting := open(st.Review.ApprovalLevel), open(st.Review.RequestChangesLevel)
 	event := reviewEvent(st, blocking, requesting)
-	ri := reviewInfo{summary: summary, head: head, inline: inline, notes: notes, plan: p, dropped: dropped,
+	ri := reviewInfo{summary: summary, head: head, inline: inline, notes: notes, held: held, plan: p, dropped: dropped,
 		model: rec.Model, skill: sk.Name, rereview: pr.ReviewedSHA != "" && pr.ReviewedSHA != head, fixed: fixed,
-		maxRounds: st.Review.MaxRounds}
-	if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err == nil {
-		ri.round = n + 1 // this one isn't "posted" yet
-	}
+		round: round, maxRounds: st.Review.MaxRounds, maxComments: limit}
 	post := func(ri reviewInfo, event string) (*github.Review, []github.DraftComment, error) {
 		ri.verdict = verdictLine(st, event, blocking, requesting)
 		drafts := make([]github.DraftComment, 0, len(ri.inline))
@@ -684,6 +764,9 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	if err != nil {
 		return nil, fmt.Errorf("post review: %w", err)
 	}
+	if err := b.saveHeld(pr, head, held); err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not keep %d finding(s) for the next review: %v", len(held), err)
+	}
 	// A change request can only be standing if the bot reviewed the PR before,
 	// so a first review skips listing the reviews just to find none.
 	b.dismissStanding(ctx, st, cl, pr, login, standing{
@@ -698,9 +781,20 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 			rec.Sev[r-1]++
 		}
 	}
-	b.logf("info", pr.Repo, pr.Number, "posted review of %s (%s): %d inline comments, %d notes, %d earlier findings resolved as fixed (%d parts, %d+%d tokens)",
-		short(head), strings.ToLower(event), len(drafts), len(ri.notes), fixed, len(p.batches), rec.PromptTokens, rec.CompletionTokens)
+	b.logf("info", pr.Repo, pr.Number, "posted review of %s (%s): %d inline comments, %d notes, %d held for the next review, %d earlier findings resolved as fixed (%d parts, %d+%d tokens)",
+		short(head), strings.ToLower(event), len(drafts), len(ri.notes), len(held), fixed, len(p.batches), rec.PromptTokens, rec.CompletionTokens)
 	return gp, nil
+}
+
+// reviewInputs is what every model's review of the diff shares.
+type reviewInputs struct {
+	rt       *repoTools // this model's tools (see repoTools.fork)
+	system   func(*repoTools) string
+	header   string
+	mine     []github.ReviewComment // the bot's findings from earlier reviews
+	seed     []finding              // found already: held from the last review
+	listRoom int                    // characters for the lists of findings so far
+	toolRoom int                    // characters for tool results
 }
 
 // reviewPass is one model's review of the whole diff, batch by batch.
@@ -713,34 +807,69 @@ type reviewPass struct {
 	err       error
 }
 
-// reviewPass runs the plan's batches through lc. many: other models review
-// the same diff alongside, so the output names the model.
+// reviewPass runs the plan's batches through lc. Each part is reviewed again
+// and again, told what's been found so far, until a pass finds nothing new
+// worth posting: one review should find everything there is, not leave it
+// for the next push. many: other models review the same diff alongside, so
+// the output names the model.
 func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR, lc modelClient, many bool,
-	p plan, system, header string, mine []github.ReviewComment) (ps reviewPass) {
+	p plan, in reviewInputs) (ps reviewPass) {
 	var raw strings.Builder
 	defer func() { ps.label, ps.raw = lc.Label(), raw.String() }()
+	all := append([]finding(nil), in.seed...)
+	maxRank := settings.SeverityRank(st.Review.CommentLevel)
 	for i, bt := range p.batches {
-		if len(p.batches) > 1 && !many {
-			b.setCurrent(ctx, pr, "Reviewing %s#%d (part %d/%d)", pr.Repo, pr.Number, i+1, len(p.batches))
+		inPart := map[string]bool{}
+		for _, path := range bt.paths {
+			inPart[path] = true
 		}
-		user := batchPrompt(header, i, len(p.batches), bt, previousFor(mine, bt.paths))
-		var out modelOutput
-		usage, rawOut, err := b.chatJSON(ctx, lc, st, reviewSchema, "code_review", system, user, &out)
-		if many {
-			fmt.Fprintf(&raw, "===== %s, part %d/%d =====\n%s\n\n", lc.Label(), i+1, len(p.batches), rawOut)
-		} else {
-			fmt.Fprintf(&raw, "===== part %d/%d =====\n%s\n\n", i+1, len(p.batches), rawOut)
+		for pass := 1; pass <= maxFindPasses; pass++ {
+			label := fmt.Sprintf("part %d/%d, pass %d", i+1, len(p.batches), pass)
+			if many {
+				label = lc.Label() + ", " + label
+			} else {
+				b.setCurrent(ctx, pr, "Reviewing %s#%d (%s)", pr.Repo, pr.Number, label)
+			}
+			var found []string
+			for _, f := range all {
+				if inPart[f.Path] {
+					found = append(found, findingLine(f))
+				}
+			}
+			user := batchPrompt(in.header, i, len(p.batches), bt, previousFor(in.mine, bt.paths), found, pass, in.listRoom)
+			var out modelOutput
+			usage, rawOut, err := b.chatTools(ctx, lc, st, in.rt, reviewSchema, "code_review", in.system(in.rt), user, in.toolRoom, &out)
+			fmt.Fprintf(&raw, "===== %s =====\n%s\n\n", label, rawOut)
+			ps.usage.PromptTokens += usage.PromptTokens
+			ps.usage.CompletionTokens += usage.CompletionTokens
+			if err != nil {
+				if pass == 1 {
+					ps.err = fmt.Errorf("model (part %d/%d): %w", i+1, len(p.batches), err)
+					return ps
+				}
+				// What earlier passes found still stands.
+				b.logf("warn", pr.Repo, pr.Number, "review pass %d of part %d/%d by %s failed, so the part ends there: %v", pass, i+1, len(p.batches), lc.Label(), err)
+				break
+			}
+			if s := strings.TrimSpace(out.Summary); s != "" && pass == 1 {
+				ps.summaries = append(ps.summaries, s)
+			}
+			fresh := 0
+			for _, f := range out.Comments {
+				f, ok := normFinding(p, f)
+				if !ok || seenFinding(f, all) || isDuplicate(f, in.mine) {
+					continue
+				}
+				all = append(all, f)
+				ps.findings = append(ps.findings, f)
+				if settings.SeverityRank(f.Severity) <= maxRank {
+					fresh++
+				}
+			}
+			if fresh == 0 {
+				break
+			}
 		}
-		ps.usage.PromptTokens += usage.PromptTokens
-		ps.usage.CompletionTokens += usage.CompletionTokens
-		if err != nil {
-			ps.err = fmt.Errorf("model (part %d/%d): %w", i+1, len(p.batches), err)
-			return ps
-		}
-		if s := strings.TrimSpace(out.Summary); s != "" {
-			ps.summaries = append(ps.summaries, s)
-		}
-		ps.findings = append(ps.findings, out.Comments...)
 	}
 	return ps
 }
@@ -777,10 +906,15 @@ func verdictLine(st settings.Settings, event string, blocking, requesting int) s
 // model's reply isn't valid JSON. If it still isn't and lc fails over, the
 // next model takes over, with the same tries.
 func (b *Bot) chatJSON(ctx context.Context, lc llm.Client, st settings.Settings, schema map[string]any, schemaName, system, user string, out any) (llm.Response, string, error) {
+	return b.chatJSONMsgs(ctx, lc, st, schema, schemaName, []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}}, out)
+}
+
+// chatJSONMsgs is chatJSON for a conversation already under way.
+func (b *Bot) chatJSONMsgs(ctx context.Context, lc llm.Client, st settings.Settings, schema map[string]any, schemaName string, msgs []llm.Message, out any) (llm.Response, string, error) {
 	var total llm.Response
 	var rawAll strings.Builder
 	for {
-		usage, err := b.chatJSONOnce(ctx, lc, st, schema, schemaName, system, user, out, &rawAll)
+		usage, err := b.chatJSONOnce(ctx, lc, st, schema, schemaName, msgs, out, &rawAll)
 		total.PromptTokens += usage.PromptTokens
 		total.CompletionTokens += usage.CompletionTokens
 		var bad badJSON
@@ -799,8 +933,8 @@ func (e badJSON) Error() string { return "model did not return valid JSON: " + e
 func (e badJSON) Unwrap() error { return e.err }
 
 // chatJSONOnce is chatJSON's tries with the model in use.
-func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Settings, schema map[string]any, schemaName, system, user string, out any, rawAll *strings.Builder) (llm.Response, error) {
-	msgs := []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}}
+func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Settings, schema map[string]any, schemaName string, start []llm.Message, out any, rawAll *strings.Builder) (llm.Response, error) {
+	msgs := append([]llm.Message(nil), start...)
 	var total llm.Response
 	var lastErr error
 	at := inUse(lc)
@@ -818,7 +952,7 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 		if now := inUse(lc); now != at {
 			// The model in use failed and the next answered: that one gets
 			// its own tries, starting from this answer.
-			at, attempt, msgs = now, 1, msgs[:2]
+			at, attempt, msgs = now, 1, msgs[:len(start)]
 			rawAll.WriteString("\n----- next model -----\n")
 		}
 		total.PromptTokens += resp.PromptTokens
@@ -828,8 +962,12 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 			return total, nil
 		}
 		hint := "Your reply was not a valid JSON object in the required format."
-		if resp.Truncated {
-			hint = "Your reply was cut off because it was too long. Be briefer: report at most the 8 most important items, with short text."
+		switch {
+		case resp.Truncated && schemaName == "code_review":
+			// Not a cap on findings: the review asks again for what's left out.
+			hint = "Your reply was cut off because it was too long. Keep every text field short, and if it still won't fit, report the most severe issues first: you will be asked for the rest afterwards."
+		case resp.Truncated:
+			hint = "Your reply was cut off because it was too long. Be briefer: keep every text field short."
 		}
 		msgs = append(msgs,
 			llm.Message{Role: "assistant", Content: textutil.Truncate(resp.Content, 2000)},
@@ -867,29 +1005,60 @@ func (b *Bot) synthesizeSummary(ctx context.Context, lc llm.Client, st settings.
 	return strings.Join(parts, "\n\n")
 }
 
+// normFinding cleans up a finding as the model wrote it: its level, text and
+// path. ok is false when nothing is left of it.
+func normFinding(p plan, f finding) (finding, bool) {
+	f.Severity = normSeverity(f.Severity)
+	f.Body = sanitizeModelText(f.Body)
+	if strings.TrimSpace(f.Title) == "" {
+		f.Title = textutil.Truncate(textutil.FirstLine(f.Body), 100)
+	}
+	f.Title = sanitizeModelLine(f.Title)
+	f.Path = matchPath(p.files, f.Path)
+	return f, f.Title != "" || f.Body != ""
+}
+
+// sameFinding reports whether two findings are the same issue: the same
+// file, close lines and much the same claim.
+func sameFinding(a, b finding) bool {
+	if a.Path != b.Path {
+		return false
+	}
+	d := a.Line - b.Line
+	if d < 0 {
+		d = -d
+	}
+	return d <= 10 && (strings.EqualFold(a.Title, b.Title) || similarity(a.Title, b.Title) >= 0.5)
+}
+
+func seenFinding(f finding, fs []finding) bool {
+	for _, g := range fs {
+		if sameFinding(f, g) {
+			return true
+		}
+	}
+	return false
+}
+
 // prepareFindings normalizes, filters, de-duplicates and places findings:
-// inline ones target a commentable diff line; the rest become notes.
-func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.ReviewComment) (inline, notes []finding, dropped int) {
+// inline ones target a commentable diff line; the rest become notes. Past
+// limit (0 for none), the least severe are held for the next review
+// rather than dropped.
+func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.ReviewComment, limit int) (inline, notes, held []finding, dropped int) {
 	maxRank := settings.SeverityRank(st.Review.CommentLevel)
 	seen := map[string]bool{}
 	var kept []finding
 	for _, f := range all {
-		f.Severity = normSeverity(f.Severity)
-		f.Body = sanitizeModelText(f.Body)
-		if strings.TrimSpace(f.Title) == "" {
-			f.Title = textutil.Truncate(textutil.FirstLine(f.Body), 100)
-		}
-		f.Title = sanitizeModelLine(f.Title)
-		if f.Title == "" && f.Body == "" {
+		f, ok := normFinding(p, f)
+		if !ok {
 			continue
 		}
 		if settings.SeverityRank(f.Severity) > maxRank {
 			dropped++
 			continue
 		}
-		f.Path = matchPath(p.files, f.Path)
 		key := f.Path + ":" + strconv.Itoa(f.Line) + ":" + strings.ToLower(f.Title)
-		if seen[key] {
+		if seen[key] || seenFinding(f, kept) {
 			continue
 		}
 		seen[key] = true
@@ -902,9 +1071,9 @@ func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.
 	sort.SliceStable(kept, func(i, j int) bool {
 		return settings.SeverityRank(kept[i].Severity) < settings.SeverityRank(kept[j].Severity)
 	})
-	if max := st.Review.MaxComments; len(kept) > max {
-		dropped += len(kept) - max
-		kept = kept[:max]
+	if limit > 0 && len(kept) > limit {
+		held = append([]finding(nil), kept[limit:]...)
+		kept = kept[:limit]
 	}
 	for _, f := range kept {
 		if df := p.files[f.Path]; df != nil {
@@ -920,7 +1089,7 @@ func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.
 		}
 		notes = append(notes, f)
 	}
-	return inline, notes, dropped
+	return inline, notes, held, dropped
 }
 
 // matchPath maps a model-provided path onto a real file in the diff.

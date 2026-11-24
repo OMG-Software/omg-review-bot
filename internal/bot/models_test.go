@@ -293,8 +293,10 @@ func TestFailoverPastBadJSONAndBrokenModels(t *testing.T) {
 	})
 	e.b.pollOnce(e.ctx)
 	drain(e.ctx, e.b)
-	if len(e.gh.reviews) != 1 || chatty.count() != 2 || e.lm.count() == 0 {
-		t.Fatalf("reviews %d, chatty calls %d (want its 2 tries), good calls %d", len(e.gh.reviews), chatty.count(), e.lm.count())
+	// The chatty model answers in prose when offered tools, then gets its 2
+	// tries at the JSON before the next model takes over.
+	if len(e.gh.reviews) != 1 || chatty.count() != 3 || e.lm.count() == 0 {
+		t.Fatalf("reviews %d, chatty calls %d (want 1 with tools and its 2 tries), good calls %d", len(e.gh.reviews), chatty.count(), e.lm.count())
 	}
 	if r := lastReview(t, e.st); r.Model != "chatty → test-model" {
 		t.Errorf("review recorded model %q", r.Model)
