@@ -423,3 +423,19 @@ func TestReviewIncompleteJSONAskedAgain(t *testing.T) {
 		t.Fatalf("want one review with the finding, got %+v", e.gh.reviews)
 	}
 }
+
+// Held findings share the cap with new ones, most severe first; at the same
+// level the held one goes first, so it isn't held again behind its equals.
+func TestHeldFindingsFirstAtTheirLevel(t *testing.T) {
+	df := diff.Parse("a.go", "@@ -1,20 +1,20 @@\n"+strings.Repeat("+x\n", 20))
+	p := plan{files: map[string]*diff.File{"a.go": df}}
+	st := settings.Defaults()
+	st.Review.CommentLevel = "P4"
+	held := finding{Path: "a.go", Line: 2, Severity: "P3", Title: "Held from before", Body: "Old."}
+	sameLevel := finding{Path: "a.go", Line: 12, Severity: "P3", Title: "New at the same level", Body: "New."}
+	worse := finding{Path: "a.go", Line: 18, Severity: "P1", Title: "New and worse", Body: "Worse."}
+	inline, _, kept, _ := prepareFindings(st, p, []finding{held, sameLevel, worse}, nil, 2)
+	if len(inline) != 2 || inline[0].Title != worse.Title || inline[1].Title != held.Title || len(kept) != 1 || kept[0].Title != sameLevel.Title {
+		t.Fatalf("posted %+v, held %+v; want the P1, then the held P3, with the new P3 held", inline, kept)
+	}
+}

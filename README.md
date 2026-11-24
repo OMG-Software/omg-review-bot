@@ -506,8 +506,9 @@ event checks it for replies, so polling only catches anything missed.
    and findings below the *comment level*. Past the comment cap, the least severe findings are
    **held for the next review** rather than dropped: the review says how many, they count as
    open (so the bot doesn't approve), and the next review checks they still apply, at the line
-   they're on now, and posts them first. The last automatic review has no next one, so it posts
-   everything.
+   they're on now, and posts them with its own findings under the same cap: most severe first,
+   and a held finding ahead of a new one at the same level. The last automatic review has no
+   next one, so it posts everything.
 5. On a re-review, it first checks its unresolved findings on files that changed since the last
    review. For each file it gives the model the current file and the earlier findings, and asks
    which are fixed. For each confirmed fix it **replies in the thread** ("✅ Confirmed fixed in

@@ -14,7 +14,8 @@ import (
 )
 
 // Findings past a review's comment limit aren't dropped: they're held, and
-// the PR's next review posts them (still capped, most severe first) once it
+// the PR's next review posts them (still capped, most severe first, and
+// ahead of its own findings at the same level: see prepareFindings) once it
 // has checked they still apply. Until then they count as open, so the bot
 // doesn't approve a PR with findings it hasn't shown yet.
 
