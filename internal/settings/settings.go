@@ -47,6 +47,10 @@ type LLM struct {
 	MaxOutputTokens  int     `json:"max_output_tokens"`
 	StructuredOutput bool    `json:"structured_output"`
 	TimeoutSeconds   int     `json:"timeout_seconds"`
+	// NoTools stops the review offering the model its read-only repository
+	// tools. Off (tools offered) by default, including for settings saved
+	// before the tools existed.
+	NoTools bool `json:"no_tools,omitempty"`
 }
 
 type Review struct {

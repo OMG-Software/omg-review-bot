@@ -169,6 +169,7 @@ func parseLLM(r *http.Request, cur settings.LLM) settings.LLM {
 	v.ContextTokens = num("context", v.ContextTokens)
 	v.MaxOutputTokens = num("max_output", v.MaxOutputTokens)
 	v.StructuredOutput = r.FormValue("structured") != ""
+	v.NoTools = r.FormValue("tools") == ""
 	v.TimeoutSeconds = num("timeout", v.TimeoutSeconds)
 	v.Normalize()
 	// A saved key is only kept for the server it was entered for: with the

@@ -489,19 +489,41 @@ event checks it for replies, so polling only catches anything missed.
    edited to say so, with a link to it. If the review fails, the comment is edited to say that
    instead (without the error, which is on the PR's page in the bot), and a retry of the same
    commit reuses it.
-3. The model returns JSON findings. The bot checks each finding's file and line against the
-   diff, moving it to the nearest changed line up to 3 lines away if needed. It drops findings
-   the bot already raised in an earlier review. It drops findings below the *comment level* and
-   applies the comment cap.
-4. On a re-review, it first checks its unresolved findings on files that changed since the last
+3. Each part gets the diff and, where they fit beside it, the **full contents of its changed
+   files** at the head commit. The model also gets **read-only tools** over the repository at the
+   head (or base) commit: `read_file`, `search_code` (a grep) and `list_files`. It uses them for
+   the skill's context and verification steps: reading definitions, finding callers, and checking
+   a finding against the real code before reporting it. The tools only read the PR's own
+   repository through the installation's API; nothing is run, and at most 8 calls run per model
+   turn. The review's ignore patterns keep files out of the review, not out of reach: a search
+   skips them unless the model gives a path pattern, and `read_file` opens any file, so the
+   model can still read generated or vendored code for context. Turn them off with *Let the model
+   read the repository* in a model's settings: a review offers them only if every model it may
+   use has it on. With them on, a quarter of each part's context is kept for what the tools
+   return, so parts carry less diff; a model server that refuses tools gets the review without
+   them, but its parts stay that size, so turn the setting off for a model without tool support
+   to give the diff that room. The prompt tells the model to ignore any limit in the skill on how
+   many findings to report.
+4. The model returns JSON findings. The bot then asks again about the **same code**, listing
+   what's been found so far, until a pass finds nothing new worth posting (at most 5 passes per
+   part), so one review finds what there is rather than leaving it for later pushes. The bot
+   checks each finding's file and line against the diff, moving it to the nearest changed line
+   up to 3 lines away if needed. It drops findings the bot already raised in an earlier review,
+   and findings below the *comment level*. Past the comment cap, the least severe findings are
+   **held for the next review** rather than dropped: the review says how many, they count as
+   open (so the bot doesn't approve), and the next review checks they still apply, at the line
+   they're on now, and posts them with its own findings under the same cap: most severe first,
+   and a held finding ahead of a new one at the same level. The last automatic review has no
+   next one, so it posts everything.
+5. On a re-review, it first checks its unresolved findings on files that changed since the last
    review. For each file it gives the model the current file and the earlier findings, and asks
    which are fixed. For each confirmed fix it **replies in the thread** ("✅ Confirmed fixed in
    `abc1234`…") **and then resolves the thread**. A finding whose file the PR no longer changes is
    closed the same way. Anything the model isn't sure about stays open.
-5. It posts **one** GitHub review: inline comments plus a summary. Findings that can't be placed
+6. It posts **one** GitHub review: inline comments plus a summary. Findings that can't be placed
    on a changed line go in the summary. If GitHub rejects an inline position, the review is
    reposted with every finding in the summary, so nothing is lost.
-6. With a *request-changes level* set, the review **requests changes** while a finding at that
+7. With a *request-changes level* set, the review **requests changes** while a finding at that
    level or above is open: an unresolved earlier thread or a new finding. Otherwise, with an
    *approval level* set, the review is an **approval** when no finding at that level or above is
    open. Anything in between is a comment that says how many findings hold back approval. A later
@@ -513,12 +535,12 @@ event checks it for replies, so polling only catches anything missed.
    approval, and the next review requests changes again. A reply in the PR triggers the
    check within a poll; a thread resolved by hand with no new comment isn't visible in the PR list,
    so it's picked up by the 15-minute re-check instead.
-7. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
+8. A failed review is retried twice, after 2 and 8 minutes. After that the PR shows `error`
    until the next push or **Review now**. Clicking **Review now** while an automatic review of the
    PR is already queued turns that queued review into the manual one, so the request isn't lost,
    and a manual review that has to wait (for example, when its org's settings can't be read) keeps
    its place even if the queue is full when it's retried.
-8. Each posted review counts as one round on the PR, and its body says which ("Bot review number
+9. Each posted review counts as one round on the PR, and its body says which ("Bot review number
    3 of 10"). Once the bot has posted *Most reviews per PR* reviews, the next push isn't reviewed:
    the PR shows `limit` and gets one comment saying the limit is reached. Later pushes aren't
    reviewed either, and the comment isn't repeated. Raising the limit gets the latest push reviewed
@@ -580,7 +602,7 @@ defaults; an org owner can override them for their org (see
 | Setting | Default | |
 |---|---|---|
 | Wait after push | 60 s | Delay before reviewing, so several quick pushes trigger one review |
-| Max comments per review | 20 | The most severe findings are kept |
+| Max comments per review | 20 | The most severe findings are posted; the rest are held for the next review (the last automatic review posts them all) |
 | Post comments at | `[P5] NIT` and above | Lower levels are counted in the summary, not posted. Replaces *Minimum severity*: a saved `nit`/`minor`/`major`/`critical` becomes P5/P4/P2/P1. |
 | Approve when nothing is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never approve*. Can't be broader than the comment level. For example, comments at P4 with approval at P3: the bot approves when no P1–P3 finding is open, even with open P4 comments. An instance that saved *Never approve* before P3 became the default keeps it. |
 | Request changes while anything is unresolved at | `[P3] MINOR (Defect)` and above | A level from P1 to P5, or *Never request changes*. Can't be broader than the approval level, since a finding that requests changes must also hold back approval. With the defaults (both P3), an open P1–P3 finding requests changes and the bot approves when none is open. Make the request-changes level more severe than the approval level, for example P2 with approval at P3, and an open P3 only holds back approval. Saved settings and org policies from before this setting existed get P3 (an org gets the instance's level). |
@@ -625,8 +647,12 @@ for you. For a manual install under `/opt`, see [deploy/prbot.service](deploy/pr
 for the unit file and install commands. Either way it writes logs to the journal:
 `journalctl -u prbot -f`.
 
-**Updating.** Run `go install github.com/OMG-Software/omg-review-bot/cmd/prbot@latest` (or
-rebuild, or install the newer package), then restart the bot. Reviews that were interrupted are re-queued on startup. When
+**Updating.** First click **Stop reviews** under the review slots on the dashboard. The reviews
+and replies under way finish, but no new ones start; due ones wait. Once every slot is idle, the
+dashboard says it's safe to restart. Then run
+`go install github.com/OMG-Software/omg-review-bot/cmd/prbot@latest` (or rebuild, or install the
+newer package) and restart the bot, which starts reviewing again on its own (**Resume reviews**
+does it without a restart). Reviews interrupted anyway are re-queued on startup. When
 updating from a version without organizations, the database is migrated on startup and each
 repository is linked to its org on the next repo sync (**Sync from GitHub** does it at once).
 Until then, the activity entries for a repository that isn't linked yet are shown only to
@@ -679,7 +705,8 @@ boot:
 sudo systemctl enable --now prbot
 ```
 
-An upgrade restarts a running bot on the new version. Removing the package stops the service but
+An upgrade restarts a running bot on the new version; click **Stop reviews** on the dashboard and
+wait for the review slots to go idle first, so no review is cut short. Removing the package stops the service but
 keeps the `prbot` user and `/var/lib/prbot`, because the database there holds the GitHub App key;
 delete them by hand if you're done with the bot. To clear the admin password of a packaged
 install, run `sudo -u prbot prbot -data /var/lib/prbot -reset-password`.
@@ -884,8 +911,9 @@ a public issue.
   permissions above are the minimum it needs.
 - PR titles, descriptions and code are untrusted. They're given to the model as data, and the
   prompts tell it to ignore instructions inside them. If an injected instruction got through
-  anyway, the worst outcome is a misleading comment: the model has no tools and can't take
-  actions.
+  anyway, the worst outcome is a misleading comment: the model's only tools read files of the
+  PR's own repository (at its head or base commit) through the bot's installation, so it can't
+  run anything, write anything or reach another repository or host.
 - Everything the model writes (findings, summaries, thread replies, `@<app-name>` answers and
   fix confirmations) is made inert before the bot posts it under its own name. Raw HTML is
   escaped and Markdown images become plain links, so nothing loads (or leaks data in its URL)

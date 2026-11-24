@@ -160,6 +160,17 @@ CREATE INDEX IF NOT EXISTS idx_model_calls_account ON model_calls(account_id, ts
 CREATE INDEX IF NOT EXISTS idx_model_calls_set ON model_calls(model_set, ts);
 CREATE INDEX IF NOT EXISTS idx_model_calls_ts ON model_calls(ts);
 CREATE INDEX IF NOT EXISTS idx_reviews_started ON reviews(started_at);
+-- Findings a review found but held back by its comment limit, to post with
+-- the PR's next review. head_sha is the commit they were found on.
+CREATE TABLE IF NOT EXISTS held_findings (
+  account_id INTEGER NOT NULL,
+  repo       TEXT NOT NULL,
+  number     INTEGER NOT NULL,
+  head_sha   TEXT NOT NULL,
+  data       TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, repo, number)
+);
 `
 
 // addedColumns were added after the first release. Opening an older database
@@ -994,6 +1005,30 @@ func (s *Store) LatestPostedReview(accountID int64, repo string, number int) (*R
 		return nil, nil
 	}
 	return r, err
+}
+
+// ---------- held findings ----------
+
+// HeldFindings returns the findings (as the bot stored them) held back from
+// a PR's last review, and the commit they were found on. data is "" if none.
+func (s *Store) HeldFindings(accountID int64, repo string, number int) (data, headSHA string, err error) {
+	err = s.db.QueryRow(`SELECT data, head_sha FROM held_findings WHERE account_id=? AND repo=? AND number=?`,
+		accountID, repo, number).Scan(&data, &headSHA)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	return data, headSHA, err
+}
+
+// SetHeldFindings replaces a PR's held findings; data "" clears them.
+func (s *Store) SetHeldFindings(accountID int64, repo string, number int, headSHA, data string) error {
+	if data == "" {
+		_, err := s.db.Exec(`DELETE FROM held_findings WHERE account_id=? AND repo=? AND number=?`, accountID, repo, number)
+		return err
+	}
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO held_findings(account_id, repo, number, head_sha, data, updated_at) VALUES(?,?,?,?,?,?)`,
+		accountID, repo, number, headSHA, data, time.Now().Unix())
+	return err
 }
 
 // ---------- handled comments (reply idempotency) ----------

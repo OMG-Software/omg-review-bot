@@ -196,3 +196,79 @@ func TestInjectedModelOutputIsInert(t *testing.T) {
 		t.Errorf("review body has %d notes markers, want 1", n)
 	}
 }
+
+// Sanitizing twice changes nothing: a finding is sanitized as it's found and
+// again as it's posted, and a held one again each review.
+func TestSanitizeIdempotent(t *testing.T) {
+	for _, in := range []string{
+		"if amount > order.balance && a < b",
+		"<details><summary>x</summary> <img src=x> </div>",
+		"@alice and @org/team, email a@b.c, &#64;bob &commat;carol",
+		"prbot: marker <!-- prbot:review -->",
+		"```suggestion\n/close now\nfoo\n```\n/approve\n ![img](x)",
+		"~~~\ncode\n~~~ and ``` inline ``` fence",
+		"use ``` here and ~~~ there",
+		"/merge please\n  /lgtm",
+		strings.Repeat("é", maxModelBody+50),
+		// Breaks added past the cap: cut again, the text would get shorter.
+		strings.Repeat("@alice ", maxModelBody/7),
+		strings.Repeat("@a ", maxModelTitle),
+		"text with a model's own " + z + "break, " + z + "@bob and prbot" + z + ":x",
+		// A fence the cap leaves open is closed: that must fit too.
+		strings.Repeat("@a ", maxModelBody/3-2) + "\n```\nx",
+		strings.Repeat("x", maxModelBody-2) + "\n~~~~~~~~\ny",
+		"line\r\nwith\rreturns",
+		// A fence as long as the cap: closed with a copy, it couldn't fit.
+		strings.Repeat("~", maxModelBody),
+		strings.Repeat("`", maxModelBody/2) + "\nx",
+		strings.Repeat("x", maxModelBody-70) + "\n" + strings.Repeat("~", maxFenceRun) + "\ny",
+		// Breaks inside code stay, so these lines double in length.
+		"```\n" + strings.Repeat("/a\n", maxModelBody/3),
+		"```\n" + strings.Repeat("prbot:\n", maxModelBody/7),
+	} {
+		if once := sanitizeModelText(in); sanitizeModelText(once) != once {
+			t.Errorf("sanitizeModelText twice changes %q: %q", in, sanitizeModelText(once))
+		}
+		if once := sanitizeModelLine(in); sanitizeModelLine(once) != once {
+			t.Errorf("sanitizeModelLine twice changes %q: %q", in, sanitizeModelLine(once))
+		}
+	}
+}
+
+// Code is kept as written, zero-width characters and all: a suggestion is
+// applied as it's posted. Outside code, the text fits the cap once broken.
+func TestSanitizeKeepsCodeAndCap(t *testing.T) {
+	in := "Fix the separator:\n```suggestion\nsep := \"a" + z + "b\"\n```\nthen @bob" + z + " can merge."
+	out := sanitizeModelText(in)
+	if !strings.Contains(out, "```suggestion\nsep := \"a"+z+"b\"\n```") {
+		t.Errorf("the suggestion's code was changed:\n%q", out)
+	}
+	for _, in := range []string{
+		strings.Repeat("@a ", maxModelBody),
+		strings.Repeat("@a ", maxModelBody/3-2) + "\n```\nx",
+		strings.Repeat("y", maxModelBody*2),
+		strings.Repeat("~", maxModelBody),
+		strings.Repeat("`", maxModelBody/2) + "\nx",
+		strings.Repeat("x", maxModelBody-70) + "\n" + strings.Repeat("~", maxFenceRun) + "\ny",
+		"```\n" + strings.Repeat("/a\n", maxModelBody/3),
+		"```\n" + strings.Repeat("prbot:\n", maxModelBody/7),
+		"```\n" + strings.Repeat("/a\n", maxModelBody),
+	} {
+		if n := len(stripBreaks(sanitizeModelText(in))); n > maxModelBody {
+			t.Errorf("sanitized text is %d bytes without its breaks; the cap is %d", n, maxModelBody)
+		}
+	}
+}
+
+// A fence up to maxFenceRun long is code; a longer run is broken like any
+// other, so GitHub doesn't see a fence either.
+func TestLongFenceRunNotTrusted(t *testing.T) {
+	ok := strings.Repeat("~", maxFenceRun)
+	if out := sanitizeModelText(ok + "\n@a\n" + ok); !strings.Contains(out, ok+"\n@a\n") {
+		t.Errorf("a %d-character fence should keep its code as written: %q", maxFenceRun, out)
+	}
+	long := strings.Repeat("~", maxFenceRun+1)
+	if out := sanitizeModelText(long + "\n@a\n" + long); !strings.HasPrefix(out, z+long) || !strings.Contains(out, "@"+z+"a") {
+		t.Errorf("a %d-character fence should be broken and its lines cleaned: %q", maxFenceRun+1, out)
+	}
+}

@@ -293,10 +293,48 @@ func TestFailoverPastBadJSONAndBrokenModels(t *testing.T) {
 	})
 	e.b.pollOnce(e.ctx)
 	drain(e.ctx, e.b)
-	if len(e.gh.reviews) != 1 || chatty.count() != 2 || e.lm.count() == 0 {
-		t.Fatalf("reviews %d, chatty calls %d (want its 2 tries), good calls %d", len(e.gh.reviews), chatty.count(), e.lm.count())
+	// The chatty model answers in prose when offered tools, then gets its 2
+	// tries at the JSON before the next model takes over.
+	if len(e.gh.reviews) != 1 || chatty.count() != 3 || e.lm.count() == 0 {
+		t.Fatalf("reviews %d, chatty calls %d (want 1 with tools and its 2 tries), good calls %d", len(e.gh.reviews), chatty.count(), e.lm.count())
 	}
 	if r := lastReview(t, e.st); r.Model != "chatty → test-model" {
+		t.Errorf("review recorded model %q", r.Model)
+	}
+}
+
+// A model that refuses tools after an earlier one failed gets the retry
+// without tools: the review doesn't go back to the model that failed.
+func TestFailoverToolRefusalStaysOnRefuser(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	var downPlain atomic.Int32 // requests without tools that reached the failing model
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Tools []any `json:"tools"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Tools) > 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		downPlain.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": clean}, "finish_reason": "stop"}}})
+	}))
+	t.Cleanup(down.Close)
+	refuser := &fakeLLM{review: clean, refuseTools: true}
+	refuserSrv := httptest.NewServer(refuser.handler(t))
+	t.Cleanup(refuserSrv.Close)
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Models = settings.Models{Strategy: settings.StrategyFailover,
+			Configs: []settings.LLM{modelAt("down", down.URL), modelAt("refuser", refuserSrv.URL), cfg.LLM}}
+	})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || downPlain.Load() != 0 || refuser.count() != 2 {
+		t.Fatalf("reviews %d, tool-free requests to the failed model %d (want 0), refuser calls %d (want its refusal and its answer)",
+			len(e.gh.reviews), downPlain.Load(), refuser.count())
+	}
+	if r := lastReview(t, e.st); r.Model != "refuser" {
 		t.Errorf("review recorded model %q", r.Model)
 	}
 }

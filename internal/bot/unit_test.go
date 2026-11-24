@@ -79,15 +79,31 @@ func TestPrepareFindings(t *testing.T) {
 		{Path: "other.go", Line: 1, Severity: "minor", Title: "Elsewhere", Body: "..."},           // not in diff -> note
 		{Path: "pkg/a.go", Line: 1, Severity: "nit", Title: "Over the cap", Body: "..."},
 	}
-	inline, notes, dropped := prepareFindings(st, p, all, mine)
+	inline, notes, held, dropped := prepareFindings(st, p, all, mine, st.Review.MaxComments)
 	if len(inline) != 2 || inline[0].Severity != "P2" || inline[0].Path != "pkg/a.go" || inline[1].Line != 3 {
 		t.Errorf("inline = %+v", inline)
 	}
 	if len(notes) != 1 || notes[0].Title != "Elsewhere" {
 		t.Errorf("notes = %+v", notes)
 	}
-	if dropped != 2 {
-		t.Errorf("dropped = %d, want 2 (one duplicate, one over the cap)", dropped)
+	if len(held) != 1 || held[0].Title != "Over the cap" || held[0].Severity != "P5" {
+		t.Errorf("held = %+v, want the nit over the cap", held)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1 (the duplicate)", dropped)
+	}
+
+	// With no limit (the last automatic review), nothing is held.
+	inline, notes, held, _ = prepareFindings(st, p, all, mine, 0)
+	if len(held) != 0 || len(inline)+len(notes) != 4 {
+		t.Errorf("unlimited: inline %d, notes %d, held %d; want 4 posted, none held", len(inline), len(notes), len(held))
+	}
+
+	// A finding reworded by a later pass, on the same line, is the same finding.
+	again := append(all, finding{Path: "pkg/a.go", Line: 2, Severity: "P2", Title: "SQL injection risk", Body: "..."})
+	inline, notes, held, _ = prepareFindings(st, p, again, mine, 0)
+	if n := len(inline) + len(notes) + len(held); n != 4 {
+		t.Errorf("reworded duplicate: %d findings kept, want 4", n)
 	}
 }
 

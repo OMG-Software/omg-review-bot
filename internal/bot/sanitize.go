@@ -54,6 +54,7 @@ const (
 	maxModelBody  = 12000 // a finding body, summary or reply
 	maxModelTitle = 200
 	zwsp          = "​"
+	maxFenceRun   = 64 // longest fence trusted (see opensFence); real ones are a few characters
 )
 
 var (
@@ -79,12 +80,59 @@ var (
 )
 
 // sanitizeModelText makes model-written markdown safe to post (see above).
+// Sanitizing twice changes nothing (a finding is sanitized as it's found, as
+// it's posted, and if held, each review). Outside code, the breaks are taken
+// out first, so they're added the same way each time; inside it, what's added
+// is left alone by a second pass anyway, and the code is kept as written (a
+// suggestion is applied as it's posted). And the text is cut so that all of
+// it, with the breaks taken out and any fence it closes, is within the cap,
+// so a second pass doesn't cut it again.
 func sanitizeModelText(s string) string {
 	// Every line ending CommonMark knows, so these lines are GitHub's lines:
 	// a lone "\r" ends one too.
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
-	lines := strings.Split(textutil.Truncate(strings.TrimSpace(s), maxModelBody), "\n")
+	s = stripBreaks(strings.TrimSpace(s))
+	for cut := maxModelBody; ; {
+		out := sanitizeLines(strings.Split(textutil.Truncate(s, cut), "\n"))
+		n := len(stripBreaks(out))
+		if n <= maxModelBody || cut == 0 { // Truncate(s, 0) is "", which fits
+			return out
+		}
+		// A fixed overhead (a closing fence) goes by cutting that much more.
+		// One that grows with the text (breaks inside code, which stay) may
+		// be as large as the text, so then the cut shrinks in proportion.
+		if over := n - maxModelBody; over < cut {
+			cut -= over
+		} else {
+			cut = cut * maxModelBody / n
+		}
+	}
+}
 
+// stripBreaks takes the zero-width breaks out of text outside code blocks,
+// finding the blocks as sanitizeLines does.
+func stripBreaks(s string) string {
+	if !strings.Contains(s, zwsp) {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	fence := ""
+	for i, l := range lines {
+		if fence != "" {
+			if closesFence(l, fence) {
+				fence = ""
+			}
+			continue
+		}
+		lines[i] = strings.ReplaceAll(l, zwsp, "")
+		if opensFence(lines[i]) {
+			fence = fenceOpenRE.FindStringSubmatch(lines[i])[1]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func sanitizeLines(lines []string) string {
 	out := make([]string, 0, len(lines)+1)
 	for i := 0; i < len(lines); i++ {
 		if !opensFence(lines[i]) {
@@ -138,7 +186,7 @@ func isSuggestion(info string) bool {
 // which is posted after other text on the same line. There it can't open a
 // fence, so it gets no fence exemption: "**[P1]** ~~~ ![x](…)" isn't code.
 func sanitizeModelLine(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
+	s = strings.Join(strings.Fields(strings.ReplaceAll(s, zwsp, "")), " ")
 	return cleanLine(breakMarkers(textutil.Truncate(s, maxModelTitle)))
 }
 
@@ -153,10 +201,13 @@ func afterPrefix(prefix, text string) string {
 	return prefix + " " + text
 }
 
-// opensFence reports whether a line opens a fenced code block GitHub is sure to see.
+// opensFence reports whether a line opens a fenced code block GitHub is sure
+// to see. A fence longer than maxFenceRun isn't trusted (it's broken like any
+// other run): one left open is closed with a copy of it, and a copy that long
+// could take the text over the cap however much of the rest is cut.
 func opensFence(l string) bool {
 	m := fenceOpenRE.FindStringSubmatch(l)
-	return m != nil && !(m[1][0] == '`' && strings.Contains(m[2], "`"))
+	return m != nil && len(m[1]) <= maxFenceRun && !(m[1][0] == '`' && strings.Contains(m[2], "`"))
 }
 
 func breakMarkers(s string) string {

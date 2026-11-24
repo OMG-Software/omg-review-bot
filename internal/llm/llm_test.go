@@ -151,3 +151,20 @@ func TestLimits(t *testing.T) {
 		}
 	}
 }
+
+// An object that is JSON but doesn't fit is skipped whole: an object nested
+// in it isn't taken as the answer.
+func TestDecodeJSONSkipsNestedObjects(t *testing.T) {
+	type out struct {
+		Summary  string           `json:"summary"`
+		Comments []map[string]any `json:"comments"`
+	}
+	var v out
+	if err := DecodeJSON(`{"summary":"x","comments":{"path":"a.go","summary":"inner"}}`, &v); err == nil {
+		t.Errorf("decoded %+v from an object whose comments aren't a list", v)
+	}
+	v = out{}
+	if err := DecodeJSON(`{"comments":{"a":1}} then {"summary":"ok","comments":[]}`, &v); err != nil || v.Summary != "ok" {
+		t.Errorf("a later top-level object should still be found: %+v, %v", v, err)
+	}
+}

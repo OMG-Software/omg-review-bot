@@ -58,6 +58,10 @@ type fakeGitHub struct {
 	failEdits     bool             // editing issue comments fails (a 502)
 	failList      bool             // listing the PR's conversation comments fails (a 502)
 	mainStatus    string           // main.go's status in the PR's files; "" = modified
+	extraFiles    []any            // more files in the PR, after main.go and go.sum
+	compareFiles  []any            // the files a compare lists; nil = main.go
+	compareGone   bool             // a compare fails: its base commit is gone (a force-push)
+	failReview    bool             // posting a review fails (a 400)
 	onReview      func()           // runs once after recording a review, before responding
 }
 
@@ -125,14 +129,16 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			if mainStatus == "" {
 				mainStatus = "modified"
 			}
-			send([]any{
+			send(append([]any{
 				map[string]any{"filename": "main.go", "status": mainStatus, "additions": 2, "deletions": 0, "patch": f.patch},
 				map[string]any{"filename": "go.sum", "status": "modified", "patch": "@@ -1 +1 @@\n-x\n+y"},
-			})
+			}, f.extraFiles...))
 		case p == "/repos/acme/web/pulls/7/comments" && r.Method == http.MethodGet:
 			send(f.comments)
 		case p == "/repos/acme/web/pulls/7/reviews" && r.Method == http.MethodGet:
 			send(f.reviewLog)
+		case p == "/repos/acme/web/pulls/7/reviews" && r.Method == http.MethodPost && f.failReview:
+			w.WriteHeader(http.StatusBadRequest)
 		case p == "/repos/acme/web/pulls/7/reviews" && r.Method == http.MethodPost:
 			var req github.ReviewRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
@@ -175,6 +181,14 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 				"path": "main.go", "created_at": time.Now().Format(time.RFC3339)})
 			send(map[string]any{"id": id})
 		case strings.HasPrefix(p, "/repos/acme/web/compare/"):
+			if f.compareGone {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if f.compareFiles != nil {
+				send(map[string]any{"files": f.compareFiles})
+				return
+			}
 			send(map[string]any{"files": []any{map[string]any{"filename": "main.go"}}})
 		case p == "/repos/acme/web/issues/7/comments" && r.Method == http.MethodPost:
 			var body map[string]string
@@ -258,8 +272,19 @@ type fakeLLM struct {
 	calls   int
 	review  string // code_review reply
 	verify  string // fix_check reply
+	held    string // held_check reply
 	prompts map[string][]string
 	systems map[string][]string
+
+	// A request offering tools is a review (only reviews offer them).
+	reviews     []string         // replies for successive reviews, before review
+	toolCalls   []map[string]any // calls made, one per tool-offering request, before any review reply
+	batchCalls  []map[string]any // calls made all at once, by the first tool-offering request
+	toolResults []string         // "tool" messages the bot sent back
+	toolOffers  int              // requests that offered tools
+	refuseTools bool             // reject requests offering tools, as a server without tool support does
+	prose       int              // tool-offering requests answered in prose instead of JSON
+	proseText   string           // what they say; "" = a sentence of prose
 }
 
 func (l *fakeLLM) handler(t *testing.T) http.Handler {
@@ -272,6 +297,7 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 		l.calls++
 		var req struct {
 			Messages []struct {
+				Role    string `json:"role"`
 				Content string `json:"content"`
 			} `json:"messages"`
 			ResponseFormat *struct {
@@ -279,11 +305,62 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 					Name string `json:"name"`
 				} `json:"json_schema"`
 			} `json:"response_format"`
+			Tools []any `json:"tools"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		kind := "text"
 		if req.ResponseFormat != nil {
 			kind = req.ResponseFormat.JSONSchema.Name
+		}
+		if len(req.Tools) > 0 {
+			kind = "code_review"
+			l.toolOffers++
+			if l.refuseTools {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"model does not support tools"}`)
+				return
+			}
+			if len(l.batchCalls) > 0 || len(l.toolCalls) > 0 {
+				var calls []any
+				if len(l.batchCalls) > 0 {
+					for _, c := range l.batchCalls {
+						calls = append(calls, c)
+					}
+					l.batchCalls = nil
+				} else {
+					calls = []any{l.toolCalls[0]}
+					l.toolCalls = l.toolCalls[1:]
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{"message": map[string]any{"content": "", "tool_calls": calls}, "finish_reason": "tool_calls"}},
+					"usage":   map[string]any{"prompt_tokens": 100, "completion_tokens": 10},
+				})
+				return
+			}
+			if l.prose > 0 {
+				l.prose--
+				text := l.proseText
+				if text == "" {
+					text = "I looked and main.go divides by zero."
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{"message": map[string]any{"content": text}, "finish_reason": "stop"}},
+					"usage":   map[string]any{"prompt_tokens": 100, "completion_tokens": 10},
+				})
+				return
+			}
+		} else {
+			// Without tools, strict chat templates need the roles to alternate.
+			for i := 1; i < len(req.Messages); i++ {
+				if req.Messages[i].Role == req.Messages[i-1].Role {
+					t.Errorf("%s request has two %s messages in a row (message %d)", kind, req.Messages[i].Role, i)
+				}
+			}
+		}
+		for _, m := range req.Messages {
+			if m.Role == "tool" {
+				l.toolResults = append(l.toolResults, m.Content)
+			}
 		}
 		user := req.Messages[1].Content
 		if l.prompts == nil {
@@ -297,9 +374,15 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 			if strings.Contains(user, "go.sum") {
 				t.Errorf("ignored file go.sum was sent to the model")
 			}
-			content = "<think>let me look</think>```json\n" + l.review + "\n```"
+			reply := l.review
+			if len(l.reviews) > 0 {
+				reply, l.reviews = l.reviews[0], l.reviews[1:]
+			}
+			content = "<think>let me look</think>```json\n" + reply + "\n```"
 		case "fix_check":
 			content = l.verify
+		case "held_check":
+			content = l.held
 		case "thread_reply":
 			content = `{"reply":"Good point. Dividing by a constant zero will panic at runtime, so please guard it.","resolved":false}`
 		}

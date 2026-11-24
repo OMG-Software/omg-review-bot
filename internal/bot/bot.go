@@ -6,6 +6,7 @@ package bot
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -37,8 +38,11 @@ type Status struct {
 	Working []Activity
 	// Slots has one entry per worker, in worker order; an idle worker's
 	// entry has no What.
-	Slots         []Activity
-	QueueLen      int
+	Slots    []Activity
+	QueueLen int
+	// Stopped: an administrator stopped new work (StopReviews); the jobs in
+	// Working still run to the end.
+	Stopped       bool
 	RateRemaining int64
 	LastWebhook   time.Time
 	// WebhooksActive: deliveries arrived recently, so polling has slowed to a safety net.
@@ -153,6 +157,11 @@ type Bot struct {
 	takeMu sync.Mutex // held by the worker taking a job off the queue
 	// working is what each worker is doing (zero when idle).
 	working [workers]Activity
+	// stopped holds back new jobs (StopReviews) until resumed is closed. It's
+	// not saved: a restart, the reason to stop, starts work again.
+	stopMu  sync.Mutex
+	stopped bool
+	resumed chan struct{}
 
 	docsMu    sync.Mutex
 	docsCache map[string]docsEntry // project guideline docs by repo@ref
@@ -351,6 +360,7 @@ func (b *Bot) Status() Status {
 	}
 	sort.SliceStable(s.Working, func(i, j int) bool { return s.Working[i].started.Before(s.Working[j].started) })
 	s.QueueLen = len(b.queued)
+	s.Stopped = b.Stopped()
 	if b.app != nil {
 		s.RateRemaining = b.app.RateRemaining()
 	}
@@ -376,12 +386,34 @@ func (b *Bot) setCurrent(ctx context.Context, pr *store.PR, format string, args 
 	b.mu.Unlock()
 }
 
-// jobStarted marks worker slot as starting a new job, which Working is
-// ordered by. Nothing is shown until the job says what it's doing.
-func (b *Bot) jobStarted(slot int) {
-	b.mu.Lock()
-	b.working[slot] = Activity{started: time.Now()}
-	b.mu.Unlock()
+// admit starts j in worker slot unless new work is stopped, in which case it
+// waits until it isn't (false: ctx ended first). The check and marking the
+// slot busy are one step under both locks (b.mu first, as in Status), so
+// once StopReviews returns no job starts, and every job that did shows as
+// running until it's done.
+func (b *Bot) admit(ctx context.Context, slot int, j job) bool {
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		b.mu.Lock()
+		b.stopMu.Lock()
+		stopped, ch := b.stopped, b.resumed
+		if !stopped {
+			now := time.Now()
+			b.working[slot] = Activity{What: "Starting", Repo: j.repo, Number: j.number, Account: j.org, Since: now, started: now}
+		}
+		b.stopMu.Unlock()
+		b.mu.Unlock()
+		if !stopped {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ch:
+		}
+	}
 }
 
 // logf writes to both the process log and the activity log shown in the UI.
@@ -492,6 +524,55 @@ func (b *Bot) reviewDone(j job) {
 	}
 }
 
+// StopReviews lets the jobs under way finish but starts no more, so the bot
+// can be upgraded or restarted without cutting a review short. Due reviews
+// aren't queued meanwhile; they stay pending, and are queued once work
+// resumes (ResumeReviews, or the next start).
+func (b *Bot) StopReviews() {
+	b.stopMu.Lock()
+	defer b.stopMu.Unlock()
+	if !b.stopped {
+		b.stopped, b.resumed = true, make(chan struct{})
+		b.log.Info("new reviews stopped; the ones under way will finish")
+	}
+}
+
+// ResumeReviews undoes StopReviews.
+func (b *Bot) ResumeReviews() {
+	b.stopMu.Lock()
+	if b.stopped {
+		b.stopped = false
+		close(b.resumed)
+		b.log.Info("reviews resumed")
+	}
+	b.stopMu.Unlock()
+	b.kickDue()
+}
+
+// Stopped reports whether new work is stopped.
+func (b *Bot) Stopped() bool {
+	b.stopMu.Lock()
+	defer b.stopMu.Unlock()
+	return b.stopped
+}
+
+// waitResumed waits while new work is stopped. It's false if ctx ended first.
+func (b *Bot) waitResumed(ctx context.Context) bool {
+	for {
+		b.stopMu.Lock()
+		stopped, ch := b.stopped, b.resumed
+		b.stopMu.Unlock()
+		if !stopped {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ch:
+		}
+	}
+}
+
 // worker runs queued jobs as worker slot. A job for a PR another worker is
 // busy with is handed to that worker instead, to run after its current one.
 func (b *Bot) worker(ctx context.Context, slot int) { b.work(ctx, slot, b.runJob) }
@@ -500,6 +581,9 @@ func (b *Bot) worker(ctx context.Context, slot int) { b.work(ctx, slot, b.runJob
 func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)) {
 	ctx = context.WithValue(ctx, workerSlot{}, slot)
 	for {
+		if !b.waitResumed(ctx) { // while stopped, jobs stay queued
+			return
+		}
 		// A job is taken and its PR claimed in one step, so a PR's jobs are
 		// claimed in queue order and run in it. Its organization is normally
 		// stamped when it was queued, so the take is in memory only.
@@ -517,11 +601,12 @@ func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)
 		ok := b.claimPR(j, b.orgSlots()) // read now, so the share is the current one
 		b.takeMu.Unlock()
 		for ok {
-			if ctx.Err() != nil {
+			// A job taken just before work stopped, or the PR's next one,
+			// waits rather than starting.
+			if !b.admit(ctx, slot, j) {
 				b.releasePR(j)
 				return
 			}
-			b.jobStarted(slot)
 			run(ctx, b.dequeued(j))
 			b.mu.Lock()
 			b.working[slot] = Activity{}
@@ -793,6 +878,9 @@ func (b *Bot) loadSkill(st settings.Settings) *skill.Skill {
 // ReviewNow queues a manual review of a PR of accountID's (the account the
 // caller checked the person may act for).
 func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
+	if b.Stopped() {
+		return errors.New("reviews are stopped for now (an administrator is about to restart the bot); ask again once they're back")
+	}
 	b.prMu.Lock()
 	pr, err := b.store.GetPR(repo, number)
 	if err != nil || pr == nil || pr.AccountID != accountID {

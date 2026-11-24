@@ -574,10 +574,28 @@ func (c *Client) DismissReview(ctx context.Context, fullName string, number int,
 
 // ChangedFiles lists the files that differ between two commits.
 func (c *Client) ChangedFiles(ctx context.Context, fullName, base, head string) ([]string, error) {
+	files, err := c.CompareFiles(ctx, fullName, base, head)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		out = append(out, f.Filename)
+	}
+	return out, nil
+}
+
+// CompareFile is a file changed between two commits; PreviousFilename is
+// its name at the first one when it was renamed.
+type CompareFile struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+}
+
+// CompareFiles lists the files changed between base and head, with renames.
+func (c *Client) CompareFiles(ctx context.Context, fullName, base, head string) ([]CompareFile, error) {
 	var r struct {
-		Files []struct {
-			Filename string `json:"filename"`
-		} `json:"files"`
+		Files []CompareFile `json:"files"`
 	}
 	path := fmt.Sprintf("/repos/%s/compare/%s...%s", fullName, url.PathEscape(base), url.PathEscape(head))
 	if _, err := c.do(ctx, http.MethodGet, path, nil, nil, &r); err != nil {
@@ -586,20 +604,32 @@ func (c *Client) ChangedFiles(ctx context.Context, fullName, base, head string) 
 	if len(r.Files) >= 300 {
 		return nil, errors.New("comparison lists 300 files, so it may be incomplete") // GitHub's cap
 	}
-	out := make([]string, 0, len(r.Files))
-	for _, f := range r.Files {
-		out = append(out, f.Filename)
-	}
-	return out, nil
+	return r.Files, nil
 }
 
 // TreePaths lists every file path in the repository at ref (a SHA or branch).
 // truncated is true when GitHub cut the listing short (very large repositories).
 func (c *Client) TreePaths(ctx context.Context, fullName, ref string) (paths []string, truncated bool, err error) {
+	files, truncated, err := c.TreeFiles(ctx, fullName, ref)
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	return paths, truncated, err
+}
+
+// TreeFile is a file in a repository's tree, and its size in bytes.
+type TreeFile struct {
+	Path string
+	Size int
+}
+
+// TreeFiles is TreePaths with each file's size.
+func (c *Client) TreeFiles(ctx context.Context, fullName, ref string) (files []TreeFile, truncated bool, err error) {
 	var r struct {
 		Tree []struct {
 			Path string `json:"path"`
 			Type string `json:"type"`
+			Size int    `json:"size"`
 		} `json:"tree"`
 		Truncated bool `json:"truncated"`
 	}
@@ -609,10 +639,10 @@ func (c *Client) TreePaths(ctx context.Context, fullName, ref string) (paths []s
 	}
 	for _, e := range r.Tree {
 		if e.Type == "blob" {
-			paths = append(paths, e.Path)
+			files = append(files, TreeFile{Path: e.Path, Size: e.Size})
 		}
 	}
-	return paths, r.Truncated, nil
+	return files, r.Truncated, nil
 }
 
 // graphqlURL derives the GraphQL endpoint from the REST base URL

@@ -1,12 +1,14 @@
 package web
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/bot"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
@@ -209,5 +211,70 @@ func TestByWeek(t *testing.T) {
 	// the chart is still by week.
 	if y := byWeek(make([]store.DayStats, 365)); len(y) != 53 || y[0].Span != 1 || periodUnit(y) != "week" {
 		t.Errorf("a year's weeks: %d, first %d days, unit %q", len(y), y[0].Span, periodUnit(y))
+	}
+}
+
+// An administrator can stop new reviews from the dashboard (to restart the
+// bot safely) and resume them; nobody else can.
+func TestStopReviewsButton(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice: an owner of acme only
+	if code, _ := s.post("/reviews/stop", nil); s.b.Stopped() {
+		t.Fatalf("a non-administrator stopped reviews (HTTP %d)", code)
+	}
+	if err := s.st.SetUserAdmin(aliceID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, body, _ := s.get("/"); !strings.Contains(body, `action="/reviews/stop"`) {
+		t.Fatal("the dashboard has no Stop reviews button")
+	}
+	s.post("/reviews/stop", nil)
+	if !s.b.Stopped() {
+		t.Fatal("reviews not stopped")
+	}
+	_, body, _ := s.get("/")
+	for _, want := range []string{"New reviews are stopped", "safe to upgrade and restart", `action="/reviews/resume"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("stopped dashboard lacks %q", want)
+		}
+	}
+	if strings.Contains(body, `action="/reviews/stop"`) {
+		t.Error("stopped dashboard still offers Stop reviews")
+	}
+	s.post("/reviews/resume", nil)
+	if s.b.Stopped() {
+		t.Fatal("reviews not resumed")
+	}
+}
+
+// While reviews are stopped with jobs still running, the dashboard says how
+// many (it isn't yet safe to restart) and still offers Resume.
+func TestStoppedDashboardWithJobRunning(t *testing.T) {
+	s := newTestSite(t)
+	job := bot.Activity{What: "Reviewing", Repo: "acme/web", Number: 7}
+	for _, c := range []struct {
+		working []bot.Activity
+		says    string
+	}{
+		{[]bot.Activity{job}, "1 job is still running"},
+		{[]bot.Activity{job, job}, "2 jobs are still running"},
+	} {
+		var buf bytes.Buffer
+		err := s.srv.pages["dashboard.html"].ExecuteTemplate(&buf, "layout", page{Title: "Dashboard", Nav: "dash", Auth: true, V: &viewer{Admin: true},
+			Status: bot.Status{Stopped: true, Working: c.working},
+			D:      s.srv.dashboardData()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := buf.String()
+		for _, want := range []string{"New reviews are stopped", c.says, `action="/reviews/resume"`, "Resume reviews"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("dashboard with %d jobs lacks %q", len(c.working), want)
+			}
+		}
+		if strings.Contains(body, "safe to upgrade and restart") {
+			t.Errorf("says it's safe to restart with %d jobs still running", len(c.working))
+		}
 	}
 }
