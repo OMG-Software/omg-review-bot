@@ -94,11 +94,18 @@ func sanitizeModelText(s string) string {
 	s = stripBreaks(strings.TrimSpace(s))
 	for cut := maxModelBody; ; {
 		out := sanitizeLines(strings.Split(textutil.Truncate(s, cut), "\n"))
-		over := len(stripBreaks(out)) - maxModelBody
-		if over <= 0 || cut <= over {
+		n := len(stripBreaks(out))
+		if n <= maxModelBody || cut == 0 { // Truncate(s, 0) is "", which fits
 			return out
 		}
-		cut -= over
+		// A fixed overhead (a closing fence) goes by cutting that much more.
+		// One that grows with the text (breaks inside code, which stay) may
+		// be as large as the text, so then the cut shrinks in proportion.
+		if over := n - maxModelBody; over < cut {
+			cut -= over
+		} else {
+			cut = cut * maxModelBody / n
+		}
 	}
 }
 

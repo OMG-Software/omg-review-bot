@@ -222,6 +222,9 @@ func TestSanitizeIdempotent(t *testing.T) {
 		strings.Repeat("~", maxModelBody),
 		strings.Repeat("`", maxModelBody/2) + "\nx",
 		strings.Repeat("x", maxModelBody-70) + "\n" + strings.Repeat("~", maxFenceRun) + "\ny",
+		// Breaks inside code stay, so these lines double in length.
+		"```\n" + strings.Repeat("/a\n", maxModelBody/3),
+		"```\n" + strings.Repeat("prbot:\n", maxModelBody/7),
 	} {
 		if once := sanitizeModelText(in); sanitizeModelText(once) != once {
 			t.Errorf("sanitizeModelText twice changes %q: %q", in, sanitizeModelText(once))
@@ -247,6 +250,9 @@ func TestSanitizeKeepsCodeAndCap(t *testing.T) {
 		strings.Repeat("~", maxModelBody),
 		strings.Repeat("`", maxModelBody/2) + "\nx",
 		strings.Repeat("x", maxModelBody-70) + "\n" + strings.Repeat("~", maxFenceRun) + "\ny",
+		"```\n" + strings.Repeat("/a\n", maxModelBody/3),
+		"```\n" + strings.Repeat("prbot:\n", maxModelBody/7),
+		"```\n" + strings.Repeat("/a\n", maxModelBody),
 	} {
 		if n := len(stripBreaks(sanitizeModelText(in))); n > maxModelBody {
 			t.Errorf("sanitized text is %d bytes without its breaks; the cap is %d", n, maxModelBody)

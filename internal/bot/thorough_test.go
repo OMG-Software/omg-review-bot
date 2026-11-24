@@ -1082,3 +1082,13 @@ func TestSmallContextReviewsWithoutTools(t *testing.T) {
 		t.Error("no context size reviewed without tools: too small for them, the review fails")
 	}
 }
+
+// An excerpt near the end of a file ends at its last line, as the diff does.
+func TestNumberedExcerptEndsAtLastLine(t *testing.T) {
+	if got := numberedExcerpt("a\nb\n", 2, 5); got != "      1 | a\n>     2 | b\n" {
+		t.Errorf("numberedExcerpt = %q", got)
+	}
+	if got := numberedExcerpt("a\nb\n", 3, 5); got != "" {
+		t.Errorf("line 3 of a 2-line file = %q; want nothing", got)
+	}
+}

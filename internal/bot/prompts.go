@@ -494,7 +494,7 @@ Rules:
 
 // numberedExcerpt returns lines [line-radius, line+radius] of content with line numbers.
 func numberedExcerpt(content string, line, radius int) string {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	lines := fileLines(content)
 	if line <= 0 || line > len(lines) {
 		return ""
 	}
