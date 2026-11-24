@@ -586,10 +586,13 @@ func (c *Client) ChangedFiles(ctx context.Context, fullName, base, head string) 
 }
 
 // CompareFile is a file changed between two commits; PreviousFilename is
-// its name at the first one when it was renamed.
+// its name at the first one when it was renamed. Patch is empty when GitHub
+// doesn't show the change (a binary or very large file).
 type CompareFile struct {
 	Filename         string `json:"filename"`
 	PreviousFilename string `json:"previous_filename"`
+	Status           string `json:"status"`
+	Patch            string `json:"patch"`
 }
 
 // CompareFiles lists the files changed between base and head, with renames.

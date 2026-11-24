@@ -56,7 +56,7 @@ func (b *Bot) postQueued(qn *queuedNotice, j job) {
 		return
 	}
 	qn.cl, qn.repo, qn.number, qn.head = app.Installation(pr.InstallationID), pr.Repo, pr.Number, pr.HeadSHA
-	qn.id = b.announceNotice(ctx, qn.cl, pr, pr.HeadSHA, queuedBody(pr.HeadSHA, time.Now()))
+	qn.id = b.announceNotice(ctx, qn.cl, pr, queuedBody(pr.HeadSHA, time.Now()))
 }
 
 // takeQueued returns review job j's queued comment once its post has

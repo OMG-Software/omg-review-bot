@@ -18,6 +18,33 @@ type botThread struct {
 	root     *github.ReviewComment
 	nodeID   string // GraphQL thread ID; "" when unknown
 	resolved bool
+	replies  []int64 // people's replies since the bot last spoke in the thread (see noteReplies)
+}
+
+// noteReplies records, for each thread, the replies people posted since the
+// bot last spoke in it. Other bots' replies aren't counted.
+func noteReplies(threads []botThread, comments []github.ReviewComment, login string) {
+	idx := make(map[int64]int, len(threads))
+	for i, t := range threads {
+		idx[t.root.ID] = i
+	}
+	// In the order they were posted: GitHub's IDs only grow, and unlike the
+	// times (to the second) they never tie.
+	sorted := append([]github.ReviewComment(nil), comments...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	for _, c := range sorted {
+		i, ok := idx[c.InReplyToID] // GitHub points replies at the thread's first comment
+		if c.InReplyToID == 0 || !ok {
+			continue
+		}
+		switch {
+		case c.User.Login == login:
+			threads[i].replies = nil
+		case isBotUser(c.User):
+		default:
+			threads[i].replies = append(threads[i].replies, c.ID)
+		}
+	}
 }
 
 func (t botThread) severity() string { return findingSeverity(t.root.Body) }
@@ -105,14 +132,23 @@ func countLevels(level string, sevs []string) int {
 
 // replyAndResolve replies in a finding's thread, then marks it resolved.
 // Without a reply the thread is left open, so a resolution is never silent.
+// The exception is a thread someone has answered since the bot last spoke
+// ("Fixed in …"): that answer already says why it's resolved, so the thread
+// is resolved without another comment, and the answer isn't replied to
+// later either.
 func (b *Bot) replyAndResolve(ctx context.Context, cl *github.Client, pr *store.PR, t *botThread, text string) error {
-	if _, err := cl.ReplyToReviewComment(ctx, pr.Repo, pr.Number, t.root.ID, text); err != nil {
-		return fmt.Errorf("reply: %w", err)
+	if len(t.replies) == 0 {
+		if _, err := cl.ReplyToReviewComment(ctx, pr.Repo, pr.Number, t.root.ID, text); err != nil {
+			return fmt.Errorf("reply: %w", err)
+		}
 	}
 	if err := cl.ResolveReviewThread(ctx, t.nodeID); err != nil {
 		return fmt.Errorf("resolve thread: %w", err)
 	}
 	t.resolved = true
+	for _, id := range t.replies {
+		_ = b.store.MarkHandled(id, "thread-fixed", pr.Repo, pr.Number, 0)
+	}
 	return nil
 }
 

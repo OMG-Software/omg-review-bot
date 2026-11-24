@@ -92,6 +92,13 @@ func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, mc *jobCli
 	}
 	sort.Slice(roots, func(i, j int) bool { return roots[i] < roots[j] })
 
+	// A reply that comes with a push ("Fixed in …") waits for that push's
+	// review: its fix check resolves the thread if the fix holds, without an
+	// answer, and only otherwise is the reply answered, against the new code.
+	// handleReview queues this job again once the review is done.
+	waitForReview := reviewComing(st, pr)
+	waiting := 0
+
 	var threadStates map[int64]github.ReviewThread // fetched on first need
 	resolveThread := func(root *github.ReviewComment) {
 		if threadStates == nil {
@@ -154,6 +161,10 @@ func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, mc *jobCli
 			}
 			continue
 		}
+		if waitForReview {
+			waiting++
+			continue
+		}
 		b.setCurrent(ctx, pr, "Replying to @%s on %s#%d", last.User.Login, pr.Repo, pr.Number)
 		text, resolved, err := b.threadReply(ctx, st, mc, cl, pr, root, list, login, last)
 		if err != nil {
@@ -171,7 +182,20 @@ func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, mc *jobCli
 			resolveThread(root) // only after the reply, so the thread says why
 		}
 	}
+	if waiting > 0 {
+		b.mu.Lock()
+		b.repliesWaiting[prKey(job{repo: pr.Repo, number: pr.Number})] = true
+		b.mu.Unlock()
+		b.logf("info", pr.Repo, pr.Number, "%d thread repl(ies) wait for the review of %s, whose fix check may resolve them", waiting, short(pr.HeadSHA))
+	}
 	return nil
+}
+
+// reviewComing reports whether a review of a commit newer than the last one
+// reviewed is due or under way.
+func reviewComing(st settings.Settings, pr *store.PR) bool {
+	return pr.HeadSHA != "" && pr.HeadSHA != pr.ReviewedSHA &&
+		(pr.Status == "pending" || pr.Status == "reviewing") && (st.Review.Enabled || pr.ForceRetry)
 }
 
 var threadSchema = map[string]any{
