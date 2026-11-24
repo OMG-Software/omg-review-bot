@@ -56,7 +56,13 @@
 <div class="card"><figure class="chart"><figcaption><b>Most active repositories</b> <span class="muted">· reviews posted{{if and (eq (len $d.RepoReviewRows) $d.RepoChartRows) (gt $d.RepoCount $d.RepoChartRows)}} · the top {{len $d.RepoReviewRows}} of {{$d.RepoCount}} repositories{{end}}</span></figcaption>
     {{if $d.RepoReviewRows}}{{rankChart "Most active repositories by reviews posted" $d.RepoReviewRows}}{{else}}<p class="muted">No reviews posted in this period; the table shows the failed ones.</p>{{end}}</figure></div>
 <div class="card"><figure class="chart"><figcaption><b>Findings by repository and level</b>{{if and (eq (len $d.RepoSevRows) $d.RepoChartRows) (gt $d.RepoCount $d.RepoChartRows)}} <span class="muted">· the top {{len $d.RepoSevRows}} of {{$d.RepoCount}} repositories, by findings</span>{{end}}</figcaption>
-    {{if $d.RepoSevRows}}{{sevStackChart "Findings by repository and level" $d.RepoSevRows}}{{else}}<p class="muted">No findings in this period.</p>{{end}}</figure></div>
+    {{if $d.RepoSevRows}}{{sevStackChart "Findings by repository and level" $d.RepoSevRows}}
+    <details class="table-view"><summary>Show as a table</summary>
+      <div class="table-scroll"><table class="num"><thead><tr><th>Repository</th><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th></tr></thead><tbody>
+      {{range $d.RepoSevRows}}<tr><td>{{.Label}}</td>{{range .Sev}}<td class="n">{{.}}</td>{{end}}</tr>{{end}}
+      </tbody></table></div>
+    </details>
+    {{else}}<p class="muted">No findings in this period.</p>{{end}}</figure></div>
 <div class="card">
   {{if gt $d.RepoCount (len $d.Repos)}}<p class="hint">The {{len $d.Repos}} most reviewed of {{$d.RepoCount}} repositories.</p>{{end}}
   <div class="table-scroll">
@@ -89,7 +95,13 @@
 <h2 class="section">Organizations</h2>
 <div class="card">
   {{if $d.OrgSevRows}}<figure class="chart"><figcaption><b>Findings by organization and level</b>{{if and (eq (len $d.OrgSevRows) $d.RepoChartRows) (gt $d.OrgCount $d.RepoChartRows)}} <span class="muted">· the top {{len $d.OrgSevRows}} of {{$d.OrgCount}} organizations, by findings</span>{{end}}</figcaption>
-    {{sevStackChart "Findings by organization and level" $d.OrgSevRows}}</figure>{{end}}
+    {{sevStackChart "Findings by organization and level" $d.OrgSevRows}}
+    <details class="table-view"><summary>Show as a table</summary>
+      <div class="table-scroll"><table class="num"><thead><tr><th>Organization</th><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th></tr></thead><tbody>
+      {{range $d.OrgSevRows}}<tr><td>{{.Label}}</td>{{range .Sev}}<td class="n">{{.}}</td>{{end}}</tr>{{end}}
+      </tbody></table></div>
+    </details>
+  </figure>{{end}}
   {{if $d.Orgs}}
   <div class="table-scroll">
   <table class="num">

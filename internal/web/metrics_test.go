@@ -48,10 +48,11 @@ func TestMetricsPages(t *testing.T) {
 			t.Errorf("acme's metrics lack %q", want)
 		}
 	}
-	// The page says every chart has a table: the day, level and per-period
-	// charts carry one each (the others sit above their tables).
-	if n := strings.Count(body, `class="table-view"`); n != 3 {
-		t.Errorf("acme's metrics have %d table views, want 3", n)
+	// The page says every chart has a table: the day, level, per-period and
+	// findings-by-repository charts carry one each (the rest sit above
+	// tables of exactly their rows).
+	if n := strings.Count(body, `class="table-view"`); n != 4 {
+		t.Errorf("acme's metrics have %d table views, want 4", n)
 	}
 	// Another organization's repositories and models stay out of it, and an
 	// instance model's server isn't named to members.

@@ -460,6 +460,9 @@ func limitsNote(lim llm.Limits, c settings.LLM, ctx, out bool) string {
 			parts = append(parts, fmt.Sprintf("%d output tokens, half the context window (the model allows %d, but the other half is kept for the prompt)", c.MaxOutputTokens, lim.Output))
 		case lim.Context > 0:
 			parts = append(parts, fmt.Sprintf("%d output tokens, half the context window (the server sets no separate output cap, so the other half is kept for the prompt)", c.MaxOutputTokens))
+		case c.MaxOutputTokens < settings.FallbackOutputTokens:
+			// The default didn't fit: Normalize cut it to half the window.
+			parts = append(parts, fmt.Sprintf("%d output tokens, half the %d-token context window (the server didn't report a cap, and the default, %d, is more than half the window)", c.MaxOutputTokens, c.ContextTokens, settings.FallbackOutputTokens))
 		default:
 			parts = append(parts, fmt.Sprintf("%d output tokens, the default (the server didn't report a cap)", c.MaxOutputTokens))
 		}

@@ -208,6 +208,20 @@ func TestLimitsNote(t *testing.T) {
 	if note := limitsNote(llm.Limits{Context: 40960, Output: 8192}, c, true, true); strings.Count(note, "the model's maximum") != 2 {
 		t.Errorf("ordinary limits: %q", note)
 	}
+	// An 8192 window typed and no cap reported: the default output, 16384,
+	// is cut to half the window, and isn't called the default.
+	c = settings.NewLLM()
+	c.ContextTokens = 8192
+	c.SetMaximums(0, 0, false, true)
+	if note := limitsNote(llm.Limits{}, c, false, true); c.MaxOutputTokens != 4096 ||
+		!strings.Contains(note, "4096 output tokens, half the 8192-token context window") || strings.Contains(note, "the default (") {
+		t.Errorf("default output in a small window: %d, %q", c.MaxOutputTokens, note)
+	}
+	c = settings.NewLLM()
+	c.SetMaximums(0, 0, true, true)
+	if note := limitsNote(llm.Limits{}, c, true, true); strings.Count(note, "the default (") != 2 {
+		t.Errorf("defaults: %q", note)
+	}
 }
 
 // TestModelMaximums: a model added with its token limits left empty gets
