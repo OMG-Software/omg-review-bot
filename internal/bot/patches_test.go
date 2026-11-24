@@ -141,8 +141,48 @@ func TestRebuildFetchesAreCapped(t *testing.T) {
 		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
 	}
 	body := e.gh.reviews[0].Body
-	if !strings.Contains(body, "art/logo.PNG (binary)") || !strings.Contains(body, "too many others couldn't be rebuilt to try it") {
+	if !strings.Contains(body, "art/logo.PNG (binary)") || !strings.Contains(body, "the review stopped rebuilding after 20 files it couldn't use") {
 		t.Errorf("want logo.PNG listed as binary and the rest as not tried:\n%s", body)
+	}
+}
+
+// A patch that only removes lines takes no review slot, whether GitHub sent
+// it or it was rebuilt, so it leaves room for the next file.
+func TestRemovalOnlyPatchesLeaveRoom(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), func(cfg *settings.Settings) {
+		noApproval(cfg)
+		cfg.Review.MaxFiles = 2 // main.go, and one more
+	})
+	e.gh.mergeBase = "mmm333"
+	e.gh.extraFiles = []any{
+		map[string]any{"filename": "gone.txt", "status": "modified", "patch": "@@ -1,2 +0,0 @@\n-x\n-y"},
+		map[string]any{"filename": "emptied.go", "status": "modified"}, // rebuilt: emptied at head
+		map[string]any{"filename": "late.go", "status": "modified"},
+	}
+	e.gh.fileAt = map[string]string{
+		"mmm333:emptied.go": "package emptied\n",
+		"aaa111:emptied.go": "",
+		"mmm333:late.go":    "package late\n",
+		"aaa111:late.go":    "package late\n\nfunc Late() {}\n",
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+
+	prompts := strings.Join(e.lm.prompts["code_review"], "\n")
+	if !strings.Contains(prompts, "+ func Late() {}") {
+		t.Errorf("want late.go reviewed in the slot the removal-only files left:\n%s", prompts)
+	}
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	body := e.gh.reviews[0].Body
+	for _, want := range []string{"gone.txt (only lines removed)", "emptied.go (only lines removed)"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("files not reviewed lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "late.go (") {
+		t.Errorf("late.go should be reviewed, not listed:\n%s", body)
 	}
 }
 
@@ -191,13 +231,16 @@ func TestRemovalOnlyFileIsListed(t *testing.T) {
 }
 
 // Without the merge base, a modified file can't be diffed, but an added one
-// still can: its whole content is the change.
+// still can: its whole content is the change. The modified files are set
+// aside without a fetch, so however many come first, they don't use up the
+// failed-rebuild cap before the added file is reached.
 func TestRebuildsAddedFilesWithoutMergeBase(t *testing.T) {
 	e := newReviewEnv(t, reviewOf(), noApproval)
-	e.gh.extraFiles = []any{
-		map[string]any{"filename": "late.go", "status": "modified"},
-		map[string]any{"filename": "fresh.go", "status": "added"},
+	e.gh.extraFiles = []any{map[string]any{"filename": "late.go", "status": "modified"}}
+	for i := range maxFailedRebuilds + 5 {
+		e.gh.extraFiles = append(e.gh.extraFiles, map[string]any{"filename": fmt.Sprintf("mod%02d.go", i), "status": "modified"})
 	}
+	e.gh.extraFiles = append(e.gh.extraFiles, map[string]any{"filename": "fresh.go", "status": "added"})
 	e.gh.fileAt = map[string]string{"aaa111:fresh.go": "package fresh\n"}
 	e.b.pollOnce(e.ctx)
 	drain(e.ctx, e.b)
@@ -205,6 +248,11 @@ func TestRebuildsAddedFilesWithoutMergeBase(t *testing.T) {
 	prompts := strings.Join(e.lm.prompts["code_review"], "\n")
 	if !strings.Contains(prompts, "     1 + package fresh") || strings.Contains(prompts, "late.go") {
 		t.Errorf("want fresh.go reviewed and late.go not:\n%s", prompts)
+	}
+	for _, r := range e.gh.fileReads {
+		if strings.Contains(r, "mod") || strings.Contains(r, "late.go") {
+			t.Errorf("fetched a modified file with no merge base to diff it against: %s", r)
+		}
 	}
 	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.reviews[0].Body, "late.go (GitHub sent no diff, and the commit it branched from couldn't be found)") {
 		t.Errorf("late.go should be listed as missing its merge base: %+v", e.gh.reviews)

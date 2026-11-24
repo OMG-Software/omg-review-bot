@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -26,10 +27,12 @@ const (
 	rebuildWorkers = 4
 	// patchContext is the context lines a rebuilt patch has, as GitHub's do.
 	patchContext = 3
-	// maxFailedRebuilds is how many files a review fetches and fails to
-	// rebuild (binary, too large, unreadable) before it stops trying: a
-	// failure leaves its slot for the next file, so without a cap a pull
-	// request full of assets would cost a fetch of each on every push.
+	// maxFailedRebuilds is how many files a review fetches without getting a
+	// patch it can comment on (binary, too large, unreadable, or only lines
+	// removed) before it stops trying: such a file leaves its slot for the
+	// next, so without a cap a pull request full of assets would cost a
+	// fetch of each on every push. Files set aside without a fetch (a known
+	// binary type, or no merge base) don't count.
 	maxFailedRebuilds = 20
 )
 
@@ -52,8 +55,9 @@ func init() {
 // fillPatches gives each file in files that GitHub sent no patch for a patch
 // built from its contents, or, where that can't be done, a NoDiff saying why.
 // Deleted and ignored files are left alone. Files are rebuilt until there
-// are as many patches as the review could take; one that can't be (a binary
-// file, say) doesn't count, so the next is tried in its place.
+// are as many patches as the review could take; one that takes no review
+// slot (a binary file, or one whose lines were only removed) doesn't count,
+// so the next is tried in its place.
 func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Settings, pr *store.PR, files []github.PRFile, base, head string) {
 	ignore := compileGlobs(st.Review.IgnorePatterns)
 	var todo []int
@@ -62,7 +66,9 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 		switch {
 		case f.Status == "removed" || matchAny(ignore, f.Filename):
 		case f.Patch != "":
-			have++
+			if takesSlot(f.Patch) {
+				have++
+			}
 		case binaryExts[strings.ToLower(path.Ext(f.Filename))]:
 			files[i].NoDiff = "binary"
 		default:
@@ -89,10 +95,11 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 		mergeBase = mb
 	}
 
-	// Each file is handed out only while fewer patches than room have been
-	// rebuilt and fewer than maxFailedRebuilds have failed, so the workers in
-	// flight overshoot by at most a few files, which the review's own file
-	// limit then leaves out. stop says why the rest aren't tried.
+	// Each file is handed out only while fewer patches that take a review
+	// slot than room have been rebuilt, and fewer than maxFailedRebuilds
+	// fetches have given the review nothing, so the workers in flight
+	// overshoot by at most a few files, which the review's own file limit
+	// then leaves out. stop says why the rest aren't tried.
 	var mu sync.Mutex
 	rebuilt, failed := 0, 0
 	stop := func() string {
@@ -102,7 +109,7 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 		case rebuilt >= room:
 			return "file limit reached"
 		case failed >= maxFailedRebuilds:
-			return "GitHub sent no diff, and too many others couldn't be rebuilt to try it"
+			return "GitHub sent no diff, and the review stopped rebuilding after " + strconv.Itoa(maxFailedRebuilds) + " files it couldn't use"
 		}
 		return ""
 	}
@@ -114,16 +121,23 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 				f := &files[i]
 				f.Patch, f.Additions, f.Deletions, f.NoDiff = rebuildPatch(ctx, cl, pr.Repo, *f, mergeBase, head)
 				mu.Lock()
-				if f.Patch != "" {
+				if takesSlot(f.Patch) {
 					rebuilt++
 				} else {
-					failed++
+					failed++ // fetched, and nothing the review can comment on
 				}
 				mu.Unlock()
 			}
 		})
 	}
 	for _, i := range todo {
+		// Without the merge base, a file that isn't new can't be diffed:
+		// it's set aside here, with no fetch, so it neither costs a request
+		// nor counts toward maxFailedRebuilds against the added files after it.
+		if files[i].Status != "added" && mergeBase == "" {
+			files[i].NoDiff = noMergeBase
+			continue
+		}
 		if why := stop(); why != "" {
 			files[i].NoDiff = why
 			continue
@@ -132,7 +146,17 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 	}
 	close(work)
 	wg.Wait()
-	b.logf("info", pr.Repo, pr.Number, "GitHub sent no diff for %d file(s); rebuilt %d from their contents", len(todo), rebuilt)
+	b.logf("info", pr.Repo, pr.Number, "GitHub sent no diff for %d file(s); rebuilt %d for review from their contents", len(todo), rebuilt)
+}
+
+// noMergeBase is why a file that isn't new isn't rebuilt without the merge base.
+const noMergeBase = "GitHub sent no diff, and the commit it branched from couldn't be found"
+
+// takesSlot reports whether a patch uses one of the review's file slots, as
+// buildPlan counts them: it has a line to comment on. A patch that only
+// removes lines has none, and buildPlan lists it as not reviewed.
+func takesSlot(patch string) bool {
+	return patch != "" && !diff.Parse("", patch).Empty()
 }
 
 // rebuildPatch diffs one file between the merge base (the previous name, if
@@ -140,7 +164,7 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 func rebuildPatch(ctx context.Context, cl *github.Client, repo string, f github.PRFile, mergeBase, head string) (patch string, added, removed int, noDiff string) {
 	const unread = "GitHub sent no diff, and its contents couldn't be read"
 	if f.Status != "added" && mergeBase == "" {
-		return "", 0, 0, "GitHub sent no diff, and the commit it branched from couldn't be found"
+		return "", 0, 0, noMergeBase
 	}
 	// One byte past the limit is enough to tell a file is too large, and
 	// head is checked before the old version is fetched at all.
