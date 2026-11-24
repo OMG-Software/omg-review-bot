@@ -164,6 +164,25 @@ svg.viz { width: 100%; height: auto; display: block; overflow: visible; }
 .viz-hit { fill: transparent; }
 .viz-col:hover .viz-hit { fill: color-mix(in srgb, var(--series-1) 10%, transparent); }
 .viz-col:hover .viz-bar { fill: color-mix(in srgb, var(--series-1) 80%, var(--text)); }
+/* Finding levels: one ordinal blue ramp, P1 the most contrast against the
+   panel in each mode (validated light on #fff, dark on #1b1f27). */
+:root { --sev-1: #0d366b; --sev-2: #1c5cab; --sev-3: #2a78d6; --sev-4: #5598e7; --sev-5: #86b6ef; }
+@media (prefers-color-scheme: dark) {
+  :root { --sev-1: #b7d3f6; --sev-2: #6da7ec; --sev-3: #3987e5; --sev-4: #256abf; --sev-5: #184f95; }
+}
+.viz-s1 { fill: var(--sev-1); background: var(--sev-1); }
+.viz-s2 { fill: var(--sev-2); background: var(--sev-2); }
+.viz-s3 { fill: var(--sev-3); background: var(--sev-3); }
+.viz-s4 { fill: var(--sev-4); background: var(--sev-4); }
+.viz-s5 { fill: var(--sev-5); background: var(--sev-5); }
+.viz-seg { stroke: var(--panel); stroke-width: 2px; } /* the gap between stacked segments */
+svg.viz.thin .viz-seg, .viz-seg.short { stroke: none; } /* too narrow, or too short, to keep colour inside the gap */
+.viz-col:hover .viz-seg { opacity: .82; }
+ul.viz-legend { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+ul.viz-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.viz-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+table.num td.n, table.num th.n { text-align: right; font-variant-numeric: tabular-nums; }
+.table-scroll { overflow-x: auto; }
 details.table-view { margin-top: 8px; font-size: 13px; }
 details.table-view summary { cursor: pointer; color: var(--muted); }
 details.table-view table { margin-top: 6px; }

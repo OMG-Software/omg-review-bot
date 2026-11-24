@@ -113,7 +113,13 @@ Once the bot has saved the key, you can delete the `.pem` file.
 In **Settings → Models → Manage models**:
 1. Pick the provider.
 2. Click **Load models** and choose one.
-3. Set **Context tokens** to the context length the model is actually loaded with.
+3. Leave **Context tokens** and **Max output tokens** empty to use the model's maximums: the bot
+   reads them from the model's server when you save (or click **Use model maximums** to see them
+   first). LM Studio, Ollama, OpenRouter, vLLM and llama.cpp's server report them. A server that
+   reports a context window but no output cap gets half the window for output, leaving the other
+   half for the prompt. A server that reports nothing gets 131072 / 16384, and the page says so.
+   For LM Studio, load the model with that context length; for Ollama the context sets `num_ctx`,
+   which also sets how much memory the model takes, so lower it if your machine can't hold it.
 4. Click **Test model**, then **Save**.
 
 You can add more models (up to 8) and choose how they're used:
@@ -240,8 +246,34 @@ administrators sign in with GitHub as usual.
 
 **Statistics.** Each org's **Overview** shows, for the last 7, 30 or 90 days: reviews posted,
 findings by level, confirmed fixes, approvals, average review time and model tokens, plus a chart
-of reviews per day and a breakdown by repository. Hover a bar for its numbers, or open **Show as a
-table**. The administrator's dashboard shows the same totals for every org.
+of reviews per day, a chart of the most active repositories and a breakdown by repository. Hover a
+bar for its numbers, or open **Show as a table**. The administrator's dashboard shows the same
+totals and most active repositories for every org.
+
+**Metrics.** Each org's **Metrics** tab (for its members and owners) shows, for the last 7, 30 or
+90 days or a year, what the bot did and what it caught:
+
+- **Value:** reviews posted, findings (inline and in summaries, per review), P1–P2 findings,
+  findings confirmed fixed and the fix rate, the time from the bot first seeing a PR to its first
+  review (median and 90th percentile), conversations answered (review-thread replies and
+  @mentions), verdicts (approved, changes requested, comment only) and model calls and tokens.
+- **Findings per day by level**, and the reviews and findings per day.
+- **Repositories:** the most active by reviews posted, findings by repository and level, and a
+  table with each repository's reviews, PRs, findings at each level, fixes, fix rate, approvals,
+  change requests and failures.
+- **Models:** how many reviews were sent to each configured model and how many it answered, its
+  replies, calls, failures, tokens and average answer time. With failover, a review is sent to a
+  model that fails and then to the next; with collate, every review goes to every model. Members
+  see the instance's models only as numbered placeholders ("Instance model 1"), never their names;
+  the org's own models show their name and model.
+
+Administrators get the same page for every org together under **Metrics**, plus each org's
+findings by level and a table of orgs, and the server and owner of every model. Each model's card
+on the **Models** page shows its reviews, replies and failed calls over the last 30 days.
+Model calls are counted from this version on and kept for 400 days; the other metrics come from
+the review history, so they cover earlier reviews too. The fix rate compares the fixes confirmed in
+a period with the findings posted in it, so a fix of an older finding counts: read it as an
+estimate.
 
 **Per-org review settings.** An org uses the instance's review settings until an owner saves its
 **Review settings** page. From then on it has its own: wait after push, comment, approval and
@@ -562,7 +594,7 @@ defaults; an org owner can override them for their org (see
 | Poll interval | 60 s | Repo list refreshes every 15 min |
 | While webhooks arrive, poll every | 900 s | Used instead of *Poll interval* while webhook deliveries arrive (one in the last 24 h) |
 | Public URL / Client ID / Client secret / Webhook secret | empty | See [Organizations and sign-in](#organizations-and-sign-in) and [Webhooks](#webhooks) |
-| Context tokens / Max output tokens | 32768 / 4096 | Must match how the model is loaded |
+| Context tokens / Max output tokens | the model's maximums (131072 / 16384 if its server doesn't say) | Must match how the model is loaded |
 | Temperature | 0.2 | |
 
 ### Command-line flags

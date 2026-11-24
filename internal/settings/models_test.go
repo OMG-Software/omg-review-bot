@@ -70,3 +70,34 @@ func TestCheckOwn(t *testing.T) {
 		}
 	}
 }
+
+func TestSetMaximums(t *testing.T) {
+	for _, c := range []struct {
+		name             string
+		ctxMax, outMax   int
+		setCtx, setOut   bool
+		wantCtx, wantOut int
+	}{
+		{"both reported", 200000, 64000, true, true, 200000, 64000},
+		{"window only: half for output", 262144, 0, true, true, 262144, 131072},
+		{"output cap above half the window", 32768, 32768, true, true, 32768, 16384},
+		{"nothing reported", 0, 0, true, true, FallbackContextTokens, FallbackOutputTokens},
+		{"only output blank", 0, 8192, false, true, 50000, 8192},
+		{"only context blank", 128000, 0, true, false, 128000, 1000},
+		// The context kept (50000 here, below; 131072 in the review) is
+		// larger than the server's window: output is half the server's.
+		{"only output blank, smaller window", 40960, 0, false, true, 50000, 20480},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l := NewLLM()
+			l.ContextTokens, l.MaxOutputTokens = 50000, 1000
+			l.SetMaximums(c.ctxMax, c.outMax, c.setCtx, c.setOut)
+			if l.ContextTokens != c.wantCtx || l.MaxOutputTokens != c.wantOut {
+				t.Errorf("limits = %d/%d, want %d/%d", l.ContextTokens, l.MaxOutputTokens, c.wantCtx, c.wantOut)
+			}
+		})
+	}
+	if d := NewLLM(); d.ContextTokens != FallbackContextTokens || d.MaxOutputTokens != FallbackOutputTokens {
+		t.Errorf("a new model's limits = %d/%d", d.ContextTokens, d.MaxOutputTokens)
+	}
+}

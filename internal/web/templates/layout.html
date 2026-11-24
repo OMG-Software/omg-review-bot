@@ -14,6 +14,7 @@
   <nav>
     {{if .V.Admin}}
     <a href="/" class="{{if eq .Nav "dash"}}active{{end}}">Dashboard</a>
+    <a href="/metrics" class="{{if eq .Nav "metrics"}}active{{end}}">Metrics</a>
     <a href="/orgs" class="{{if eq .Nav "orgs"}}active{{end}}">Organizations</a>
     <a href="/reviews" class="{{if and (eq .Nav "reviews") (not .Org)}}active{{end}}">Reviews</a>
     <a href="/prs" class="{{if and (eq .Nav "prs") (not .Org)}}active{{end}}">Pull requests</a>

@@ -163,6 +163,29 @@ func TestFailover(t *testing.T) {
 	if r := lastReview(t, e.st); r.Model != "test-model" {
 		t.Errorf("review recorded model %q, want the one that answered", r.Model)
 	}
+	// Both models were sent the review; only the second answered it.
+	use := usageByLabel(t, e.st)
+	if b := use["broken"]; b.Reviews != 1 || b.Answered != 0 || b.Failed == 0 || b.Calls != b.Failed {
+		t.Errorf("broken model's use = %+v, want one review sent, none answered, every call failed", b)
+	}
+	if g := use["test-model"]; g.Reviews != 1 || g.Answered != 1 || g.Failed != 0 || g.PromptTokens == 0 {
+		t.Errorf("answering model's use = %+v, want one review sent and answered, with its tokens", g)
+	}
+}
+
+// usageByLabel is every model's use for the test's organization (account
+// 500), by label: a call not tagged with its account isn't counted.
+func usageByLabel(t *testing.T, st *store.Store) map[string]store.ModelUsage {
+	t.Helper()
+	ms, err := st.ModelUsageSince(500, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]store.ModelUsage{}
+	for _, m := range ms {
+		out[m.Label] = m
+	}
+	return out
 }
 
 // TestCollate: two models review the same diff and their findings are
@@ -195,6 +218,13 @@ func TestCollate(t *testing.T) {
 	}
 	if r := lastReview(t, e.st); r.Model != "test-model + second" {
 		t.Errorf("review recorded model %q", r.Model)
+	}
+	// Collate sends every review to every model.
+	use := usageByLabel(t, e.st)
+	for _, label := range []string{"test-model", "second"} {
+		if u := use[label]; u.Reviews != 1 || u.Answered != 1 {
+			t.Errorf("%s's use = %+v, want the review sent and answered", label, u)
+		}
 	}
 }
 

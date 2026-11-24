@@ -12,11 +12,25 @@
     btn.disabled = true;
     out.className = "result";
     out.textContent = "Working…";
+    const snapshot = () => new URLSearchParams(new FormData(form)).toString();
+    const sent = snapshot();
     try {
       const res = await fetch(btn.dataset.test, { method: "POST", body: new FormData(form) });
       const j = await res.json();
       out.textContent = j.message;
       out.className = "result " + (j.ok ? "ok" : "bad");
+      // "Use model maximums" answers with the limits to put in the form:
+      // only if it's unchanged since they were asked for, as they're for the
+      // model it named then and would overwrite anything typed since.
+      if (j.limits && snapshot() !== sent) {
+        out.textContent = "The form changed while its limits were being read, so they weren't filled in. Press the button again.";
+        out.className = "result bad";
+      } else if (j.limits) {
+        for (const [name, v] of Object.entries(j.limits)) {
+          const field = form.querySelector(`input[name="${name}"]`);
+          if (field) field.value = v;
+        }
+      }
       const dl = btn.dataset.list && document.getElementById(btn.dataset.list);
       if (j.models && dl) {
         dl.replaceChildren(...j.models.map((m) => Object.assign(document.createElement("option"), { value: m })));

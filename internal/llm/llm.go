@@ -304,6 +304,201 @@ func (o *ollama) Models(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// ---------- model limits ----------
+
+// Limits are a model's token limits as its server reports them; 0 means
+// the server didn't say.
+type Limits struct {
+	Context int // the context window: prompt and output together
+	Output  int // the most output tokens one answer can have
+}
+
+// LimitReader is a Client that can ask its server for the model's limits.
+type LimitReader interface {
+	Limits(ctx context.Context) (Limits, error)
+}
+
+// errNoLimits: the server answered but didn't report the model's limits.
+var errNoLimits = errors.New("the server doesn't report the model's token limits")
+
+// Limits asks the server for the model's limits. LM Studio reports them on
+// its own REST API; other OpenAI-compatible servers on their model list, by
+// whichever name they use (OpenRouter, vLLM, LiteLLM, ...), and llama.cpp's
+// server on /props.
+func (o *openAI) Limits(ctx context.Context) (Limits, error) {
+	if o.cfg.Model == "" {
+		return Limits{}, errors.New("no model selected")
+	}
+	root := strings.TrimSuffix(o.base, "/v1")
+	var firstErr error
+	note := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if o.cfg.Provider == "lmstudio" {
+		// The v1 REST API (LM Studio 0.4) lists each loaded instance's
+		// window; v0 gives the model's own entry.
+		var v1 struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := doJSON(ctx, o.hc, http.MethodGet, root+"/api/v1/models", o.cfg.APIKey, nil, &v1); err == nil {
+			for _, m := range v1.Models {
+				if key, _ := m["key"].(string); key == o.cfg.Model {
+					if l := lmStudioLimits(m); l.Context > 0 {
+						return l, nil
+					}
+				}
+			}
+		}
+		var m map[string]any
+		err := doJSON(ctx, o.hc, http.MethodGet, root+"/api/v0/models/"+strings.ReplaceAll(url.PathEscape(o.cfg.Model), "%2F", "/"), o.cfg.APIKey, nil, &m)
+		if err == nil {
+			if l := lmStudioLimits(m); l.Context > 0 {
+				return l, nil
+			}
+		}
+		note(err)
+	}
+	var list struct {
+		Data []map[string]any `json:"data"`
+	}
+	err := doJSON(ctx, o.hc, http.MethodGet, o.base+"/models", o.cfg.APIKey, nil, &list)
+	listed := false
+	if err == nil {
+		for _, m := range list.Data {
+			if id, _ := m["id"].(string); id == o.cfg.Model {
+				listed = true
+				if l := limitsFrom(m); l.Context > 0 || l.Output > 0 {
+					return l, nil
+				}
+			}
+		}
+	}
+	note(err)
+	// A model list without this model most likely means a misspelt name;
+	// saying so beats the defaults' "not reported". (LM Studio lists only
+	// loaded models there, and its own API was asked about this one above.)
+	if err == nil && !listed && o.cfg.Provider != "lmstudio" {
+		return Limits{}, fmt.Errorf("the server's model list has no model named %q; check the name", o.cfg.Model)
+	}
+	// llama.cpp's /props takes no model: it describes the model the server
+	// has loaded. That's this one only when it's the one model listed;
+	// otherwise another model's window would be taken for this one's.
+	if !listed || len(list.Data) != 1 {
+		if firstErr != nil {
+			return Limits{}, firstErr
+		}
+		return Limits{}, errNoLimits
+	}
+	var props struct {
+		Settings struct {
+			NCtx int `json:"n_ctx"`
+		} `json:"default_generation_settings"`
+	}
+	if err := doJSON(ctx, o.hc, http.MethodGet, root+"/props", o.cfg.APIKey, nil, &props); err == nil && props.Settings.NCtx > 0 {
+		return Limits{Context: props.Settings.NCtx}, nil
+	}
+	if firstErr != nil {
+		return Limits{}, firstErr
+	}
+	return Limits{}, errNoLimits
+}
+
+// limitsFrom reads the limits from one model's entry in a server's model
+// list, under the names servers use for them.
+func limitsFrom(m map[string]any) Limits {
+	num := func(m map[string]any, keys ...string) int {
+		for _, k := range keys {
+			if f, ok := m[k].(float64); ok && f > 0 {
+				return int(f)
+			}
+		}
+		return 0
+	}
+	l := Limits{
+		Context: num(m, "max_context_length", "context_length", "max_model_len", "context_window"),
+		Output:  num(m, "max_completion_tokens", "max_output_tokens"),
+	}
+	if tp, ok := m["top_provider"].(map[string]any); ok { // OpenRouter
+		l.Context = max(l.Context, num(tp, "context_length"))
+		if l.Output == 0 {
+			l.Output = num(tp, "max_completion_tokens")
+		}
+	}
+	return l
+}
+
+// lmStudioLimits reads an LM Studio model entry. A loaded model answers in
+// the window it was loaded with, which can be smaller than the model's
+// maximum, so the context is capped at the smallest loaded window (v1's
+// loaded_instances, v0's loaded_context_length).
+func lmStudioLimits(m map[string]any) Limits {
+	l := limitsFrom(m)
+	loaded := func(n float64) {
+		if n > 0 && (l.Context == 0 || int(n) < l.Context) {
+			l.Context = int(n)
+		}
+	}
+	if n, ok := m["loaded_context_length"].(float64); ok {
+		loaded(n)
+	}
+	insts, _ := m["loaded_instances"].([]any)
+	for _, in := range insts {
+		inst, _ := in.(map[string]any)
+		cfg, _ := inst["config"].(map[string]any)
+		if n, ok := cfg["context_length"].(float64); ok {
+			loaded(n)
+		}
+	}
+	return l
+}
+
+// Limits asks Ollama for the model's context window, which /api/show gives
+// in its model_info as "<architecture>.context_length". Ollama has no
+// separate output cap: an answer can use what the prompt leaves.
+func (o *ollama) Limits(ctx context.Context) (Limits, error) {
+	if o.cfg.Model == "" {
+		return Limits{}, errors.New("no model selected")
+	}
+	var out struct {
+		ModelInfo map[string]any `json:"model_info"`
+	}
+	if err := doJSON(ctx, o.hc, http.MethodPost, o.base+"/api/show", o.cfg.APIKey, map[string]any{"model": o.cfg.Model}, &out); err != nil {
+		return Limits{}, err
+	}
+	return ollamaLimits(out.ModelInfo)
+}
+
+// ollamaLimits reads the context window from /api/show's model_info. A
+// model with more than one part (a vision model's projector, say) has more
+// than one "*.context_length", so the main architecture's is read first,
+// and failing that the first by name, never whichever a map gives first.
+func ollamaLimits(info map[string]any) (Limits, error) {
+	num := func(k string) int {
+		if f, ok := info[k].(float64); ok && f > 0 {
+			return int(f)
+		}
+		return 0
+	}
+	if arch, ok := info["general.architecture"].(string); ok && arch != "" {
+		if n := num(arch + ".context_length"); n > 0 {
+			return Limits{Context: n}, nil
+		}
+	}
+	var keys []string
+	for k := range info {
+		if strings.HasSuffix(k, ".context_length") && num(k) > 0 {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return Limits{}, errNoLimits
+	}
+	sort.Strings(keys)
+	return Limits{Context: num(keys[0])}, nil
+}
+
 // ---------- output helpers ----------
 
 // ErrReasoningExhausted means a reasoning model spent its whole output budget

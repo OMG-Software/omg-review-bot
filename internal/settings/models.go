@@ -185,13 +185,58 @@ func (l *LLM) Normalize() {
 	l.APIKey = strings.TrimSpace(l.APIKey)
 	l.Model = strings.TrimSpace(l.Model)
 	l.Temperature = clampF(l.Temperature, 0, 2)
-	l.ContextTokens = clamp(l.ContextTokens, 4096, 2_000_000)
-	l.MaxOutputTokens = clamp(l.MaxOutputTokens, 512, l.ContextTokens/2)
+	l.ContextTokens = clamp(l.ContextTokens, MinContextTokens, MaxContextTokens)
+	l.MaxOutputTokens = clamp(l.MaxOutputTokens, MinOutputTokens, l.ContextTokens/2)
 	l.TimeoutSeconds = clamp(l.TimeoutSeconds, 30, 3600)
 }
 
 // NewLLM is a new configuration with the default limits, for the UI to fill in.
 func NewLLM() LLM { return Defaults().LLM }
+
+// A model's token limits default to its maximums, read from its server when
+// it's added (see SetMaximums). These are used when the server doesn't say.
+const (
+	FallbackContextTokens = 131072
+	FallbackOutputTokens  = 16384
+)
+
+// The limits a model can be given (Normalize). A window smaller than
+// MinContextTokens can't hold a review's prompt, so a server reporting one
+// still gets the minimum, and the bot says so rather than calling it the
+// model's maximum.
+const (
+	MinContextTokens = 4096
+	MaxContextTokens = 2_000_000
+	MinOutputTokens  = 512
+)
+
+// SetMaximums sets the context window (setCtx) and output cap (setOut) to
+// the model's maximums: ctxMax and outMax as its server reports them, 0 when
+// it doesn't. A server that reports a window but no output cap (Ollama, LM
+// Studio) lets an answer use what the prompt leaves, so the output cap is
+// the most the bot allows: half the window, the other half kept for the
+// prompt. Limits the server doesn't report fall back to the defaults above.
+func (l *LLM) SetMaximums(ctxMax, outMax int, setCtx, setOut bool) {
+	if setCtx {
+		l.ContextTokens = FallbackContextTokens
+		if ctxMax > 0 {
+			l.ContextTokens = ctxMax
+		}
+	}
+	if setOut {
+		switch {
+		case outMax > 0:
+			l.MaxOutputTokens = outMax
+		case ctxMax > 0:
+			// Half the smaller window: a context kept as it was can be
+			// larger than the server's.
+			l.MaxOutputTokens = min(l.ContextTokens, ctxMax) / 2
+		default:
+			l.MaxOutputTokens = FallbackOutputTokens
+		}
+	}
+	l.Normalize()
+}
 
 // CheckOwn reports what's wrong with an organization's own model
 // configuration. Unlike the instance's models (set by its administrators),

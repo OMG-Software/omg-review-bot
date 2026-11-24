@@ -93,7 +93,8 @@ func (s *Server) orgOverview(w http.ResponseWriter, r *http.Request) {
 	_, custom := settings.ParsePolicy(org.Policy)
 	s.render(w, r, "org.html", page{Title: org.Login, Nav: "orgs", Org: org, Tab: "overview", D: map[string]any{
 		"Stats": stats, "Days": perDay, "Range": days, "Ranges": statsRanges, "RepoStats": repoStats,
-		"Reviews": reviews, "Counts": counts, "Activity": acts, "Repos": len(repos), "Enabled": enabled,
+		"RepoRows": repoReviewRows(repoStats, 10),
+		"Reviews":  reviews, "Counts": counts, "Activity": acts, "Repos": len(repos), "Enabled": enabled,
 		"CustomPolicy": custom,
 	}})
 }

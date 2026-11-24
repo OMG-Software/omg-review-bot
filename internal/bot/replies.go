@@ -41,6 +41,7 @@ func (b *Bot) handleReplies(ctx context.Context, j job) {
 	} else {
 		st = mst
 	}
+	ctx = withCallTag(ctx, callTag{kind: store.CallReply, accountID: pr.AccountID})
 	mc := &jobClient{b: b, st: st, pr: pr}
 	if st.Replies.Enabled && err == nil {
 		if err := b.replyThreads(ctx, st, mc, cl, pr, login); err != nil {

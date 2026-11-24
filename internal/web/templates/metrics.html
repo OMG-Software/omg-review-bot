@@ -1,0 +1,156 @@
+{{define "content"}}
+{{$d := .D}}{{$s := $d.Stats}}
+<div class="headrow">
+  <h1>Metrics{{if $d.All}} <span class="muted small-h">all organizations</span>{{end}}</h1>
+  <nav class="seg" aria-label="Period">{{range $d.Ranges}}<a href="?days={{.}}" class="{{if eq . $d.Range}}active{{end}}">{{if eq . 365}}1 year{{else}}{{.}} days{{end}}</a>{{end}}</nav>
+</div>
+<p class="lead">What the bot did and what it caught in the last {{$d.Range}} days (UTC).
+  Hover a bar for its numbers; each chart has its numbers in a table too.</p>
+
+<h2 class="section">Value</h2>
+<div class="stats">
+  <div class="stat"><span class="label">Reviews posted</span><span class="value">{{num $s.Posted}}</span>
+    <span class="sub">{{$s.PRs}} pull requests · {{$s.Repos}} repos</span></div>
+  <div class="stat"><span class="label">Findings posted</span><span class="value">{{num $s.Findings}}</span>
+    <span class="sub">{{$s.Comments}} inline · {{$s.Notes}} in summary{{if $s.Posted}} · {{div $s.Findings $s.Posted}} per review{{end}}</span></div>
+  <div class="stat"><span class="label">Critical + major</span><span class="value">{{add (index $s.Sev 0) (index $s.Sev 1)}}</span>
+    <span class="sub">{{index $s.Sev 0}} P1 · {{index $s.Sev 1}} P2</span></div>
+  <div class="stat"><span class="label">Confirmed fixed</span><span class="value">{{num $s.Fixed}}</span>
+    <span class="sub" title="Fixes confirmed in this period, as a share of the findings posted in it. A fix can be of a finding from before the period, so this is an estimate.">≈ {{$s.FixRate}}% of findings</span></div>
+  <div class="stat"><span class="label">Time to first review</span><span class="value small">{{if $d.Latency.PRs}}{{secs $d.Latency.Median}}{{else}}—{{end}}</span>
+    <span class="sub" title="From the bot first seeing a pull request to its first review, including the wait after a push and any queueing">{{if $d.Latency.PRs}}median · 90% within {{secs $d.Latency.P90}} · {{$d.Latency.PRs}} PRs{{else}}no first reviews in this period{{end}}</span></div>
+  <div class="stat"><span class="label">Conversations answered</span><span class="value">{{num $d.Replies.Total}}</span>
+    <span class="sub">{{$d.Replies.Threads}} in review threads · {{$d.Replies.Mentions}} @mentions</span></div>
+  <div class="stat"><span class="label">Verdicts</span><span class="value small">{{$s.Approvals}} approved · {{$s.ChangesRequested}} changes requested</span>
+    <span class="sub">{{$d.Commented}} comment only</span></div>
+  <div class="stat"><span class="label">Model use</span><span class="value small">{{num $d.ModelTotals.Calls}} calls{{if $d.ModelTotals.Failed}} · <span class="bad">{{$d.ModelTotals.FailRate}}% failed</span>{{end}}</span>
+    <span class="sub">{{num64 $d.ModelTotals.PromptTokens}} tokens in · {{num64 $d.ModelTotals.CompletionTokens}} out{{if $s.Errors}} · <span class="bad">{{$s.Errors}} reviews failed</span>{{end}}</span></div>
+</div>
+{{if $s.Undetailed}}<p class="hint">Finding levels and fixes aren't known for {{$s.Undetailed}} {{if eq $s.Undetailed 1}}review{{else}}reviews{{end}} from before they were recorded.</p>{{end}}
+
+<div class="grid2">
+  <div class="card">{{template "day-chart" $d.Days}}</div>
+  <div class="card"><figure class="chart"><figcaption><b>Findings posted by level</b></figcaption>{{sevChart $s.Sev}}
+    <details class="table-view"><summary>Show as a table</summary>
+      <div class="table-scroll"><table class="num"><thead><tr><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th></tr></thead><tbody>
+      <tr>{{range $s.Sev}}<td class="n">{{.}}</td>{{end}}</tr>
+      </tbody></table></div>
+    </details>
+  </figure></div>
+</div>
+
+<div class="card">
+  <figure class="chart">
+    {{$u := periodUnit $d.Days}}<figcaption><b>Findings per {{$u}} by level</b> <span class="muted">(hover a {{$u}} for its counts and fixes)</span></figcaption>
+    {{sevDayChart $d.Days}}
+    <details class="table-view"><summary>Show as a table</summary>
+      <div class="table-scroll"><table class="num"><thead><tr><th>{{if eq $u "week"}}Week of{{else}}Day{{end}}</th><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th><th class="n">Fixed</th></tr></thead><tbody>
+      {{range $d.Days}}<tr><td>{{.Day.Format "Mon 2 Jan"}}</td>{{range .Sev}}<td class="n">{{.}}</td>{{end}}<td class="n">{{.Fixed}}</td></tr>{{end}}
+      </tbody></table></div>
+    </details>
+  </figure>
+</div>
+
+<h2 class="section">Repositories</h2>
+{{if $d.Repos}}
+<div class="card"><figure class="chart"><figcaption><b>Most active repositories</b> <span class="muted">· reviews posted{{if and (eq (len $d.RepoReviewRows) $d.RepoChartRows) (gt $d.RepoCount $d.RepoChartRows)}} · the top {{len $d.RepoReviewRows}} of {{$d.RepoCount}} repositories{{end}}</span></figcaption>
+    {{if $d.RepoReviewRows}}{{rankChart "Most active repositories by reviews posted" $d.RepoReviewRows}}{{else}}<p class="muted">No reviews posted in this period; the table shows the failed ones.</p>{{end}}</figure></div>
+<div class="card"><figure class="chart"><figcaption><b>Findings by repository and level</b>{{if and (eq (len $d.RepoSevRows) $d.RepoChartRows) (gt $d.RepoCount $d.RepoChartRows)}} <span class="muted">· the top {{len $d.RepoSevRows}} of {{$d.RepoCount}} repositories, by findings</span>{{end}}</figcaption>
+    {{if $d.RepoSevRows}}{{sevStackChart "Findings by repository and level" $d.RepoSevRows}}
+    <details class="table-view"><summary>Show as a table</summary>
+      <div class="table-scroll"><table class="num"><thead><tr><th>Repository</th><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th></tr></thead><tbody>
+      {{range $d.RepoSevRows}}<tr><td>{{.Label}}</td>{{range .Sev}}<td class="n">{{.}}</td>{{end}}</tr>{{end}}
+      </tbody></table></div>
+    </details>
+    {{else}}<p class="muted">No findings in this period.</p>{{end}}</figure></div>
+<div class="card">
+  {{if gt $d.RepoCount (len $d.Repos)}}<p class="hint">The {{len $d.Repos}} most reviewed of {{$d.RepoCount}} repositories.</p>{{end}}
+  <div class="table-scroll">
+  <table class="num">
+    <thead><tr><th>Repository</th>{{if $d.All}}<th>Organization</th>{{end}}<th class="n">Reviews</th><th class="n">PRs</th><th class="n">Findings</th>
+      <th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th>
+      <th class="n">Fixed</th><th class="n" title="Fixes confirmed in the period as a share of its findings (an estimate)">Fix rate</th>
+      <th class="n">Approved</th><th class="n">Changes req.</th><th class="n">Failed</th><th>Last review</th></tr></thead>
+    <tbody>
+    {{range $d.Repos}}
+    <tr>
+      {{$reviews := printf "%s/reviews" $d.Base}}{{if and $d.All .Org}}{{$reviews = printf "%s/reviews" (orgPath .Org)}}{{end}}
+      <td>{{if earlier .Repo}}<span class="muted">{{.Repo}}</span>{{else}}<a href="{{query $reviews "repo" .Repo}}">{{.Repo}}</a>{{end}}</td>
+      {{if $d.All}}<td>{{if .Org}}{{.Org}}{{else}}<span class="muted">(no organization)</span>{{end}}</td>{{end}}
+      <td class="n">{{.Reviews}}</td><td class="n">{{.PRs}}</td><td class="n">{{.Findings}}</td>
+      {{range $i, $n := .Sev}}<td class="n">{{if $n}}{{if lt $i 2}}<b>{{$n}}</b>{{else}}{{$n}}{{end}}{{else}}<span class="muted">0</span>{{end}}</td>{{end}}
+      <td class="n">{{.Fixed}}</td><td class="n">{{if .Findings}}{{.FixRate}}%{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="n">{{.Approvals}}</td><td class="n">{{.ChangesRequested}}</td>
+      <td class="n">{{if .Errors}}<span class="bad">{{.Errors}}</span>{{else}}<span class="muted">0</span>{{end}}</td>
+      <td>{{ago .Last}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+</div>
+{{else}}<div class="card"><p class="muted">No reviews in this period.</p></div>{{end}}
+
+{{if $d.All}}
+<h2 class="section">Organizations</h2>
+<div class="card">
+  {{if $d.OrgSevRows}}<figure class="chart"><figcaption><b>Findings by organization and level</b>{{if and (eq (len $d.OrgSevRows) $d.RepoChartRows) (gt $d.OrgCount $d.RepoChartRows)}} <span class="muted">· the top {{len $d.OrgSevRows}} of {{$d.OrgCount}} organizations, by findings</span>{{end}}</figcaption>
+    {{sevStackChart "Findings by organization and level" $d.OrgSevRows}}
+    <details class="table-view"><summary>Show as a table</summary>
+      <div class="table-scroll"><table class="num"><thead><tr><th>Organization</th><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th></tr></thead><tbody>
+      {{range $d.OrgSevRows}}<tr><td>{{.Label}}</td>{{range .Sev}}<td class="n">{{.}}</td>{{end}}</tr>{{end}}
+      </tbody></table></div>
+    </details>
+  </figure>{{end}}
+  {{if $d.Orgs}}
+  <div class="table-scroll">
+  <table class="num">
+    <thead><tr><th>Organization</th><th class="n">Reviews</th><th class="n">PRs</th><th class="n">Repos</th><th class="n">Findings</th>
+      <th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">P4</th><th class="n">P5</th>
+      <th class="n">Fixed</th><th class="n">Fix rate</th><th class="n">Failed</th><th class="n">Tokens in / out</th></tr></thead>
+    <tbody>
+    {{range $d.Orgs}}
+    <tr>
+      <td>{{if .Login}}<a href="{{orgPath .Login}}/metrics?days={{$d.Range}}">{{.Login}}</a>{{else}}<span class="muted" title="Reviews not linked to an organization">(no organization)</span>{{end}}</td>
+      <td class="n">{{.Posted}}</td><td class="n">{{.PRs}}</td><td class="n">{{.Repos}}</td><td class="n">{{.Findings}}</td>
+      {{range .Sev}}<td class="n">{{.}}</td>{{end}}
+      <td class="n">{{.Fixed}}</td><td class="n">{{if .Findings}}{{.FixRate}}%{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="n">{{if .Errors}}<span class="bad">{{.Errors}}</span>{{else}}<span class="muted">0</span>{{end}}</td>
+      <td class="n">{{num64 .PromptTokens}} / {{num64 .CompletionTokens}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}<p class="muted">No reviews in this period.</p>{{end}}
+</div>
+{{end}}
+
+<h2 class="section">Models</h2>
+<div class="card">
+  {{if $d.Models}}
+  {{if $d.ModelRows}}<figure class="chart"><figcaption><b>Reviews sent to each model</b>
+    <span class="muted">· with failover a review can go to a model that fails and then to the next; with collate, every review goes to every model</span></figcaption>
+    {{rankChart "Reviews sent to each model" $d.ModelRows}}</figure>{{end}}
+  <div class="table-scroll">
+  <table class="num">
+    <thead><tr><th>Model</th>{{if $d.All}}<th>Server</th>{{end}}<th>Whose</th><th class="n">Reviews sent</th><th class="n">Answered</th><th class="n">Replies</th>
+      <th class="n">Calls</th><th class="n">Failed</th><th class="n">Tokens in</th><th class="n">Tokens out</th><th class="n">Avg answer</th></tr></thead>
+    <tbody>
+    {{range $d.Models}}
+    <tr>
+      <td>{{.Label}}{{if and (or $d.All .ModelSet) (ne .Label .Model)}} <code>{{.Model}}</code>{{end}}</td>
+      {{if $d.All}}<td>{{.Provider}}</td>{{end}}
+      <td>{{if .ModelSet}}{{if $d.All}}{{if .SetOrg}}{{.SetOrg}}'s own{{else}}an organization's own{{end}}{{else}}own{{end}}{{else}}instance{{end}}</td>
+      <td class="n">{{.Reviews}}</td><td class="n">{{.Answered}}</td><td class="n">{{.Replies}}</td>
+      <td class="n">{{.Calls}}</td>
+      <td class="n">{{if .Failed}}<span class="bad">{{.Failed}} ({{.FailRate}}%)</span>{{else}}<span class="muted">0</span>{{end}}</td>
+      <td class="n">{{num64 .PromptTokens}}</td><td class="n">{{num64 .CompletionTokens}}</td><td class="n">{{ms .AvgMS}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}<p class="muted">No model calls recorded in this period. They're counted from this version on.</p>{{end}}
+</div>
+{{end}}

@@ -143,6 +143,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /orgs/{org}/models/{action}", s.orgModelsAction)
 	m.HandleFunc("POST /orgs/{org}/models/{id}/{action}", s.orgModelsAction)
 	m.HandleFunc("GET /orgs/{org}/activity", s.orgActivity)
+	m.HandleFunc("GET /orgs/{org}/metrics", s.orgMetrics)
 	m.HandleFunc("GET /prs/{owner}/{repo}/{number}", s.prPage)
 	m.HandleFunc("POST /prs/{owner}/{repo}/{number}/review", s.prReview)
 	m.HandleFunc("POST /prs/{owner}/{repo}/{number}/replies", s.prReplies)
@@ -153,6 +154,7 @@ func (s *Server) routes() {
 	// Administrators only.
 	a := func(pattern string, h http.HandlerFunc) { m.HandleFunc(pattern, s.adminOnly(h)) }
 	a("GET /prs", s.prsPage)
+	a("GET /metrics", s.adminMetrics)
 	a("GET /reviews", s.reviewsPage)
 	a("GET /repos", s.reposPage)
 	a("POST /repos/sync", s.reposSync)
@@ -377,12 +379,22 @@ var funcs = template.FuncMap{
 		}
 		return m, nil
 	},
-	"sub":      func(a, b int) int { return a - b },
-	"num":      humanNum,
-	"num64":    func(n int64) string { return humanNum(int(n)) },
-	"orgPath":  func(login string) string { return "/orgs/" + url.PathEscape(login) },
-	"dayChart": dayChart,
-	"sevChart": sevChart,
+	"sub":           func(a, b int) int { return a - b },
+	"num":           humanNum,
+	"num64":         func(n int64) string { return humanNum(int(n)) },
+	"orgPath":       func(login string) string { return "/orgs/" + url.PathEscape(login) },
+	"dayChart":      dayChart,
+	"sevChart":      sevChart,
+	"rankChart":     rankChart,
+	"sevStackChart": sevStackChart,
+	"sevDayChart":   sevDayChart,
+	"periodUnit":    periodUnit,
+	"ms": func(n int64) string {
+		if n <= 0 {
+			return "—"
+		}
+		return (time.Duration(n) * time.Millisecond).Round(100 * time.Millisecond).String()
+	},
 	"query": func(base string, kv ...any) string {
 		q := url.Values{}
 		for i := 0; i+1 < len(kv); i += 2 {
