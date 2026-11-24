@@ -173,7 +173,9 @@ func (rt *repoTools) file(ctx context.Context, ref, path string) (string, error)
 	if settled(err) {
 		c.mu.Lock()
 		// What's cached in a review is capped: past it, files are read again.
-		if c.bytes+len(content) <= maxCacheBytes {
+		// Files too large to search aren't cached, so they can't crowd out
+		// the many smaller ones a search reads.
+		if len(content) <= maxToolFileBytes && c.bytes+len(content) <= maxCacheBytes {
 			c.files[key] = toolFile{content, err}
 			c.bytes += len(content)
 		}

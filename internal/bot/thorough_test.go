@@ -333,6 +333,9 @@ func TestSameFinding(t *testing.T) {
 	if !sameFinding(sql(10, "P1", "The user ID is concatenated into the query."), sql(11, "P3", "Something else entirely.")) {
 		t.Error("the same title a line apart should be the same finding")
 	}
+	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(12, "P1", "The sort column comes from the request and is formatted into ORDER BY.")) {
+		t.Error("two queries 2 lines apart with different descriptions should be two findings")
+	}
 	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(18, "P1", "The sort column comes from the request and is formatted into ORDER BY.")) {
 		t.Error("two queries 8 lines apart with different descriptions should be two findings")
 	}
@@ -437,5 +440,22 @@ func TestHeldFindingsFirstAtTheirLevel(t *testing.T) {
 	inline, _, kept, _ := prepareFindings(st, p, []finding{held, sameLevel, worse}, nil, 2)
 	if len(inline) != 2 || inline[0].Title != worse.Title || inline[1].Title != held.Title || len(kept) != 1 || kept[0].Title != sameLevel.Title {
 		t.Fatalf("posted %+v, held %+v; want the P1, then the held P3, with the new P3 held", inline, kept)
+	}
+}
+
+// Files too large to search aren't cached: they'd crowd out the smaller ones.
+func TestLargeFilesNotCached(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.b.pollOnce(e.ctx) // sets up the App
+	drain(e.ctx, e.b)
+	e.gh.content = strings.Repeat("x", maxToolFileBytes+1) // what main.go now holds
+	rt := newRepoTools(e.b.app.Installation(10), settings.Defaults(), "acme/web", "h", "")
+	for _, p := range []string{"main.go", "CLAUDE.md"} {
+		if _, err := rt.file(e.ctx, "h", p); err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+	}
+	if _, ok := rt.cache.files["h"+string(rune(0))+"main.go"]; ok || rt.cache.bytes != len(projectDocs["CLAUDE.md"]) {
+		t.Fatalf("cache holds %d bytes (main.go cached: %v); want only CLAUDE.md", rt.cache.bytes, ok)
 	}
 }
