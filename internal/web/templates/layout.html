@@ -4,13 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}} · OMG Review Bot</title>
+<meta name="theme-color" content="#151515">
+<link rel="icon" href="/static/compact.svg" type="image/svg+xml">
+<link rel="icon" href="/static/favicon.ico" sizes="16x16 24x24 32x32 48x48">
+<link rel="apple-touch-icon" href="/static/icon-256.png">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body{{if or (eq .Nav "dash") (eq .Tab "overview")}} data-refresh="30"{{end}}>
 {{if .Auth}}
 <header class="top">
-  <a class="brand" href="/">🤖 OMG Review Bot</a>
+  <a class="brand" href="/"><img src="/static/compact.svg" alt="" width="32" height="32"><span>OMG <span class="tag">Review Bot</span></span></a>
   <nav>
     {{if .V.Admin}}
     <a href="/" class="{{if eq .Nav "dash"}}active{{end}}">Dashboard</a>

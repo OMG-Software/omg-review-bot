@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="internal/web/static/icon.svg" alt="OMG Review Bot" width="128" height="128">
+</p>
+
 # omg-review-bot
 
 A self-hosted GitHub pull request reviewer. It's a single Go binary for Windows or Linux that

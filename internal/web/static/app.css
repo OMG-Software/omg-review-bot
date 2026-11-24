@@ -1,32 +1,52 @@
+/* OMG Software outlined-toggle brand: switch orange #FF761F on charcoal
+   #151515, with the guide's warm off-white for light backgrounds.
+   --accent fills (buttons, focus, highlights) and always carries charcoal
+   text; --link is orange as text, darkened in light mode, where the brand
+   orange is too faint to read on white (2.7:1). */
 :root {
-  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7385; --line: #e2e5ec;
-  --accent: #3d63dd; --accent-text: #ffffff; --ok: #1f8a4c; --bad: #c63b3b; --warn: #b7791f;
-  --code: #eef0f4; --radius: 10px;
+  --orange: #FF761F; --charcoal: #151515;
+  --bg: #F4F1EC; --panel: #ffffff; --text: #151515; --muted: #6b6660; --line: #e4ded4;
+  --accent: var(--orange); --accent-text: var(--charcoal); --link: #B34A06;
+  --ok: #1b7a43; --bad: #c63b3b; --warn: #8a6400;
+  --code: #efebe4; --radius: 14px;
+  --bar: var(--charcoal); --bar-text: #b8b8b8; --bar-line: #2a2a2a;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #12151b; --panel: #1b1f27; --text: #e4e7ee; --muted: #8d95a6; --line: #2b313c;
-    --accent: #6d8cf0; --accent-text: #0d1117; --ok: #4cc283; --bad: #ef6b6b; --warn: #e0a84a; --code: #252a34;
+    --bg: #101010; --panel: #171717; --text: #f2f2f2; --muted: #a3a3a3; --line: #2a2a2a;
+    --link: var(--orange); --ok: #4cc283; --bad: #ef6b6b; --warn: #e3b341; --code: #222222;
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-a { color: var(--accent); text-decoration: none; }
+  font: 15px/1.5 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
+a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--orange) 35%, transparent); }
 code, pre, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
 code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
 h1 { font-size: 24px; margin: 8px 0 16px; }
 h2 { font-size: 17px; margin: 0 0 12px; }
 h3 { font-size: 15px; margin: 12px 0 8px; }
 
-.top { display: flex; align-items: center; gap: 20px; padding: 10px 24px; background: var(--panel);
-  border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-.top .brand { font-weight: 700; color: var(--text); }
+/* The header is charcoal in both modes, as the brand mark is drawn for it. */
+.top { display: flex; align-items: center; gap: 20px; padding: 10px 24px; background: var(--bar);
+  border-bottom: 1px solid var(--bar-line); flex-wrap: wrap; color: var(--bar-text); }
+.top .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; color: #fff; }
+.top .brand:hover { text-decoration: none; }
+.top .brand img { display: block; }
+.top .brand .tag { color: var(--orange); }
 .top nav { display: flex; gap: 4px; flex-wrap: wrap; }
-.top nav a, .top .right a { padding: 6px 10px; border-radius: 6px; color: var(--muted); }
-.top a.active { background: var(--code); color: var(--text); }
+.top nav a, .top .right a { padding: 6px 10px; border-radius: 8px; color: var(--bar-text); }
+.top nav a:hover, .top .right a:hover { color: #fff; text-decoration: none; }
+.top a.active { color: #fff; box-shadow: inset 0 -2px 0 var(--orange); border-radius: 0; }
 .top .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.top button.link { color: var(--bar-text); }
+.top button.link:hover { color: #fff; }
+.top .pill { background: color-mix(in srgb, var(--orange) 20%, transparent); color: var(--orange); }
+.logo { display: block; margin: 0 auto 8px; }
+.narrow h1 { text-align: center; }
 
 main { max-width: 1180px; margin: 0 auto; padding: 16px 24px 64px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 16px; }
@@ -63,7 +83,7 @@ td.title { max-width: 380px; }
 
 .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; background: var(--code); color: var(--muted); white-space: nowrap; }
 .s-reviewed, .s-posted { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
-.s-pending, .s-reviewing, .s-running, .s-new { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.s-pending, .s-reviewing, .s-running, .s-new { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--link); }
 .s-error { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
 .s-draft, .s-skipped, .s-baseline, .s-limit, .s-daily { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -146,9 +166,11 @@ a.button.primary { background: var(--accent); color: var(--accent-text); border-
 a.button.block { display: block; }
 
 /* ---------- charts (inline SVG built in charts.go) ---------- */
-:root { --series-1: #2a78d6; --grid: #e7e8ec; --axis: #c9ccd4; }
+/* One series, in the brand orange: deepened in light mode so the bars keep
+   3:1 against white (#E5640F, 3.4:1); the brand orange itself on charcoal. */
+:root { --series-1: #E5640F; --grid: #ebe6de; --axis: #cfc8bc; }
 @media (prefers-color-scheme: dark) {
-  :root { --series-1: #3987e5; --grid: #262b34; --axis: #3a414d; }
+  :root { --series-1: var(--orange); --grid: #242424; --axis: #3a3a3a; }
 }
 .grid2 { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; }
 .grid2 > .card { margin-bottom: 16px; }
@@ -164,11 +186,11 @@ svg.viz { width: 100%; height: auto; display: block; overflow: visible; }
 .viz-hit { fill: transparent; }
 .viz-col:hover .viz-hit { fill: color-mix(in srgb, var(--series-1) 10%, transparent); }
 .viz-col:hover .viz-bar { fill: color-mix(in srgb, var(--series-1) 80%, var(--text)); }
-/* Finding levels: one ordinal blue ramp, P1 the most contrast against the
-   panel in each mode (validated light on #fff, dark on #1b1f27). */
-:root { --sev-1: #0d366b; --sev-2: #1c5cab; --sev-3: #2a78d6; --sev-4: #5598e7; --sev-5: #86b6ef; }
+/* Finding levels: one ordinal orange ramp, P1 the most contrast against the
+   panel in each mode (validated light on #fff, dark on #171717). */
+:root { --sev-1: #6b2800; --sev-2: #a04104; --sev-3: #cf5a0a; --sev-4: #f5781f; --sev-5: #ff9a55; }
 @media (prefers-color-scheme: dark) {
-  :root { --sev-1: #b7d3f6; --sev-2: #6da7ec; --sev-3: #3987e5; --sev-4: #256abf; --sev-5: #184f95; }
+  :root { --sev-1: #ffc79f; --sev-2: #ff9a55; --sev-3: #f06e17; --sev-4: #c25208; --sev-5: #8f3a03; }
 }
 .viz-s1 { fill: var(--sev-1); background: var(--sev-1); }
 .viz-s2 { fill: var(--sev-2); background: var(--sev-2); }

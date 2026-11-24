@@ -1,6 +1,7 @@
 {{define "content"}}
 <div class="narrow card">
-  <h1>🤖 OMG Review Bot</h1>
+  <img class="logo" src="/static/icon.svg" alt="" width="96" height="96">
+  <h1>OMG Review Bot</h1>
   {{if .D.SignIn}}
   <p><a class="button primary block" href="/auth/github{{if ne .D.Next "/"}}?next={{.D.Next}}{{end}}">Sign in with GitHub</a></p>
   <p class="hint">See the reviews for your organizations. Admins of a GitHub organization the bot is installed on can manage it here.</p>
