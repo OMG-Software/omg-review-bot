@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"sync"
@@ -167,13 +168,19 @@ func (rt *repoTools) file(ctx context.Context, ref, path string) (string, error)
 		return f.content, f.err
 	}
 	content, err := rt.cl.FileContent(ctx, rt.repo, path, ref)
-	if err != nil && ctx.Err() != nil {
-		return "", err // not cached: the review is ending anyway
+	if settled(err) {
+		c.mu.Lock()
+		c.files[key] = toolFile{content, err}
+		c.mu.Unlock()
 	}
-	c.mu.Lock()
-	c.files[key] = toolFile{content, err}
-	c.mu.Unlock()
 	return content, err
+}
+
+// settled reports whether a GitHub read's outcome can be cached for the rest
+// of the review: contents, or a definite miss. Anything else (rate limits,
+// server errors, a cancelled review) might go away, so the next read retries.
+func settled(err error) bool {
+	return err == nil || github.IsStatus(err, http.StatusNotFound)
 }
 
 func (rt *repoTools) tree(ctx context.Context, ref string) toolTree {
@@ -185,7 +192,7 @@ func (rt *repoTools) tree(ctx context.Context, ref string) toolTree {
 		return t
 	}
 	t.paths, t.truncated, t.err = rt.cl.TreePaths(ctx, rt.repo, ref)
-	if t.err == nil || ctx.Err() == nil {
+	if settled(t.err) {
 		c.mu.Lock()
 		c.trees[ref] = t
 		c.mu.Unlock()
@@ -359,11 +366,15 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 // added to the conversation; once it's used up the model must answer. The
 // answer is asked for with the schema and without tools (servers can't do
 // both at once), with the investigation flattened into plain messages.
-func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings, rt *repoTools, schema map[string]any, schemaName, system, user string, room int, out any) (llm.Response, string, error) {
-	msgs := []llm.Message{{Role: "system", Content: system}, {Role: "user", Content: user}}
-	if !rt.on() || room < 2000 {
-		return b.chatJSONMsgs(ctx, lc, st, schema, schemaName, msgs, out)
+// system renders the system prompt with or without the tools mentioned.
+func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings, rt *repoTools, schema map[string]any, schemaName string, system func(tools bool) string, user string, room int, out any) (llm.Response, string, error) {
+	plain := func() []llm.Message {
+		return []llm.Message{{Role: "system", Content: system(false)}, {Role: "user", Content: user}}
 	}
+	if !rt.on() || room < 2000 {
+		return b.chatJSONMsgs(ctx, lc, st, schema, schemaName, plain(), out)
+	}
+	msgs := []llm.Message{{Role: "system", Content: system(true)}, {Role: "user", Content: user}}
 	var total llm.Response
 	var raw strings.Builder
 	used := 0
@@ -378,7 +389,8 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 		if errors.Is(err, llm.ErrToolsUnsupported) {
 			rt.disable()
 			fmt.Fprintf(&raw, "(tools refused by the model server, so the review goes on without them: %v)\n", err)
-			u, r, err := b.chatJSONMsgs(ctx, lc, st, schema, schemaName, msgs[:2], out)
+			// Ask again with a prompt that doesn't promise the tools.
+			u, r, err := b.chatJSONMsgs(ctx, lc, st, schema, schemaName, plain(), out)
 			total.PromptTokens += u.PromptTokens
 			total.CompletionTokens += u.CompletionTokens
 			return total, raw.String() + r, err
@@ -409,7 +421,9 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 			msgs = append(msgs, llm.Message{Role: "tool", Content: res, ToolCallID: c.ID, ToolName: c.Name})
 		}
 	}
-	msgs = append(flattenTools(msgs), llm.Message{Role: "user", Content: "Now reply with ONLY the JSON object in the required format, nothing else."})
+	// Added before flattening so it merges into any user message that ends
+	// the conversation: the roles must still alternate.
+	msgs = flattenTools(append(msgs, llm.Message{Role: "user", Content: "Now reply with ONLY the JSON object in the required format, nothing else."}))
 	u, r, err := b.chatJSONMsgs(ctx, lc, st, schema, schemaName, msgs, out)
 	total.PromptTokens += u.PromptTokens
 	total.CompletionTokens += u.CompletionTokens

@@ -596,7 +596,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	}
 	// The prompt says whether the tools are there; a server that refuses
 	// them turns them off for the rest of that model's review.
-	system := func(rt *repoTools) string { return reviewSystemPrompt(sk.Name, skillText, rt.on()) + guide }
+	system := func(tools bool) string { return reviewSystemPrompt(sk.Name, skillText, tools) + guide }
 	header := prHeader(gp)
 	// Besides the system prompt and header, each part's prompt holds the
 	// findings already reported (listRoom) and, with tools, what the model
@@ -606,7 +606,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	if rt.on() {
 		toolRoom = totalChars / 4
 	}
-	budget := totalChars - len(system(rt)) - len(header) - 3000 - listRoom - toolRoom
+	budget := totalChars - len(system(rt.on())) - len(header) - 3000 - listRoom - toolRoom
 	if budget < 2000 {
 		return nil, fmt.Errorf("model context (%d tokens) is too small for the skill and PR description; raise 'Context tokens' in Settings or shorten the skill", st.LLM.ContextTokens)
 	}
@@ -789,7 +789,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 // reviewInputs is what every model's review of the diff shares.
 type reviewInputs struct {
 	rt       *repoTools // this model's tools (see repoTools.fork)
-	system   func(*repoTools) string
+	system   func(tools bool) string
 	header   string
 	mine     []github.ReviewComment // the bot's findings from earlier reviews
 	seed     []finding              // found already: held from the last review
@@ -838,7 +838,7 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 			}
 			user := batchPrompt(in.header, i, len(p.batches), bt, previousFor(in.mine, bt.paths), found, pass, in.listRoom)
 			var out modelOutput
-			usage, rawOut, err := b.chatTools(ctx, lc, st, in.rt, reviewSchema, "code_review", in.system(in.rt), user, in.toolRoom, &out)
+			usage, rawOut, err := b.chatTools(ctx, lc, st, in.rt, reviewSchema, "code_review", in.system, user, in.toolRoom, &out)
 			fmt.Fprintf(&raw, "===== %s =====\n%s\n\n", label, rawOut)
 			ps.usage.PromptTokens += usage.PromptTokens
 			ps.usage.CompletionTokens += usage.CompletionTokens

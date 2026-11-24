@@ -268,6 +268,7 @@ type fakeLLM struct {
 	toolResults []string         // "tool" messages the bot sent back
 	toolOffers  int              // requests that offered tools
 	refuseTools bool             // reject requests offering tools, as a server without tool support does
+	prose       int              // tool-offering requests answered in prose instead of JSON
 }
 
 func (l *fakeLLM) handler(t *testing.T) http.Handler {
@@ -311,6 +312,21 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 					"usage":   map[string]any{"prompt_tokens": 100, "completion_tokens": 10},
 				})
 				return
+			}
+			if l.prose > 0 {
+				l.prose--
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{"message": map[string]any{"content": "I looked and main.go divides by zero."}, "finish_reason": "stop"}},
+					"usage":   map[string]any{"prompt_tokens": 100, "completion_tokens": 10},
+				})
+				return
+			}
+		} else {
+			// Without tools, strict chat templates need the roles to alternate.
+			for i := 1; i < len(req.Messages); i++ {
+				if req.Messages[i].Role == req.Messages[i-1].Role {
+					t.Errorf("%s request has two %s messages in a row (message %d)", kind, req.Messages[i].Role, i)
+				}
 			}
 		}
 		for _, m := range req.Messages {

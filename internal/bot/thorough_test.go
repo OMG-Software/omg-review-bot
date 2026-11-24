@@ -1,9 +1,13 @@
 package bot
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 )
 
@@ -108,8 +112,53 @@ func TestReviewWithoutToolSupport(t *testing.T) {
 	if e.lm.toolOffers != 1 {
 		t.Errorf("tools offered %d times, want once: refused tools aren't offered again", e.lm.toolOffers)
 	}
-	if sys := e.lm.systems["code_review"]; len(sys) < 2 || strings.Contains(sys[len(sys)-1], "read_file") {
-		t.Errorf("later passes still told about tools")
+	sys := e.lm.systems["code_review"]
+	if len(sys) < 2 {
+		t.Fatalf("want at least 2 review requests without tools, got %d", len(sys))
+	}
+	for i, s := range sys {
+		if strings.Contains(s, "read_file") {
+			t.Errorf("review request %d was told about tools after the server refused them", i+1)
+		}
+	}
+}
+
+// A model that answers in prose after its investigation is asked for the
+// JSON in a request whose roles still alternate.
+func TestReviewProseThenJSON(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(divFinding), noApproval)
+	e.lm.toolCalls = []map[string]any{
+		{"id": "c1", "type": "function", "function": map[string]any{"name": "read_file", "arguments": `{"path":"main.go"}`}},
+	}
+	e.lm.prose = 1
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || len(e.gh.reviews[0].Comments) != 1 {
+		t.Fatalf("want one review with 1 comment, got %+v", e.gh.reviews)
+	}
+	if e.lm.prose != 0 {
+		t.Errorf("the prose answer was never asked for")
+	}
+}
+
+// Only reads that won't change are cached: a rate limit or server error is
+// retried on the next read.
+func TestSettledReads(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, true},
+		{&github.APIError{Status: 404}, true},
+		{fmt.Errorf("get: %w", &github.APIError{Status: 404}), true},
+		{&github.APIError{Status: 403}, false},
+		{&github.APIError{Status: 502}, false},
+		{context.Canceled, false},
+		{errors.New("connection reset"), false},
+	} {
+		if got := settled(c.err); got != c.want {
+			t.Errorf("settled(%v) = %v, want %v", c.err, got, c.want)
+		}
 	}
 }
 
