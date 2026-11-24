@@ -494,7 +494,10 @@ event checks it for replies, so polling only catches anything missed.
    head (or base) commit: `read_file`, `search_code` (a grep) and `list_files`. It uses them for
    the skill's context and verification steps: reading definitions, finding callers, and checking
    a finding against the real code before reporting it. The tools only read the PR's own
-   repository through the installation's API; nothing is run. Turn them off with *Let the model
+   repository through the installation's API; nothing is run, and at most 8 calls run per model
+   turn. The review's ignore patterns keep files out of the review, not out of reach: a search
+   skips them unless the model gives a path pattern, and `read_file` opens any file, so the
+   model can still read generated or vendored code for context. Turn them off with *Let the model
    read the repository* in a model's settings: a review offers them only if every model it may
    use has it on. A model server that refuses tools gets the review without them. The prompt
    tells the model to ignore any limit in the skill on how many findings to report.

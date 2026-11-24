@@ -23,6 +23,7 @@ import (
 // written, and nothing leaves for another host.
 const (
 	maxToolSteps      = 16      // model turns per question before it must answer
+	maxCallsPerStep   = 8       // tool calls run per model turn; the rest are refused
 	maxSearchFiles    = 300     // files one search_code call may read
 	maxSearchHits     = 80      // matching lines one search_code call returns
 	maxListPaths      = 400     // paths one list_files call returns
@@ -35,7 +36,10 @@ type repoTools struct {
 	cl         *github.Client
 	repo       string
 	head, base string
-	ignore     []*regexp.Regexp // the review's ignore patterns: search skips them
+	// The review's ignore patterns: a search without a path_glob skips them.
+	// They keep files out of the review, not out of reach: read_file opens
+	// them, and a path_glob searches them, for context the review needs.
+	ignore []*regexp.Regexp
 
 	mu       sync.Mutex
 	disabled bool // the model or server refused tools: not offered again
@@ -107,7 +111,7 @@ func (rt *repoTools) defs() []llm.Tool {
 		{Name: "search_code", Description: "Search the repository's files for a regular expression (RE2 syntax), like grep. Use it to find callers and other uses of changed functions, types, config keys and endpoints. Returns matching lines as path:line: text.",
 			Parameters: map[string]any{"type": "object", "required": []string{"pattern"}, "properties": map[string]any{
 				"pattern":   map[string]any{"type": "string", "description": "RE2 regular expression, matched against each line."},
-				"path_glob": map[string]any{"type": "string", "description": `Optional gitignore-style pattern limiting which files are searched, e.g. "*.go" or "internal/**". Narrow it in a large repository.`},
+				"path_glob": map[string]any{"type": "string", "description": `Optional gitignore-style pattern limiting which files are searched, e.g. "*.go" or "internal/**". Narrow it in a large repository. Without it, files the review ignores (generated, vendored, lock files) are skipped; with it, they're searched too.`},
 				"version":   versionParam,
 			}}},
 		{Name: "list_files", Description: "List the repository's file paths, optionally only those under a directory.",
@@ -450,7 +454,16 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 		// thinking mode) require it on a continued tool conversation.
 		msgs = append(msgs, llm.Message{Role: "assistant", Content: content, ToolCalls: resp.ToolCalls, Reasoning: resp.Reasoning})
 		used += len(content) + len(resp.Reasoning)
-		for _, c := range resp.ToolCalls {
+		for i, c := range resp.ToolCalls {
+			// Every call gets a result, but only so many run per turn: each
+			// search can read hundreds of files through the API.
+			if i >= maxCallsPerStep {
+				res := fmt.Sprintf("Not run: at most %d tool calls run at once. Ask for this again in your next turn if you still need it.", maxCallsPerStep)
+				fmt.Fprintf(&raw, "[tool] %s skipped (more than %d calls in one turn)\n", c.Name, maxCallsPerStep)
+				msgs = append(msgs, llm.Message{Role: "tool", Content: res, ToolCallID: c.ID, ToolName: c.Name})
+				used += len(res)
+				continue
+			}
 			res := rt.run(ctx, c, min(perCall, max(room-used, 200)))
 			used += len(res) + len(c.Arguments)
 			fmt.Fprintf(&raw, "[tool] %s %s -> %d chars\n", c.Name, textutil.Truncate(c.Arguments, 300), len(res))

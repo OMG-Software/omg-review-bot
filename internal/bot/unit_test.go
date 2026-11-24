@@ -99,8 +99,8 @@ func TestPrepareFindings(t *testing.T) {
 		t.Errorf("unlimited: inline %d, notes %d, held %d; want 4 posted, none held", len(inline), len(notes), len(held))
 	}
 
-	// A finding reworded by a later pass is the same finding.
-	again := append(all, finding{Path: "pkg/a.go", Line: 3, Severity: "P2", Title: "SQL injection risk", Body: "..."})
+	// A finding reworded by a later pass, on the same line, is the same finding.
+	again := append(all, finding{Path: "pkg/a.go", Line: 2, Severity: "P2", Title: "SQL injection risk", Body: "..."})
 	inline, notes, held, _ = prepareFindings(st, p, again, mine, 0)
 	if n := len(inline) + len(notes) + len(held); n != 4 {
 		t.Errorf("reworded duplicate: %d findings kept, want 4", n)

@@ -1035,15 +1035,15 @@ func normFinding(p plan, f finding) (finding, bool) {
 }
 
 // sameFinding reports whether two findings are the same issue: the same
-// file and much the same claim, on the same line or the next. Further
-// apart (the same kind of problem in two places nearby, say), it takes
+// file and much the same claim on the same line. On different lines (the
+// same kind of problem in two places nearby, even adjacent ones), it takes
 // much the same description too.
 func sameFinding(a, b finding) bool {
 	if a.Path != b.Path || !(strings.EqualFold(a.Title, b.Title) || similarity(a.Title, b.Title) >= 0.5) {
 		return false
 	}
 	d := abs(a.Line - b.Line)
-	return d <= 1 || (d <= 10 && similarity(a.Body, b.Body) >= 0.5)
+	return d == 0 || (d <= 10 && similarity(a.Body, b.Body) >= 0.5)
 }
 
 // seenFinding reports whether fs already has f. If it does, at a lower

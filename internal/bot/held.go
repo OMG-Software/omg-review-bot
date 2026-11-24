@@ -182,16 +182,19 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 }
 
 // loadHeld reads the findings held for pr's next review and the commit they
-// were found on. Data that can't be decoded counts as none.
+// were found on. Data that can't be decoded is an error like a failed read:
+// treating it as none would let the review approve past findings it has
+// never shown.
 func (b *Bot) loadHeld(pr *store.PR) ([]finding, string, error) {
 	data, heldHead, err := b.store.HeldFindings(pr.AccountID, pr.Repo, pr.Number)
 	if err != nil {
 		return nil, "", fmt.Errorf("read the findings held for this review: %w", err)
 	}
 	var held []finding
-	if data != "" && json.Unmarshal([]byte(data), &held) != nil {
-		b.logf("warn", pr.Repo, pr.Number, "the findings held for this review couldn't be decoded, so they're dropped")
-		held = nil
+	if data != "" {
+		if err := json.Unmarshal([]byte(data), &held); err != nil {
+			return nil, "", fmt.Errorf("decode the findings held for this review: %w", err)
+		}
 	}
 	return held, heldHead, nil
 }

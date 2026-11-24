@@ -323,15 +323,21 @@ func TestNothingToReviewKeepsHeldFindings(t *testing.T) {
 	}
 }
 
-// The same issue reported twice, a line apart or in another pass, is one
-// finding at its most severe; the same kind of problem a few lines away
-// with a different description is another.
+// The same issue reported twice, on one line or in another pass, is one
+// finding at its most severe; the same kind of problem on another line
+// with a different description, even the next line, is another.
 func TestSameFinding(t *testing.T) {
 	sql := func(line int, sev, body string) finding {
 		return finding{Path: "db.go", Line: line, Severity: sev, Title: "SQL injection", Body: body}
 	}
-	if !sameFinding(sql(10, "P1", "The user ID is concatenated into the query."), sql(11, "P3", "Something else entirely.")) {
-		t.Error("the same title a line apart should be the same finding")
+	if !sameFinding(sql(10, "P1", "The user ID is concatenated into the query."), sql(10, "P3", "Something else entirely.")) {
+		t.Error("the same title on the same line should be the same finding")
+	}
+	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(11, "P1", "The sort column comes from the request and is formatted into ORDER BY.")) {
+		t.Error("two queries on adjacent lines with different descriptions should be two findings")
+	}
+	if !sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(11, "P1", "The user ID is concatenated into this lookup query.")) {
+		t.Error("the same description a line apart should be the same finding")
 	}
 	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(12, "P1", "The sort column comes from the request and is formatted into ORDER BY.")) {
 		t.Error("two queries 2 lines apart with different descriptions should be two findings")
@@ -457,5 +463,50 @@ func TestLargeFilesNotCached(t *testing.T) {
 	}
 	if _, ok := rt.cache.files["h"+string(rune(0))+"main.go"]; ok || rt.cache.bytes != len(projectDocs["CLAUDE.md"]) {
 		t.Fatalf("cache holds %d bytes (main.go cached: %v); want only CLAUDE.md", rt.cache.bytes, ok)
+	}
+}
+
+// Held findings that can't be decoded fail the review, as a failed read
+// does: going on without them could approve past them.
+func TestUndecodableHeldFindingsFailTheReview(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), func(cfg *settings.Settings) {
+		cfg.Review.ApprovalLevel = "P3"
+		cfg.Review.RequestChangesLevel = settings.LevelOff
+	})
+	if err := e.st.SetHeldFindings(500, "acme/web", 7, "zzz000", `[{"path":`); err != nil {
+		t.Fatal(err)
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 0 {
+		t.Fatalf("posted %+v past held findings it couldn't read", e.gh.reviews)
+	}
+	if data, _, _ := e.st.HeldFindings(500, "acme/web", 7); data != `[{"path":` {
+		t.Errorf("held findings changed to %q", data)
+	}
+}
+
+// Only so many tool calls run per turn; the rest get a result saying so.
+func TestToolCallsPerTurnCapped(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	for i := range maxCallsPerStep + 2 {
+		e.lm.batchCalls = append(e.lm.batchCalls, map[string]any{"id": fmt.Sprintf("c%d", i), "type": "function",
+			"function": map[string]any{"name": "read_file", "arguments": `{"path":"main.go"}`}})
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	ran, refused := 0, 0
+	for _, r := range e.lm.toolResults {
+		if strings.HasPrefix(r, "Not run:") {
+			refused++
+		} else {
+			ran++
+		}
+	}
+	if ran != maxCallsPerStep || refused != 2 {
+		t.Fatalf("tool results: %d run, %d refused; want %d and 2", ran, refused, maxCallsPerStep)
 	}
 }

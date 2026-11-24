@@ -271,6 +271,7 @@ type fakeLLM struct {
 	// A request offering tools is a review (only reviews offer them).
 	reviews     []string         // replies for successive reviews, before review
 	toolCalls   []map[string]any // calls made, one per tool-offering request, before any review reply
+	batchCalls  []map[string]any // calls made all at once, by the first tool-offering request
 	toolResults []string         // "tool" messages the bot sent back
 	toolOffers  int              // requests that offered tools
 	refuseTools bool             // reject requests offering tools, as a server without tool support does
@@ -311,11 +312,19 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 				_, _ = io.WriteString(w, `{"error":"model does not support tools"}`)
 				return
 			}
-			if len(l.toolCalls) > 0 {
-				call := l.toolCalls[0]
-				l.toolCalls = l.toolCalls[1:]
+			if len(l.batchCalls) > 0 || len(l.toolCalls) > 0 {
+				var calls []any
+				if len(l.batchCalls) > 0 {
+					for _, c := range l.batchCalls {
+						calls = append(calls, c)
+					}
+					l.batchCalls = nil
+				} else {
+					calls = []any{l.toolCalls[0]}
+					l.toolCalls = l.toolCalls[1:]
+				}
 				_ = json.NewEncoder(w).Encode(map[string]any{
-					"choices": []any{map[string]any{"message": map[string]any{"content": "", "tool_calls": []any{call}}, "finish_reason": "tool_calls"}},
+					"choices": []any{map[string]any{"message": map[string]any{"content": "", "tool_calls": calls}, "finish_reason": "tool_calls"}},
 					"usage":   map[string]any{"prompt_tokens": 100, "completion_tokens": 10},
 				})
 				return
