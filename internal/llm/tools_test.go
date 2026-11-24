@@ -17,18 +17,27 @@ var readTool = Tool{Name: "read_file", Description: "Read a file.",
 // A conversation with a tool call and its result, as the bot sends it back.
 var toolConvo = []Message{
 	{Role: "user", Content: "Review this."},
-	{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "read_file", Arguments: `{"path":"a.go"}`}}},
+	{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "read_file", Arguments: `{"path":"a.go"}`}}, Reasoning: "I should read a.go."},
 	{Role: "tool", Content: "package a", ToolCallID: "c1", ToolName: "read_file"},
 }
 
-func TestOpenAIToolCalls(t *testing.T) {
-	var got map[string]any
+// replyServer answers every request with reply and hands each request body
+// to the test through the returned channel.
+func replyServer(t *testing.T, reply string) (*httptest.Server, <-chan map[string]any) {
+	got := make(chan map[string]any, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&got)
-		// Arguments come as a string holding JSON, as OpenAI sends them.
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":null,"tool_calls":[{"id":"c2","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"b.go\"}"}}]},"finish_reason":"tool_calls"}]}`)
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got <- body
+		_, _ = io.WriteString(w, reply)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv, got
+}
+
+func TestOpenAIToolCalls(t *testing.T) {
+	// Arguments come as a string holding JSON, as OpenAI sends them.
+	srv, got := replyServer(t, `{"choices":[{"message":{"content":null,"reasoning_content":"Now b.go.","tool_calls":[{"id":"c2","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"b.go\"}"}}]},"finish_reason":"tool_calls"}]}`)
 	c, _ := New(Config{Provider: "lmstudio", BaseURL: srv.URL + "/v1", Model: "m"})
 	resp, err := c.Chat(context.Background(), Request{Messages: toolConvo, Tools: []Tool{readTool}})
 	if err != nil {
@@ -37,13 +46,17 @@ func TestOpenAIToolCalls(t *testing.T) {
 	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "c2" || resp.ToolCalls[0].Name != "read_file" || resp.ToolCalls[0].Arguments != `{"path":"b.go"}` {
 		t.Fatalf("tool calls = %+v", resp.ToolCalls)
 	}
-	tools, _ := json.Marshal(got["tools"])
+	if resp.Reasoning != "Now b.go." {
+		t.Errorf("reasoning = %q", resp.Reasoning)
+	}
+	body := <-got
+	tools, _ := json.Marshal(body["tools"])
 	if !strings.Contains(string(tools), `"type":"function"`) || !strings.Contains(string(tools), `"name":"read_file"`) {
 		t.Errorf("tools sent = %s", tools)
 	}
-	msgs, _ := json.Marshal(got["messages"])
+	msgs, _ := json.Marshal(body["messages"])
 	for _, want := range []string{`"tool_calls":[{"function":{"arguments":"{\"path\":\"a.go\"}","name":"read_file"},"id":"c1","type":"function"}]`,
-		`"role":"tool","tool_call_id":"c1"`} {
+		`"reasoning_content":"I should read a.go."`, `"role":"tool","tool_call_id":"c1"`} {
 		if !strings.Contains(string(msgs), want) {
 			t.Errorf("messages sent missing %s:\n%s", want, msgs)
 		}
@@ -51,33 +64,46 @@ func TestOpenAIToolCalls(t *testing.T) {
 }
 
 func TestOllamaToolCalls(t *testing.T) {
-	var got map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&got)
-		// Ollama sends arguments as an object, and no call ID.
-		_, _ = io.WriteString(w, `{"message":{"content":"","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"b.go"}}}]},"done_reason":"stop"}`)
-	}))
-	defer srv.Close()
+	// Ollama sends arguments as an object, and no call ID.
+	srv, got := replyServer(t, `{"message":{"content":"","thinking":"Now b.go.","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"b.go"}}}]},"done_reason":"stop"}`)
 	c, _ := New(Config{Provider: "ollama", BaseURL: srv.URL, Model: "m"})
 	resp, err := c.Chat(context.Background(), Request{Messages: toolConvo, Tools: []Tool{readTool}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID == "" || resp.ToolCalls[0].Arguments != `{"path":"b.go"}` {
-		t.Fatalf("tool calls = %+v", resp.ToolCalls)
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID == "" || resp.ToolCalls[0].Arguments != `{"path":"b.go"}` || resp.Reasoning != "Now b.go." {
+		t.Fatalf("response = %+v", resp)
 	}
-	msgs, _ := json.Marshal(got["messages"])
-	for _, want := range []string{`"tool_calls":[{"function":{"arguments":{"path":"a.go"},"name":"read_file"}}]`, `"tool_name":"read_file"`} {
+	msgs, _ := json.Marshal((<-got)["messages"])
+	for _, want := range []string{`"tool_calls":[{"function":{"arguments":{"path":"a.go"},"name":"read_file"}}]`,
+		`"thinking":"I should read a.go."`, `"tool_name":"read_file"`} {
 		if !strings.Contains(string(msgs), want) {
 			t.Errorf("messages sent missing %s:\n%s", want, msgs)
 		}
 	}
 }
 
+// Missing, null and empty arguments are an empty object; so is anything
+// sent back that isn't an object.
+func TestToolArgs(t *testing.T) {
+	for in, want := range map[string]string{``: `{}`, `null`: `{}`, `""`: `{}`, `"null"`: `{}`, `" "`: `{}`,
+		`{"a":1}`: `{"a":1}`, `"{\"a\":1}"`: `{"a":1}`} {
+		if got := rawArgs(json.RawMessage(in)); got != want {
+			t.Errorf("rawArgs(%s) = %s, want %s", in, got, want)
+		}
+	}
+	for in, want := range map[string]string{`null`: `{}`, `[1]`: `{}`, `x`: `{}`, `{"a":1}`: `{"a":1}`} {
+		if got := string(argsObject(in)); got != want {
+			t.Errorf("argsObject(%s) = %s, want %s", in, got, want)
+		}
+	}
+}
+
 func TestToolsRefused(t *testing.T) {
+	status, body := http.StatusBadRequest, `{"error":"registry.ollama.ai/library/m does not support tools"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, `{"error":"registry.ollama.ai/library/m does not support tools"}`)
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 	}))
 	defer srv.Close()
 	c, _ := New(Config{Provider: "ollama", BaseURL: srv.URL, Model: "m"})
@@ -89,5 +115,11 @@ func TestToolsRefused(t *testing.T) {
 	_, err = c.Chat(context.Background(), Request{Messages: toolConvo[:1]})
 	if err == nil || errors.Is(err, ErrToolsUnsupported) {
 		t.Errorf("without tools: err = %v", err)
+	}
+	// A rate limit is not a refusal, whatever the model is called.
+	status, body = http.StatusTooManyRequests, `{"error":"rate limit exceeded for model codetool"}`
+	_, err = c.Chat(context.Background(), Request{Messages: toolConvo[:1], Tools: []Tool{readTool}})
+	if err == nil || errors.Is(err, ErrToolsUnsupported) {
+		t.Errorf("rate limited: err = %v", err)
 	}
 }

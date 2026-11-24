@@ -2,13 +2,16 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/OMG-Software/omg-review-bot/internal/diff"
 	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
+	"github.com/OMG-Software/omg-review-bot/internal/textutil"
 )
 
 const (
@@ -269,5 +272,154 @@ func TestStoppedReviewsWait(t *testing.T) {
 	drain(e.ctx, e.b)
 	if len(e.gh.reviews) != 1 {
 		t.Fatalf("not reviewed after resuming: %d reviews", len(e.gh.reviews))
+	}
+}
+
+// seedHeld stores findings held from a review of heldHead, as if an earlier
+// review had kept them back.
+func seedHeld(t *testing.T, e *reviewEnv, heldHead string, fs ...finding) {
+	t.Helper()
+	data, _ := json.Marshal(fs)
+	if err := e.st.SetHeldFindings(500, "acme/web", 7, heldHead, string(data)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A file renamed after its findings were held keeps them, under the new
+// name: the PR's own list of files only knows the name it had at the base.
+func TestHeldFindingFollowsRename(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	seedHeld(t, e, "zzz000", finding{Path: "old.go", Line: 11, Severity: "P3", Title: "Result printed to stdout instead of logged", Body: "Use the logger."})
+	e.gh.compareFiles = []any{map[string]any{"filename": "main.go", "previous_filename": "old.go"}}
+	e.lm.held = `{"results":[{"id":1,"present":true,"line":12}]}`
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	if c := e.gh.reviews[0].Comments; len(c) != 1 || c[0].Path != "main.go" || c[0].Line != 12 {
+		t.Fatalf("the held finding should be posted on the renamed file: %+v", c)
+	}
+}
+
+// With nothing to review, held findings can't be checked: those on files the
+// PR still changes wait for the next review, and only the rest go.
+func TestNothingToReviewKeepsHeldFindings(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.gh.mainStatus = "removed"
+	// Too large a diff for GitHub to show: no patch, so nothing to review.
+	e.gh.extraFiles = []any{map[string]any{"filename": "big.go", "status": "modified", "additions": 5000}}
+	seedHeld(t, e, "zzz000",
+		finding{Path: "big.go", Line: 3, Severity: "P2", Title: "Unchecked error", Body: "Check it."},
+		finding{Path: "main.go", Line: 11, Severity: "P3", Title: "Printed to stdout", Body: "Log it."})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 0 {
+		t.Fatalf("posted a review with nothing to review: %+v", e.gh.reviews)
+	}
+	data, head, err := e.st.HeldFindings(500, "acme/web", 7)
+	if err != nil || !strings.Contains(data, "big.go") || strings.Contains(data, "main.go") || head != "zzz000" {
+		t.Fatalf("held = %q at %q (err %v); want big.go's finding kept from zzz000, main.go's dropped", data, head, err)
+	}
+}
+
+// The same issue reported twice, a line apart or in another pass, is one
+// finding at its most severe; the same kind of problem a few lines away
+// with a different description is another.
+func TestSameFinding(t *testing.T) {
+	sql := func(line int, sev, body string) finding {
+		return finding{Path: "db.go", Line: line, Severity: sev, Title: "SQL injection", Body: body}
+	}
+	if !sameFinding(sql(10, "P1", "The user ID is concatenated into the query."), sql(11, "P3", "Something else entirely.")) {
+		t.Error("the same title a line apart should be the same finding")
+	}
+	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(18, "P1", "The sort column comes from the request and is formatted into ORDER BY.")) {
+		t.Error("two queries 8 lines apart with different descriptions should be two findings")
+	}
+	if !sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(18, "P1", "The user ID is concatenated into the lookup query here.")) {
+		t.Error("the same description 8 lines apart should be the same finding")
+	}
+
+	df := diff.Parse("db.go", "@@ -1,20 +1,20 @@\n"+strings.Repeat("+x\n", 20))
+	p := plan{files: map[string]*diff.File{"db.go": df}}
+	st := settings.Defaults()
+	st.Review.CommentLevel = "P3"
+	inline, _, _, _ := prepareFindings(st, p, []finding{sql(10, "P3", "Held from before."), sql(10, "P1", "Found again, worse.")}, nil, 0)
+	if len(inline) != 1 || inline[0].Severity != "P1" || inline[0].Body != "Held from before." {
+		t.Fatalf("inline = %+v; want the first report, at P1", inline)
+	}
+}
+
+// A tool-phase answer must have the fields the schema requires: {} would
+// read as a clean review.
+func TestHasRequired(t *testing.T) {
+	for in, want := range map[string]bool{
+		`{"summary":"ok","comments":[]}`:                   true,
+		"```json\n{\"summary\":\"\",\"comments\":[]}\n```": true,
+		`{"analysis":"need more context"}`:                 false,
+		`{"summary":"ok"}`:                                 false,
+		`I looked at main.go.`:                             false,
+		`null`:                                             false,
+	} {
+		if got := hasRequired(reviewSchema, in); got != want {
+			t.Errorf("hasRequired(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// cachedTools are tools over files already read: nothing reaches GitHub.
+func cachedTools(files map[string]string, missing []string, truncated bool) *repoTools {
+	rt := &repoTools{repo: "acme/web", head: "h", base: "h",
+		cache: &toolCache{files: map[string]toolFile{}, trees: map[string]toolTree{}}}
+	var paths []string
+	for p, c := range files {
+		rt.cache.files["h\x00"+p] = toolFile{content: c}
+		paths = append(paths, p)
+	}
+	for _, p := range missing {
+		rt.cache.files["h\x00"+p] = toolFile{err: &github.APIError{Status: 404}}
+		paths = append(paths, p)
+	}
+	rt.cache.trees["h"] = toolTree{paths: paths, truncated: truncated}
+	return rt
+}
+
+func TestToolEdgeCases(t *testing.T) {
+	ctx := context.Background()
+	long := strings.Repeat("x", 5000)
+	rt := cachedTools(map[string]string{"min.js": long + "\nsecond\n", "a.go": strings.Repeat("match\n", 1000)}, []string{"gone.go"}, false)
+
+	// A line too long for the room still shows its start, and says how to go on.
+	out := rt.readFile(ctx, "h", "min.js", 1, 0, 1000)
+	if !strings.Contains(out, "    1 | xxx") || !strings.Contains(out, "start_line 2") || len(out) > 1000 {
+		t.Errorf("long line read = %q", textutil.Truncate(out, 300))
+	}
+
+	// Matches past what's shown are counted, not kept; files that couldn't
+	// be read are reported, not taken as having no matches.
+	out = rt.search(ctx, "h", "match|second", "")
+	if strings.Count(out, "\n") > maxSearchHits+4 || !strings.Contains(out, "more matches") || !strings.Contains(out, "couldn't be read") {
+		t.Errorf("search = %q", textutil.Truncate(out, 400))
+	}
+	if out := rt.search(ctx, "h", "match", "gone.go"); !strings.Contains(out, "No matches in the files read") {
+		t.Errorf("search of an unreadable file = %q", out)
+	}
+
+	// A cut-short listing doesn't claim a directory is empty.
+	rt = cachedTools(map[string]string{"a.go": "x"}, nil, true)
+	if out := rt.list(ctx, "h", "pkg"); !strings.Contains(out, "incomplete") {
+		t.Errorf("list of a truncated tree = %q", out)
+	}
+}
+
+// JSON without the fields asked for isn't taken as a clean review: the
+// answer is asked for again with the schema.
+func TestReviewIncompleteJSONAskedAgain(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(divFinding), noApproval)
+	e.lm.prose, e.lm.proseText = 1, `{"analysis":"need more context"}`
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || len(e.gh.reviews[0].Comments) != 1 {
+		t.Fatalf("want one review with the finding, got %+v", e.gh.reviews)
 	}
 }

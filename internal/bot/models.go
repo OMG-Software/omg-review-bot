@@ -225,7 +225,12 @@ func (f *failover) Chat(ctx context.Context, req llm.Request) (*llm.Response, er
 			return nil, err // the job is over, not the model
 		}
 		if errors.Is(err, llm.ErrToolsUnsupported) {
-			return nil, err // the model works, just not with tools: the caller asks again without
+			// The model works, just not with tools: the caller asks again
+			// without, and that goes to this model, not the ones that failed.
+			f.mu.Lock()
+			f.cur = i
+			f.mu.Unlock()
+			return nil, err
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", f.uses[i].Label(), err))
 		if i+1 < len(f.uses) && f.onSwitch != nil {

@@ -29,6 +29,9 @@ type Message struct {
 	// ToolCallID and ToolName say which call a "tool" message answers.
 	ToolCallID string `json:"-"`
 	ToolName   string `json:"-"`
+	// Reasoning is the reasoning an assistant message with tool calls came
+	// with, sent back on the next request (some servers require it).
+	Reasoning string `json:"-"`
 }
 
 // Tool is a function the model may call. Parameters is its JSON schema.
@@ -57,6 +60,7 @@ type Request struct {
 type Response struct {
 	Content          string
 	ToolCalls        []ToolCall
+	Reasoning        string // reasoning the server returned apart from Content
 	PromptTokens     int
 	CompletionTokens int
 	Truncated        bool // the model hit its output token limit
@@ -71,7 +75,11 @@ var ErrToolsUnsupported = errors.New("the model or server does not support tool 
 // tools was rejected as a bad request that mentions them.
 func toolsRefused(req Request, err error) error {
 	var he *httpError
+	// Rate limits, sign-in and timeouts are ordinary failures, whatever the
+	// message says (a model may be named "...tool...").
 	if len(req.Tools) > 0 && errors.As(err, &he) && he.status >= 400 && he.status < 500 &&
+		he.status != http.StatusUnauthorized && he.status != http.StatusForbidden &&
+		he.status != http.StatusRequestTimeout && he.status != http.StatusTooManyRequests &&
 		strings.Contains(strings.ToLower(he.body), "tool") {
 		return fmt.Errorf("%w: %v", ErrToolsUnsupported, err)
 	}
@@ -100,22 +108,25 @@ func toolDefs(tools []Tool) []map[string]any {
 
 // rawArgs reads a call's arguments, which servers send either as a JSON
 // object or as a string holding one.
+// None at all (missing, null or "") is an empty object, as for a tool
+// without parameters.
 func rawArgs(r json.RawMessage) string {
-	var s string
-	if json.Unmarshal(r, &s) == nil {
-		return s
+	s := strings.TrimSpace(string(r))
+	var inner string
+	if json.Unmarshal(r, &inner) == nil {
+		s = strings.TrimSpace(inner)
 	}
-	if len(r) == 0 || string(r) == "null" {
+	if s == "" || s == "null" {
 		return "{}"
 	}
-	return string(r)
+	return s
 }
 
 // argsObject is a call's arguments as a JSON value to send back. Arguments
 // that aren't a JSON object are sent as an empty one.
 func argsObject(s string) json.RawMessage {
 	var m map[string]any
-	if json.Unmarshal([]byte(s), &m) != nil {
+	if json.Unmarshal([]byte(s), &m) != nil || m == nil {
 		return json.RawMessage("{}")
 	}
 	return json.RawMessage(s)
@@ -307,6 +318,7 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	return &Response{
 		Content:          c.Message.Content,
 		ToolCalls:        calls,
+		Reasoning:        c.Message.ReasoningContent,
 		PromptTokens:     out.Usage.PromptTokens,
 		CompletionTokens: out.Usage.CompletionTokens,
 		Truncated:        c.FinishReason == "length",
@@ -327,6 +339,9 @@ func openAIMessages(msgs []Message) []map[string]any {
 					"function": map[string]any{"name": tc.Name, "arguments": string(argsObject(tc.Arguments))}})
 			}
 			e["tool_calls"] = tcs
+			if m.Reasoning != "" {
+				e["reasoning_content"] = m.Reasoning
+			}
 		}
 		if m.Role == "tool" {
 			e["tool_call_id"] = m.ToolCallID
@@ -422,6 +437,7 @@ func (o *ollama) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	return &Response{
 		Content:          out.Message.Content,
+		Reasoning:        out.Message.Thinking,
 		ToolCalls:        calls,
 		PromptTokens:     out.PromptEvalCount,
 		CompletionTokens: out.EvalCount,
@@ -442,6 +458,9 @@ func ollamaMessages(msgs []Message) []map[string]any {
 				tcs = append(tcs, map[string]any{"function": map[string]any{"name": tc.Name, "arguments": argsObject(tc.Arguments)}})
 			}
 			e["tool_calls"] = tcs
+			if m.Reasoning != "" {
+				e["thinking"] = m.Reasoning
+			}
 		}
 		if m.Role == "tool" && m.ToolName != "" {
 			e["tool_name"] = m.ToolName

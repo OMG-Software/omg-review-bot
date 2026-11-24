@@ -71,33 +71,27 @@ Rules:
 // recheckHeld returns the findings held from the PR's last review that still
 // apply at head, with their lines moved to where the problem is now. Files
 // unchanged since are kept as they were; a file the PR no longer changes
-// drops its findings. If the check itself fails, the findings are kept.
+// drops its findings. If the check itself fails, the findings are kept; if
+// they can't be read, the review fails rather than go on without them.
 func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Client, cl *github.Client, rt *repoTools,
-	pr *store.PR, head string, files []github.PRFile, p plan, raw *strings.Builder) (kept []finding, usage llm.Response) {
-	data, heldHead, err := b.store.HeldFindings(pr.AccountID, pr.Repo, pr.Number)
-	if err != nil {
-		b.logf("warn", pr.Repo, pr.Number, "could not read the findings held for this review: %v", err)
-		return nil, usage
+	pr *store.PR, head string, files []github.PRFile, p plan, raw *strings.Builder) (kept []finding, usage llm.Response, err error) {
+	held, heldHead, err := b.loadHeld(pr)
+	if err != nil || len(held) == 0 {
+		return nil, usage, err
 	}
-	var held []finding
-	if data == "" || json.Unmarshal([]byte(data), &held) != nil || len(held) == 0 {
-		return nil, usage
-	}
-	status := map[string]string{}
-	renamed := map[string]string{}
-	for _, f := range files {
-		status[f.Filename] = f.Status
-		if f.PreviousFilename != "" {
-			renamed[f.PreviousFilename] = f.Filename
-		}
-	}
+	status := prFileStatus(files)
 	var changed map[string]bool // nil: every file may have changed
+	moved := map[string]string{}
 	if heldHead == head {
 		changed = map[string]bool{}
-	} else if names, err := cl.ChangedFiles(ctx, pr.Repo, heldHead, head); err == nil {
-		changed = make(map[string]bool, len(names))
-		for _, n := range names {
-			changed[n] = true
+	} else if cfs, err := cl.CompareFiles(ctx, pr.Repo, heldHead, head); err == nil {
+		changed = make(map[string]bool, len(cfs))
+		for _, f := range cfs {
+			changed[f.Filename] = true
+			if f.PreviousFilename != "" {
+				changed[f.PreviousFilename] = true
+				moved[f.PreviousFilename] = f.Filename
+			}
 		}
 	}
 
@@ -105,10 +99,14 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 	var paths []string
 	for _, f := range held {
 		old := f.Path
-		if np, ok := renamed[f.Path]; ok {
+		// Renamed since the findings were held, or (for a path from before
+		// the PR) by the PR itself.
+		if np, ok := moved[f.Path]; ok {
+			f.Path = np
+		} else if np, ok := status.renamed[f.Path]; ok {
 			f.Path = np
 		}
-		if s, ok := status[f.Path]; !ok || s == "removed" {
+		if !status.inPR(f.Path) {
 			continue // the PR no longer changes the file
 		}
 		if changed != nil && !changed[f.Path] && !changed[old] {
@@ -178,8 +176,69 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 	for i := range kept {
 		kept[i].Path = matchPath(p.files, kept[i].Path)
 	}
-	if len(kept) > 0 || len(held) > 0 {
-		fmt.Fprintf(raw, "held findings: %d from the last review, %d still apply\n\n", len(held), len(kept))
+	fmt.Fprintf(raw, "held findings: %d from the last review, %d still apply\n\n", len(held), len(kept))
+	return kept, usage, nil
+}
+
+// loadHeld reads the findings held for pr's next review and the commit they
+// were found on. Data that can't be decoded counts as none.
+func (b *Bot) loadHeld(pr *store.PR) ([]finding, string, error) {
+	data, heldHead, err := b.store.HeldFindings(pr.AccountID, pr.Repo, pr.Number)
+	if err != nil {
+		return nil, "", fmt.Errorf("read the findings held for this review: %w", err)
 	}
-	return kept, usage
+	var held []finding
+	if data != "" && json.Unmarshal([]byte(data), &held) != nil {
+		b.logf("warn", pr.Repo, pr.Number, "the findings held for this review couldn't be decoded, so they're dropped")
+		held = nil
+	}
+	return held, heldHead, nil
+}
+
+// prFiles is a PR's files by name, and its renames (old name to new).
+type prFiles struct {
+	status  map[string]string
+	renamed map[string]string
+}
+
+func prFileStatus(files []github.PRFile) prFiles {
+	s := prFiles{status: map[string]string{}, renamed: map[string]string{}}
+	for _, f := range files {
+		s.status[f.Filename] = f.Status
+		if f.PreviousFilename != "" {
+			s.renamed[f.PreviousFilename] = f.Filename
+		}
+	}
+	return s
+}
+
+// inPR reports whether the PR still changes path (and doesn't delete it).
+func (s prFiles) inPR(path string) bool {
+	st, ok := s.status[path]
+	return ok && st != "removed"
+}
+
+// pruneHeld is for a review with nothing to review: it can't check the held
+// findings, so it drops only those on files the PR no longer changes, and
+// keeps the rest (with the commit they were found on) for the next review.
+// It returns how many are left.
+func (b *Bot) pruneHeld(pr *store.PR, files []github.PRFile) (int, error) {
+	held, heldHead, err := b.loadHeld(pr)
+	if err != nil || len(held) == 0 {
+		return 0, err
+	}
+	status := prFileStatus(files)
+	var left []finding
+	for _, f := range held {
+		if np, ok := status.renamed[f.Path]; ok {
+			f.Path = np
+		}
+		if status.inPR(f.Path) {
+			left = append(left, f)
+		}
+	}
+	if len(left) == len(held) {
+		return len(left), nil
+	}
+	return len(left), b.saveHeld(pr, heldHead, left)
 }

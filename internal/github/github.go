@@ -574,10 +574,28 @@ func (c *Client) DismissReview(ctx context.Context, fullName string, number int,
 
 // ChangedFiles lists the files that differ between two commits.
 func (c *Client) ChangedFiles(ctx context.Context, fullName, base, head string) ([]string, error) {
+	files, err := c.CompareFiles(ctx, fullName, base, head)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		out = append(out, f.Filename)
+	}
+	return out, nil
+}
+
+// CompareFile is a file changed between two commits; PreviousFilename is
+// its name at the first one when it was renamed.
+type CompareFile struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+}
+
+// CompareFiles lists the files changed between base and head, with renames.
+func (c *Client) CompareFiles(ctx context.Context, fullName, base, head string) ([]CompareFile, error) {
 	var r struct {
-		Files []struct {
-			Filename string `json:"filename"`
-		} `json:"files"`
+		Files []CompareFile `json:"files"`
 	}
 	path := fmt.Sprintf("/repos/%s/compare/%s...%s", fullName, url.PathEscape(base), url.PathEscape(head))
 	if _, err := c.do(ctx, http.MethodGet, path, nil, nil, &r); err != nil {
@@ -586,11 +604,7 @@ func (c *Client) ChangedFiles(ctx context.Context, fullName, base, head string) 
 	if len(r.Files) >= 300 {
 		return nil, errors.New("comparison lists 300 files, so it may be incomplete") // GitHub's cap
 	}
-	out := make([]string, 0, len(r.Files))
-	for _, f := range r.Files {
-		out = append(out, f.Filename)
-	}
-	return out, nil
+	return r.Files, nil
 }
 
 // TreePaths lists every file path in the repository at ref (a SHA or branch).

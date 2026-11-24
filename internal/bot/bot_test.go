@@ -58,6 +58,8 @@ type fakeGitHub struct {
 	failEdits     bool             // editing issue comments fails (a 502)
 	failList      bool             // listing the PR's conversation comments fails (a 502)
 	mainStatus    string           // main.go's status in the PR's files; "" = modified
+	extraFiles    []any            // more files in the PR, after main.go and go.sum
+	compareFiles  []any            // the files a compare lists; nil = main.go
 	onReview      func()           // runs once after recording a review, before responding
 }
 
@@ -125,10 +127,10 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			if mainStatus == "" {
 				mainStatus = "modified"
 			}
-			send([]any{
+			send(append([]any{
 				map[string]any{"filename": "main.go", "status": mainStatus, "additions": 2, "deletions": 0, "patch": f.patch},
 				map[string]any{"filename": "go.sum", "status": "modified", "patch": "@@ -1 +1 @@\n-x\n+y"},
-			})
+			}, f.extraFiles...))
 		case p == "/repos/acme/web/pulls/7/comments" && r.Method == http.MethodGet:
 			send(f.comments)
 		case p == "/repos/acme/web/pulls/7/reviews" && r.Method == http.MethodGet:
@@ -175,6 +177,10 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 				"path": "main.go", "created_at": time.Now().Format(time.RFC3339)})
 			send(map[string]any{"id": id})
 		case strings.HasPrefix(p, "/repos/acme/web/compare/"):
+			if f.compareFiles != nil {
+				send(map[string]any{"files": f.compareFiles})
+				return
+			}
 			send(map[string]any{"files": []any{map[string]any{"filename": "main.go"}}})
 		case p == "/repos/acme/web/issues/7/comments" && r.Method == http.MethodPost:
 			var body map[string]string
@@ -269,6 +275,7 @@ type fakeLLM struct {
 	toolOffers  int              // requests that offered tools
 	refuseTools bool             // reject requests offering tools, as a server without tool support does
 	prose       int              // tool-offering requests answered in prose instead of JSON
+	proseText   string           // what they say; "" = a sentence of prose
 }
 
 func (l *fakeLLM) handler(t *testing.T) http.Handler {
@@ -315,8 +322,12 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 			}
 			if l.prose > 0 {
 				l.prose--
+				text := l.proseText
+				if text == "" {
+					text = "I looked and main.go divides by zero."
+				}
 				_ = json.NewEncoder(w).Encode(map[string]any{
-					"choices": []any{map[string]any{"message": map[string]any{"content": "I looked and main.go divides by zero."}, "finish_reason": "stop"}},
+					"choices": []any{map[string]any{"message": map[string]any{"content": text}, "finish_reason": "stop"}},
 					"usage":   map[string]any{"prompt_tokens": 100, "completion_tokens": 10},
 				})
 				return

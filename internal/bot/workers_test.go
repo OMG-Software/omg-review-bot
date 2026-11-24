@@ -217,10 +217,10 @@ func TestWorkingOrderedByJobStart(t *testing.T) {
 	slot := func(i int) context.Context { return context.WithValue(context.Background(), workerSlot{}, i) }
 	pr := &store.PR{Repo: "acme/web", Number: 1}
 
-	b.jobStarted(1)
+	b.admit(context.Background(), 1, job{repo: "acme/web", number: 1})
 	b.setCurrent(slot(1), pr, "first, part 1")
 	time.Sleep(10 * time.Millisecond)
-	b.jobStarted(0)
+	b.admit(context.Background(), 0, job{repo: "acme/web", number: 1})
 	b.setCurrent(slot(0), pr, "second")
 	time.Sleep(10 * time.Millisecond)
 	before := b.Status().Working[0].Since
@@ -342,5 +342,37 @@ func TestStopReviewsLetsRunningJobsFinish(t *testing.T) {
 	}
 	if e.b.Status().Stopped {
 		t.Error("still stopped after resuming")
+	}
+}
+
+// A job shows as running from the moment it's admitted, before it says what
+// it's doing; once StopReviews returns, no job is admitted.
+func TestAdmitIsTheStopBarrier(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := New(st, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !b.admit(context.Background(), 0, job{repo: "acme/web", number: 1}) {
+		t.Fatal("not admitted while reviews run")
+	}
+	if w := b.Status().Working; len(w) != 1 || w[0].Repo != "acme/web" || w[0].Number != 1 {
+		t.Fatalf("working = %+v, want the admitted job", w)
+	}
+	b.StopReviews()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if b.admit(ctx, 1, job{repo: "acme/web", number: 2}) {
+		t.Fatal("admitted after StopReviews returned")
+	}
+	if s := b.Status(); len(s.Working) != 1 || s.Slots[1].What != "" {
+		t.Fatalf("status = %+v, want only the job admitted before the stop", s)
+	}
+	done := make(chan bool)
+	go func() { done <- b.admit(context.Background(), 1, job{repo: "acme/web", number: 2}) }()
+	b.ResumeReviews()
+	if !<-done {
+		t.Fatal("not admitted after resuming")
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -641,10 +640,13 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		rec.Status = "nothing to review"
 		rec.Summary = "No reviewable changes (all files were deleted, binary or ignored)."
 		b.logf("info", pr.Repo, pr.Number, "nothing to review at %s", short(head))
-		// Findings held from an earlier review were on files that are now
-		// gone or ignored.
-		if err := b.store.SetHeldFindings(pr.AccountID, pr.Repo, pr.Number, head, ""); err != nil {
-			b.logf("warn", pr.Repo, pr.Number, "could not clear the findings held for this review: %v", err)
+		// Findings held from an earlier review can't be checked without a
+		// review: those on files the PR no longer changes go, the rest wait
+		// for the next review (a file can be left out only because its
+		// diff is too large to show, say).
+		heldLeft, err := b.pruneHeld(pr, files)
+		if err != nil {
+			return nil, err
 		}
 		if threadsKnown {
 			// No review is posted, but the fix check may have resolved what
@@ -652,7 +654,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 			// file), and nothing else would lift it: syncApproval only acts
 			// on a commit the bot posted a review for.
 			b.dismissStanding(ctx, st, cl, pr, login, standing{
-				liftRequest: countOpen(st.Review.RequestChangesLevel, threads) == 0 && pr.ReviewedSHA != "",
+				liftRequest: countOpen(st.Review.RequestChangesLevel, threads) == 0 && heldLeft == 0 && pr.ReviewedSHA != "",
 			}, nil)
 		}
 		return gp, nil
@@ -662,9 +664,13 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		b.setCurrent(ctx, pr, "Reviewing %s#%d with %d models", pr.Repo, pr.Number, len(lcs))
 	}
 	// Findings an earlier review held back go first, where they still apply.
-	carried, hu := b.recheckHeld(ctx, st, aux, cl, rt, pr, head, files, p, &raw)
+	carried, hu, err := b.recheckHeld(ctx, st, aux, cl, rt, pr, head, files, p, &raw)
 	rec.PromptTokens += hu.PromptTokens
 	rec.CompletionTokens += hu.CompletionTokens
+	if err != nil {
+		// Going on without them would post a review that drops them.
+		return nil, err
+	}
 	// Each model reviews the whole diff; with several (collate), side by side.
 	passes := make([]reviewPass, len(lcs))
 	var wg sync.WaitGroup
@@ -857,7 +863,17 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 			fresh := 0
 			for _, f := range out.Comments {
 				f, ok := normFinding(p, f)
-				if !ok || seenFinding(f, all) || isDuplicate(f, in.mine) {
+				if !ok || isDuplicate(f, in.mine) {
+					continue
+				}
+				if k := sameIndex(f, all); k >= 0 {
+					// Found again, but more severe: passed on too, so the
+					// review counts the issue at this level (see
+					// prepareFindings). It's not news, so passes don't go on.
+					if settings.SeverityRank(f.Severity) < settings.SeverityRank(all[k].Severity) {
+						all[k].Severity = f.Severity
+						ps.findings = append(ps.findings, f)
+					}
 					continue
 				}
 				all = append(all, f)
@@ -1019,25 +1035,37 @@ func normFinding(p plan, f finding) (finding, bool) {
 }
 
 // sameFinding reports whether two findings are the same issue: the same
-// file, close lines and much the same claim.
+// file and much the same claim, a line or so apart. Further apart (the
+// same kind of problem in two places nearby, say), it takes much the same
+// description too.
 func sameFinding(a, b finding) bool {
-	if a.Path != b.Path {
+	if a.Path != b.Path || !(strings.EqualFold(a.Title, b.Title) || similarity(a.Title, b.Title) >= 0.5) {
 		return false
 	}
-	d := a.Line - b.Line
-	if d < 0 {
-		d = -d
-	}
-	return d <= 10 && (strings.EqualFold(a.Title, b.Title) || similarity(a.Title, b.Title) >= 0.5)
+	d := abs(a.Line - b.Line)
+	return d <= 3 || (d <= 10 && similarity(a.Body, b.Body) >= 0.5)
 }
 
+// seenFinding reports whether fs already has f. If it does, at a lower
+// level, that one is raised to f's: the same issue found again counts at
+// its most severe.
 func seenFinding(f finding, fs []finding) bool {
-	for _, g := range fs {
-		if sameFinding(f, g) {
-			return true
+	k := sameIndex(f, fs)
+	if k >= 0 && settings.SeverityRank(f.Severity) < settings.SeverityRank(fs[k].Severity) {
+		fs[k].Severity = f.Severity
+	}
+	return k >= 0
+}
+
+// sameIndex is the index of the finding in fs that is the same issue as f,
+// or -1.
+func sameIndex(f finding, fs []finding) int {
+	for k := range fs {
+		if sameFinding(f, fs[k]) {
+			return k
 		}
 	}
-	return false
+	return -1
 }
 
 // prepareFindings normalizes, filters, de-duplicates and places findings:
@@ -1046,7 +1074,6 @@ func seenFinding(f finding, fs []finding) bool {
 // rather than dropped.
 func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.ReviewComment, limit int) (inline, notes, held []finding, dropped int) {
 	maxRank := settings.SeverityRank(st.Review.CommentLevel)
-	seen := map[string]bool{}
 	var kept []finding
 	for _, f := range all {
 		f, ok := normFinding(p, f)
@@ -1057,11 +1084,10 @@ func prepareFindings(st settings.Settings, p plan, all []finding, mine []github.
 			dropped++
 			continue
 		}
-		key := f.Path + ":" + strconv.Itoa(f.Line) + ":" + strings.ToLower(f.Title)
-		if seen[key] || seenFinding(f, kept) {
+		// The same issue again keeps the first, at the more severe level.
+		if seenFinding(f, kept) {
 			continue
 		}
-		seen[key] = true
 		if isDuplicate(f, mine) {
 			dropped++
 			continue

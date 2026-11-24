@@ -27,6 +27,7 @@ const (
 	maxSearchHits     = 80      // matching lines one search_code call returns
 	maxListPaths      = 400     // paths one list_files call returns
 	maxToolFileBytes  = 1 << 20 // larger files aren't searched
+	maxCacheBytes     = 64 << 20
 	searchConcurrency = 8
 )
 
@@ -45,6 +46,7 @@ type repoTools struct {
 type toolCache struct {
 	mu    sync.Mutex
 	files map[string]toolFile
+	bytes int // size of the cached files
 	trees map[string]toolTree
 }
 
@@ -170,7 +172,11 @@ func (rt *repoTools) file(ctx context.Context, ref, path string) (string, error)
 	content, err := rt.cl.FileContent(ctx, rt.repo, path, ref)
 	if settled(err) {
 		c.mu.Lock()
-		c.files[key] = toolFile{content, err}
+		// What's cached in a review is capped: past it, files are read again.
+		if c.bytes+len(content) <= maxCacheBytes {
+			c.files[key] = toolFile{content, err}
+			c.bytes += len(content)
+		}
 		c.mu.Unlock()
 	}
 	return content, err
@@ -230,6 +236,16 @@ func (rt *repoTools) readFile(ctx context.Context, ref, path string, from, to, l
 	fmt.Fprintf(&sb, "%s (%d lines)\n", path, len(lines))
 	for i := from; i <= to; i++ {
 		l := fmt.Sprintf("%5d | %s\n", i, lines[i-1])
+		if i == from && sb.Len()+len(l) > limit-120 {
+			// One line too long to show whole: show its start, and go on
+			// from the next.
+			fmt.Fprintf(&sb, "%s\n(line %d is too long to show whole", textutil.Truncate(strings.TrimSuffix(l, "\n"), max(limit-sb.Len()-200, 40)), i)
+			if i < len(lines) {
+				fmt.Fprintf(&sb, ": ask for start_line %d to read on", i+1)
+			}
+			sb.WriteString(")\n")
+			break
+		}
 		if sb.Len()+len(l) > limit-120 {
 			fmt.Fprintf(&sb, "(stopped at line %d of %d to fit: ask for start_line %d to read on)\n", i-1, len(lines), i)
 			break
@@ -252,6 +268,9 @@ func (rt *repoTools) list(ctx context.Context, ref, dir string) string {
 		}
 	}
 	if len(out) == 0 {
+		if t.truncated {
+			return fmt.Sprintf("No files under %q in the part of the listing GitHub returned: the repository is very large, so the listing is incomplete. Try read_file with a path.", dir)
+		}
 		return fmt.Sprintf("No files under %q.", dir)
 	}
 	var sb strings.Builder
@@ -301,9 +320,11 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		cands = cands[:maxSearchFiles]
 	}
 
+	// Each file keeps at most the lines that could be shown, and counts the rest.
 	type hit struct {
-		path  string
 		lines []string
+		count int
+		read  bool // false: the file couldn't be read
 	}
 	results := make([]hit, len(cands))
 	sem := make(chan struct{}, searchConcurrency)
@@ -314,12 +335,16 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 		go func() {
 			defer func() { <-sem; wg.Done() }()
 			content, err := rt.file(ctx, ref, p)
+			results[i].read = err == nil
 			if err != nil || len(content) > maxToolFileBytes || strings.ContainsRune(textutil.Truncate(content, 8000), 0) {
 				return
 			}
 			for n, l := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
 				if re.MatchString(l) {
-					results[i].lines = append(results[i].lines, fmt.Sprintf("%s:%d: %s", p, n+1, textutil.Truncate(strings.TrimSpace(l), 240)))
+					if results[i].count < maxSearchHits {
+						results[i].lines = append(results[i].lines, fmt.Sprintf("%s:%d: %s", p, n+1, textutil.Truncate(strings.TrimSpace(l), 240)))
+					}
+					results[i].count++
 				}
 			}
 		}()
@@ -330,8 +355,12 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 	}
 
 	var sb strings.Builder
-	hits := 0
+	hits, all, unread := 0, 0, 0
 	for _, r := range results {
+		all += r.count
+		if !r.read {
+			unread++
+		}
 		for _, l := range r.lines {
 			if hits == maxSearchHits {
 				break
@@ -340,15 +369,16 @@ func (rt *repoTools) search(ctx context.Context, ref, pattern, glob string) stri
 			hits++
 		}
 	}
-	all := 0
-	for _, r := range results {
-		all += len(r.lines)
-	}
 	switch {
+	case all == 0 && unread > 0:
+		sb.WriteString("No matches in the files read.\n")
 	case all == 0:
 		sb.WriteString("No matches.\n")
 	case all > hits:
 		fmt.Fprintf(&sb, "...and %d more matches: narrow the pattern or path_glob.\n", all-hits)
+	}
+	if unread > 0 {
+		fmt.Fprintf(&sb, "(%d of the %d files couldn't be read just now, so they weren't searched: try again, or read_file them.)\n", unread, len(cands))
 	}
 	if total > len(cands) {
 		fmt.Fprintf(&sb, "(Searched the first %d of %d files: give a path_glob to search the rest.)\n", len(cands), total)
@@ -402,7 +432,9 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 		total.CompletionTokens += resp.CompletionTokens
 		if len(resp.ToolCalls) == 0 {
 			raw.WriteString(resp.Content)
-			if !resp.Truncated && llm.DecodeJSON(resp.Content, out) == nil {
+			// Without the schema enforced, the answer must at least have
+			// the fields it requires: {} would read as "nothing found".
+			if !resp.Truncated && hasRequired(schema, resp.Content) && llm.DecodeJSON(resp.Content, out) == nil {
 				return total, raw.String(), nil
 			}
 			// An answer, but not the JSON asked for: ask again with the schema.
@@ -412,8 +444,10 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 			break
 		}
 		content := textutil.Truncate(llm.StripThinking(resp.Content), 2000)
-		msgs = append(msgs, llm.Message{Role: "assistant", Content: content, ToolCalls: resp.ToolCalls})
-		used += len(content)
+		// Reasoning is sent back with the calls: some servers (DeepSeek's
+		// thinking mode) require it on a continued tool conversation.
+		msgs = append(msgs, llm.Message{Role: "assistant", Content: content, ToolCalls: resp.ToolCalls, Reasoning: resp.Reasoning})
+		used += len(content) + len(resp.Reasoning)
 		for _, c := range resp.ToolCalls {
 			res := rt.run(ctx, c, min(perCall, max(room-used, 200)))
 			used += len(res) + len(c.Arguments)
@@ -428,6 +462,22 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 	total.PromptTokens += u.PromptTokens
 	total.CompletionTokens += u.CompletionTokens
 	return total, raw.String() + r, err
+}
+
+// hasRequired reports whether content holds a JSON object with every field
+// the schema requires.
+func hasRequired(schema map[string]any, content string) bool {
+	var m map[string]any
+	if llm.DecodeJSON(content, &m) != nil || m == nil {
+		return false
+	}
+	req, _ := schema["required"].([]string)
+	for _, k := range req {
+		if _, ok := m[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // flattenTools rewrites tool calls and results as plain assistant and user

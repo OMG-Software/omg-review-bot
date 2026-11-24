@@ -303,6 +303,42 @@ func TestFailoverPastBadJSONAndBrokenModels(t *testing.T) {
 	}
 }
 
+// A model that refuses tools after an earlier one failed gets the retry
+// without tools: the review doesn't go back to the model that failed.
+func TestFailoverToolRefusalStaysOnRefuser(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	var downPlain atomic.Int32 // requests without tools that reached the failing model
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Tools []any `json:"tools"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Tools) > 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		downPlain.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": clean}, "finish_reason": "stop"}}})
+	}))
+	t.Cleanup(down.Close)
+	refuser := &fakeLLM{review: clean, refuseTools: true}
+	refuserSrv := httptest.NewServer(refuser.handler(t))
+	t.Cleanup(refuserSrv.Close)
+	e := newReviewEnv(t, clean, func(cfg *settings.Settings) {
+		cfg.Models = settings.Models{Strategy: settings.StrategyFailover,
+			Configs: []settings.LLM{modelAt("down", down.URL), modelAt("refuser", refuserSrv.URL), cfg.LLM}}
+	})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || downPlain.Load() != 0 || refuser.count() != 2 {
+		t.Fatalf("reviews %d, tool-free requests to the failed model %d (want 0), refuser calls %d (want its refusal and its answer)",
+			len(e.gh.reviews), downPlain.Load(), refuser.count())
+	}
+	if r := lastReview(t, e.st); r.Model != "refuser" {
+		t.Errorf("review recorded model %q", r.Model)
+	}
+}
+
 // TestOwnModelsWithoutInstanceModels: the instance's models aren't set up,
 // yet an organization with its own is watched and reviewed; one without is
 // left until the instance's are.

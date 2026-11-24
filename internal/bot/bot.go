@@ -386,12 +386,34 @@ func (b *Bot) setCurrent(ctx context.Context, pr *store.PR, format string, args 
 	b.mu.Unlock()
 }
 
-// jobStarted marks worker slot as starting a new job, which Working is
-// ordered by. Nothing is shown until the job says what it's doing.
-func (b *Bot) jobStarted(slot int) {
-	b.mu.Lock()
-	b.working[slot] = Activity{started: time.Now()}
-	b.mu.Unlock()
+// admit starts j in worker slot unless new work is stopped, in which case it
+// waits until it isn't (false: ctx ended first). The check and marking the
+// slot busy are one step under both locks (b.mu first, as in Status), so
+// once StopReviews returns no job starts, and every job that did shows as
+// running until it's done.
+func (b *Bot) admit(ctx context.Context, slot int, j job) bool {
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		b.mu.Lock()
+		b.stopMu.Lock()
+		stopped, ch := b.stopped, b.resumed
+		if !stopped {
+			now := time.Now()
+			b.working[slot] = Activity{What: "Starting", Repo: j.repo, Number: j.number, Account: j.org, Since: now, started: now}
+		}
+		b.stopMu.Unlock()
+		b.mu.Unlock()
+		if !stopped {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ch:
+		}
+	}
 }
 
 // logf writes to both the process log and the activity log shown in the UI.
@@ -581,11 +603,10 @@ func (b *Bot) work(ctx context.Context, slot int, run func(context.Context, job)
 		for ok {
 			// A job taken just before work stopped, or the PR's next one,
 			// waits rather than starting.
-			if !b.waitResumed(ctx) || ctx.Err() != nil {
+			if !b.admit(ctx, slot, j) {
 				b.releasePR(j)
 				return
 			}
-			b.jobStarted(slot)
 			run(ctx, b.dequeued(j))
 			b.mu.Lock()
 			b.working[slot] = Activity{}
