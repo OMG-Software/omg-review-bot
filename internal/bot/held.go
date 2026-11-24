@@ -28,7 +28,7 @@ func (b *Bot) saveHeld(pr *store.PR, head string, held []finding) error {
 		held = append([]finding(nil), held...)
 		for i := range held {
 			if held[i].Seen == "" {
-				held[i].Seen = head
+				held[i].Seen, held[i].SeenPath = head, held[i].Path
 			}
 		}
 		j, err := json.Marshal(held)
@@ -94,7 +94,7 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 	byPath := map[string][]finding{}
 	var paths []string
 	for _, f := range held {
-		old := f.Path
+		old := f.SeenPath
 		changed, moved := diffs(f.Seen)
 		f, inPR, keep := status.place(f, changed, moved)
 		if !inPR {
@@ -173,6 +173,9 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 	}
 	for i := range kept {
 		kept[i].Path = matchPath(p.files, kept[i].Path)
+		if kept[i].Seen == head { // confirmed at head, under its name there
+			kept[i].SeenPath = kept[i].Path
+		}
 	}
 	fmt.Fprintf(raw, "held findings: %d from the last review, %d still apply\n\n", len(held), len(kept))
 	return kept, usage, nil
@@ -196,6 +199,9 @@ func (b *Bot) loadHeld(pr *store.PR) ([]finding, string, error) {
 	for i := range held {
 		if held[i].Seen == "" { // stored before findings kept their own
 			held[i].Seen = heldHead
+		}
+		if held[i].SeenPath == "" { // stored before findings kept their file's name
+			held[i].SeenPath = held[i].Path
 		}
 	}
 	return held, heldHead, nil
@@ -265,17 +271,29 @@ func heldChanges(ctx context.Context, cl *github.Client, repo, heldHead, head st
 	return changed, moved
 }
 
-// place moves a held finding to its file's name now: renamed since it was
-// held (moved), or, for a name from before the PR, by the PR itself. inPR is
-// whether the PR still changes the file. If it doesn't, keep says whether
-// the finding stays anyway: when the comparison failed (changed is nil),
-// the file may have been renamed to a name that can't be told, so only a
-// file the PR deletes drops its findings.
+// place moves a held finding to its file's name now. The comparison (changed
+// and moved) is from the finding's Seen commit, so the rename is looked up
+// from SeenPath, its name there, not from Path, which may be a later name
+// that review couldn't check: renamed since (moved), or, for a name from
+// before the PR, by the PR itself. If that name isn't in the PR but Path
+// still is (the comparison failed), Path stands. inPR is whether the PR
+// still changes the file. If it doesn't, keep says whether the finding
+// stays anyway: when the comparison failed (changed is nil), the file may
+// have been renamed to a name that can't be told, so only a file the PR
+// deletes drops its findings.
 func (s prFiles) place(f finding, changed map[string]bool, moved map[string]string) (_ finding, inPR, keep bool) {
-	if np, ok := moved[f.Path]; ok {
-		f.Path = np
-	} else if np, ok := s.renamed[f.Path]; ok {
-		f.Path = np
+	from := f.SeenPath
+	if from == "" {
+		from = f.Path
+	}
+	path := from
+	if np, ok := moved[from]; ok {
+		path = np
+	} else if np, ok := s.renamed[from]; ok {
+		path = np
+	}
+	if s.inPR(path) || !s.inPR(f.Path) {
+		f.Path = path
 	}
 	if s.inPR(f.Path) {
 		return f, true, true
@@ -285,8 +303,9 @@ func (s prFiles) place(f finding, changed map[string]bool, moved map[string]stri
 
 // pruneHeld is for a review with nothing to review: it can't check the held
 // findings, so it drops only those it knows are on files the PR no longer
-// changes, and keeps the rest (renamed, with the commit they were found on)
-// for the next review. It returns how many are left.
+// changes, and keeps the rest (renamed, with the commit they were found on
+// and their file's name there) for the next review. It returns how many
+// are left.
 func (b *Bot) pruneHeld(ctx context.Context, cl *github.Client, pr *store.PR, head string, files []github.PRFile) (int, error) {
 	held, heldHead, err := b.loadHeld(pr)
 	if err != nil || len(held) == 0 {

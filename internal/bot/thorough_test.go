@@ -11,6 +11,7 @@ import (
 	"github.com/OMG-Software/omg-review-bot/internal/diff"
 	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
+	"github.com/OMG-Software/omg-review-bot/internal/store"
 	"github.com/OMG-Software/omg-review-bot/internal/textutil"
 )
 
@@ -588,5 +589,59 @@ func TestUncheckedHeldFindingKeepsItsCommit(t *testing.T) {
 	_ = json.Unmarshal([]byte(data), &held)
 	if len(held) != 1 || held[0].Line != 40 || held[0].Seen != "zzz000" {
 		t.Fatalf("held = %s; want the unchecked finding at line 40 as seen on zzz000", data)
+	}
+}
+
+// A finding an empty review moved to a later name keeps its name on the
+// commit it's compared from, so a second rename after that still finds it.
+func TestNothingToReviewThenRenamedAgain(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.gh.mainStatus = "removed"
+	e.gh.extraFiles = []any{map[string]any{"filename": "c.go", "status": "renamed", "previous_filename": "a.go", "additions": 5000}}
+	e.gh.compareFiles = []any{map[string]any{"filename": "c.go", "previous_filename": "b.go"}}
+	seedHeld(t, e, "zzz000", finding{Path: "b.go", Line: 3, Severity: "P2", Title: "Unchecked error", Body: "Check it."})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+
+	// c.go becomes d.go: compared from zzz000, that's b.go to d.go.
+	e.gh.mu.Lock()
+	e.gh.extraFiles = []any{map[string]any{"filename": "d.go", "status": "renamed", "previous_filename": "a.go", "additions": 5000}}
+	e.gh.compareFiles = []any{map[string]any{"filename": "d.go", "previous_filename": "b.go"}}
+	e.gh.mu.Unlock()
+	e.push("ccc333", e.gh.patch, e.gh.content, reviewOf(), "2026-01-01T00:10:00Z")
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+
+	data, _, err := e.st.HeldFindings(500, "acme/web", 7)
+	var held []finding
+	_ = json.Unmarshal([]byte(data), &held)
+	if err != nil || len(held) != 1 || held[0].Path != "d.go" || held[0].Seen != "zzz000" || held[0].SeenPath != "b.go" {
+		t.Fatalf("held = %s (err %v); want the finding under d.go, compared from b.go on zzz000", data, err)
+	}
+}
+
+// The last review a PR gets automatically posts every finding: no later
+// one would post what it held.
+func TestLastRoundHoldsNothing(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(divFinding, printFinding), func(cfg *settings.Settings) {
+		cfg.Review.MaxComments = 1
+		cfg.Review.MaxRounds = settings.MinRounds
+		noApproval(cfg)
+	})
+	for i := 1; i < settings.MinRounds; i++ {
+		if _, err := e.st.CreateReview(&store.Review{AccountID: 500, Repo: "acme/web", Number: 7, HeadSHA: fmt.Sprintf("old%d", i), Status: "posted"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	if c := e.gh.reviews[0].Comments; len(c) != 2 {
+		t.Fatalf("the last review should post both findings: %+v", c)
+	}
+	if data, _, _ := e.st.HeldFindings(500, "acme/web", 7); data != "" {
+		t.Errorf("held %q on the last review", data)
 	}
 }

@@ -181,6 +181,11 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		s.orgsPage(w, r)
 		return
 	}
+	s.render(w, r, "dashboard.html", page{Title: "Dashboard", Nav: "dash", D: s.dashboardData()})
+}
+
+// dashboardData is what the administrator dashboard shows besides the bot's status.
+func (s *Server) dashboardData() map[string]any {
 	now := time.Now()
 	stats, _ := s.store.ReviewStatsSince(store.AllAccounts, store.DayWindowStart(30, now)) // the chart's days
 	days, _ := s.store.ReviewsPerDay(store.AllAccounts, 30, now)
@@ -191,12 +196,12 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	orgs, _ := s.store.OrgSummaries(nil)
 	users, _ := s.store.CountUsers()
 	st := s.bot.Settings()
-	s.render(w, r, "dashboard.html", page{Title: "Dashboard", Nav: "dash", D: map[string]any{
+	return map[string]any{
 		"Reviews": reviews, "Activity": acts, "Counts": counts, "Stats": stats, "Days": days, "Orgs": orgs,
 		"RepoRows": repoReviewRows(repos, 10),
 		"Users":    users, "SignIn": st.GitHub.SignInOn(), "WebhookOn": st.GitHub.WebhookSecret != "",
 		"Deliveries24h": s.store.CountDeliveriesSince(time.Now().Add(-24 * time.Hour).Unix()),
-	}})
+	}
 }
 
 // ---------- pull requests and reviews ----------

@@ -30,9 +30,11 @@ type finding struct {
 	Severity string `json:"severity"`
 	Title    string `json:"title"`
 	Body     string `json:"body"`
-	// Seen is the commit Line was last confirmed on, for a held finding
-	// (stored with it). Never taken from a model's answer.
-	Seen string `json:"seen,omitempty"`
+	// Seen is the commit Line was last confirmed on, for a held finding,
+	// and SeenPath the file's name there (Path may be a later name). Both
+	// are stored with it, and never taken from a model's answer.
+	Seen     string `json:"seen,omitempty"`
+	SeenPath string `json:"seen_path,omitempty"`
 }
 
 type modelOutput struct {
@@ -713,12 +715,14 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 
 	// Past its comment limit a review holds the least severe findings for
 	// the next one, except the last automatic review, which has no next.
+	// If the reviews so far can't be counted, this may be the last: nothing
+	// is held, since no later review might post it.
 	round := 0
-	if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err == nil {
-		round = n + 1 // this one isn't "posted" yet
-	}
 	limit := st.Review.MaxComments
-	if round >= st.Review.MaxRounds {
+	if n, err := b.store.PostedReviews(pr.AccountID, pr.Repo, pr.Number); err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not count the bot's reviews of this PR, so this one posts every finding: %v", err)
+		limit = 0
+	} else if round = n + 1; round >= st.Review.MaxRounds { // this one isn't "posted" yet
 		limit = 0
 	}
 	inline, notes, held, dropped := prepareFindings(st, p, append(carried, collateFindings(p, lists)...), mine, limit)
@@ -875,7 +879,7 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 			}
 			fresh := 0
 			for _, f := range out.Comments {
-				f.Seen = "" // set when it's held, not by the model
+				f.Seen, f.SeenPath = "", "" // set when it's held, not by the model
 				f, ok := normFinding(p, f)
 				if !ok || isDuplicate(f, in.mine) {
 					continue
