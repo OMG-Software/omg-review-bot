@@ -74,14 +74,16 @@ var (
 	// ("/usr/bin") or comment ("// x") isn't one.
 	codeCmdRE = regexp.MustCompile(`^(\s*)/([A-Za-z][\w-]*)(\s|$)`)
 	// A run that could open or close a fence somewhere the sanitizer doesn't
-	// trust one (see cleanLine). A break already in front of it is taken in,
-	// so sanitizing twice (a finding is sanitized as it's found and again as
-	// it's posted, and a held one again each review) adds no more.
-	fenceRunRE = regexp.MustCompile("(?:" + zwsp + ")?(`{3,}|~{3,})")
+	// trust one (see cleanLine).
+	fenceRunRE = regexp.MustCompile("(`{3,}|~{3,})")
 )
 
 // sanitizeModelText makes model-written markdown safe to post (see above).
+// Sanitizing twice changes nothing (a finding is sanitized as it's found, as
+// it's posted, and if held, each review): the breaks are taken out first and
+// the text is cut to its cap without them, so it's the same text each time.
 func sanitizeModelText(s string) string {
+	s = strings.ReplaceAll(s, zwsp, "")
 	// Every line ending CommonMark knows, so these lines are GitHub's lines:
 	// a lone "\r" ends one too.
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
@@ -140,7 +142,7 @@ func isSuggestion(info string) bool {
 // which is posted after other text on the same line. There it can't open a
 // fence, so it gets no fence exemption: "**[P1]** ~~~ ![x](…)" isn't code.
 func sanitizeModelLine(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
+	s = strings.Join(strings.Fields(strings.ReplaceAll(s, zwsp, "")), " ")
 	return cleanLine(breakMarkers(textutil.Truncate(s, maxModelTitle)))
 }
 

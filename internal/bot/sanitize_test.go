@@ -210,6 +210,10 @@ func TestSanitizeIdempotent(t *testing.T) {
 		"use ``` here and ~~~ there",
 		"/merge please\n  /lgtm",
 		strings.Repeat("é", maxModelBody+50),
+		// Breaks added past the cap: cut again, the text would get shorter.
+		strings.Repeat("@alice ", maxModelBody/7),
+		strings.Repeat("@a ", maxModelTitle),
+		"text with a model's own " + z + "break, " + z + "@bob and prbot" + z + ":x",
 		"line\r\nwith\rreturns",
 	} {
 		if once := sanitizeModelText(in); sanitizeModelText(once) != once {

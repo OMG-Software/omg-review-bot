@@ -536,19 +536,26 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 		// thinking mode) require it on a continued tool conversation.
 		msgs = append(msgs, llm.Message{Role: "assistant", Content: content, ToolCalls: resp.ToolCalls, Reasoning: resp.Reasoning})
 		used += len(content) + len(resp.Reasoning)
+		for _, c := range resp.ToolCalls {
+			used += len(c.Arguments) // in the history from now on, run or not
+		}
 		for i, c := range resp.ToolCalls {
-			// Every call gets a result, but only so many run per turn: each
-			// search can read hundreds of files through the API.
-			if i >= maxCallsPerStep {
-				res := fmt.Sprintf("Not run: at most %d tool calls run at once. Ask for this again in your next turn if you still need it.", maxCallsPerStep)
+			// Every call gets a result, but only so many run per turn (each
+			// search can read hundreds of files through the API), and none
+			// once the room for tool results is used up.
+			var res string
+			switch {
+			case i >= maxCallsPerStep:
+				res = fmt.Sprintf("Not run: at most %d tool calls run at once. Ask for this again in your next turn if you still need it.", maxCallsPerStep)
 				fmt.Fprintf(&raw, "[tool] %s skipped (more than %d calls in one turn)\n", c.Name, maxCallsPerStep)
-				msgs = append(msgs, llm.Message{Role: "tool", Content: res, ToolCallID: c.ID, ToolName: c.Name})
-				used += len(res)
-				continue
+			case used >= room:
+				res = "Not run: the room for tool results in this review is used up."
+				fmt.Fprintf(&raw, "[tool] %s skipped (no room left)\n", c.Name)
+			default:
+				res = rt.run(ctx, c, min(perCall, max(room-used, 200)))
+				fmt.Fprintf(&raw, "[tool] %s %s -> %d chars\n", c.Name, textutil.Truncate(c.Arguments, 300), len(res))
 			}
-			res := rt.run(ctx, c, min(perCall, max(room-used, 200)))
-			used += len(res) + len(c.Arguments)
-			fmt.Fprintf(&raw, "[tool] %s %s -> %d chars\n", c.Name, textutil.Truncate(c.Arguments, 300), len(res))
+			used += len(res)
 			msgs = append(msgs, llm.Message{Role: "tool", Content: res, ToolCallID: c.ID, ToolName: c.Name})
 		}
 	}

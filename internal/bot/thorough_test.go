@@ -903,3 +903,32 @@ func TestToolTreeFetchedOnce(t *testing.T) {
 		t.Errorf("listed the repository %d times; want once", n)
 	}
 }
+
+// A call's arguments count against the room for tool results as soon as the
+// model sends them, so a turn whose calls alone fill it runs none of them.
+func TestToolArgumentsCountBeforeRunning(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	pad := strings.Repeat("x", 200_000) // more than this review's room for tool results
+	e.lm.batchCalls = []map[string]any{
+		{"id": "c0", "type": "function", "function": map[string]any{"name": "read_file", "arguments": `{"path":"main.go","pad":"` + pad + `"}`}},
+		{"id": "c1", "type": "function", "function": map[string]any{"name": "read_file", "arguments": `{"path":"main.go"}`}},
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	// Over the room, the conversation ends with the results flattened into
+	// text, so the review's raw log is where the calls show.
+	rs, err := e.st.RecentReviews(500, 1)
+	if err != nil || len(rs) != 1 {
+		t.Fatalf("recent reviews: %v, %v", rs, err)
+	}
+	r, err := e.st.GetReview(rs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(r.Raw, "[tool] read_file skipped (no room left)"); n != 2 || strings.Contains(r.Raw, "[tool] read_file {") {
+		t.Errorf("want both calls skipped for room, none run; the raw log has %d skipped:\n%.1500s", n, r.Raw)
+	}
+}
