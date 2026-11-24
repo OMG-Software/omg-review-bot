@@ -669,7 +669,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		b.setCurrent(ctx, pr, "Reviewing %s#%d with %d models", pr.Repo, pr.Number, len(lcs))
 	}
 	// Findings an earlier review held back go first, where they still apply.
-	carried, hu, err := b.recheckHeld(ctx, st, aux, cl, rt, pr, head, files, p, &raw)
+	carried, hu, err := b.recheckHeld(ctx, st, aux, cl, rt, pr, head, files, &raw)
 	rec.PromptTokens += hu.PromptTokens
 	rec.CompletionTokens += hu.CompletionTokens
 	if err != nil {
@@ -754,12 +754,20 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	}
 	// The held findings are saved before the review that promises them is
 	// posted: if they can't be, nothing is posted and the review is retried.
+	// Until it's posted, the earlier held findings it posts (they have Seen)
+	// stay saved too, so a bot stopped between the two doesn't lose them.
 	// If posting fails, the findings held before are put back for the retry.
 	prevHeld, prevHead, err := b.store.HeldFindings(pr.AccountID, pr.Repo, pr.Number)
 	if err != nil {
 		return nil, fmt.Errorf("read the findings held for this review: %w", err)
 	}
-	if err := b.saveHeld(pr, head, held); err != nil {
+	keep := held
+	for _, f := range append(append([]finding{}, ri.inline...), ri.notes...) {
+		if f.Seen != "" {
+			keep = append(keep[:len(keep):len(keep)], f)
+		}
+	}
+	if err := b.saveHeld(pr, head, keep); err != nil {
 		return nil, fmt.Errorf("keep %d finding(s) for the next review: %w", len(held), err)
 	}
 	rv, drafts, err := post(ri, event)
@@ -782,6 +790,12 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 			b.logf("warn", pr.Repo, pr.Number, "could not put back the findings held before this review: %v", rerr)
 		}
 		return nil, fmt.Errorf("post review: %w", err)
+	}
+	if len(keep) > len(held) {
+		// Posted now, so only the findings this review held back stay.
+		if err := b.saveHeld(pr, head, held); err != nil {
+			b.logf("warn", pr.Repo, pr.Number, "could not drop the held findings this review posted, so the next review checks them again: %v", err)
+		}
 	}
 	// A change request can only be standing if the bot reviewed the PR before,
 	// so a first review skips listing the reviews just to find none.
@@ -1041,7 +1055,12 @@ func normFinding(p plan, f finding) (finding, bool) {
 		f.Title = textutil.Truncate(textutil.FirstLine(f.Body), 100)
 	}
 	f.Title = sanitizeModelLine(f.Title)
-	f.Path = matchPath(p.files, f.Path)
+	// A model's path may be loosely written; a held finding's (it has Seen)
+	// is a real file's name, and stays it even if the PR no longer shows
+	// that file: it's posted as a note rather than moved to a similar name.
+	if f.Seen == "" {
+		f.Path = matchPath(p.files, f.Path)
+	}
 	return f, f.Title != "" || f.Body != ""
 }
 

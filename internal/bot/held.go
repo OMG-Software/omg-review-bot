@@ -63,9 +63,9 @@ var heldSchema = map[string]any{
 
 type heldOutput struct {
 	Results []struct {
-		ID      int  `json:"id"`
-		Present bool `json:"present"`
-		Line    int  `json:"line"`
+		ID      int   `json:"id"`
+		Present *bool `json:"present"` // missing: not known, so kept
+		Line    int   `json:"line"`
 	} `json:"results"`
 }
 
@@ -83,7 +83,7 @@ Rules:
 // drops its findings. If the check itself fails, the findings are kept; if
 // they can't be read, the review fails rather than go on without them.
 func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Client, cl *github.Client, rt *repoTools,
-	pr *store.PR, head string, files []github.PRFile, p plan, raw *strings.Builder) (kept []finding, usage llm.Response, err error) {
+	pr *store.PR, head string, files []github.PRFile, raw *strings.Builder) (kept []finding, usage llm.Response, err error) {
 	held, _, err := b.loadHeld(pr)
 	if err != nil || len(held) == 0 {
 		return nil, usage, err
@@ -152,7 +152,7 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 			if r.ID < 1 || r.ID > len(fs) {
 				continue
 			}
-			if !r.Present {
+			if r.Present != nil && !*r.Present {
 				gone[r.ID] = true
 			} else if r.Line > 0 {
 				moved[r.ID] = r.Line
@@ -171,8 +171,9 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 			kept = append(kept, f)
 		}
 	}
+	// Paths stay exactly as stored or renamed: a finding whose file can't be
+	// placed isn't matched by suffix onto another file the PR changes.
 	for i := range kept {
-		kept[i].Path = matchPath(p.files, kept[i].Path)
 		if kept[i].Seen == head { // confirmed at head, under its name there
 			kept[i].SeenPath = kept[i].Path
 		}

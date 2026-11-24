@@ -716,7 +716,10 @@ func StripThinking(s string) string {
 }
 
 // DecodeJSON extracts the first JSON object from model output (tolerating
-// reasoning blocks, markdown fences and chatter around it) into v.
+// reasoning blocks, markdown fences and chatter around it) into v. An object
+// that is JSON but doesn't fit v is skipped whole: the objects nested in it
+// aren't tried, or {"comments": {...one finding...}} would decode as the
+// finding, read as an answer with no comments.
 func DecodeJSON(s string, v any) error {
 	s = StripThinking(s)
 	var lastErr error = errors.New("no JSON object found")
@@ -727,12 +730,14 @@ func DecodeJSON(s string, v any) error {
 		}
 		tries++
 		var raw json.RawMessage
-		if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&raw); err != nil {
+		dec := json.NewDecoder(strings.NewReader(s[i:]))
+		if err := dec.Decode(&raw); err != nil {
 			lastErr = err
 			continue
 		}
 		if err := json.Unmarshal(raw, v); err != nil {
 			lastErr = err
+			i += int(dec.InputOffset()) - 1
 			continue
 		}
 		return nil

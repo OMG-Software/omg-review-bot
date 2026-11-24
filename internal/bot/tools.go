@@ -455,7 +455,7 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 			raw.WriteString(resp.Content)
 			// Without the schema enforced, the answer must at least have
 			// the fields it requires: {} would read as "nothing found".
-			if !resp.Truncated && hasRequired(schema, resp.Content) && llm.DecodeJSON(resp.Content, out) == nil {
+			if !resp.Truncated && decodeRequired(schema, resp.Content, out) {
 				return total, raw.String(), nil
 			}
 			// An answer, but not the JSON asked for: ask again with the schema.
@@ -494,11 +494,17 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 	return total, raw.String() + r, err
 }
 
-// hasRequired reports whether content holds a JSON object with every field
-// the schema requires.
-func hasRequired(schema map[string]any, content string) bool {
+// decodeRequired decodes the JSON object in content into out if it has every
+// field the schema requires. The object checked is the one decoded: one that
+// has the fields but doesn't fit out (a single finding where a list belongs)
+// is refused, not searched for another object inside it.
+func decodeRequired(schema map[string]any, content string, out any) bool {
+	var raw json.RawMessage
+	if llm.DecodeJSON(content, &raw) != nil {
+		return false
+	}
 	var m map[string]any
-	if llm.DecodeJSON(content, &m) != nil || m == nil {
+	if json.Unmarshal(raw, &m) != nil || m == nil {
 		return false
 	}
 	req, _ := schema["required"].([]string)
@@ -507,7 +513,7 @@ func hasRequired(schema map[string]any, content string) bool {
 			return false
 		}
 	}
-	return true
+	return json.Unmarshal(raw, out) == nil
 }
 
 // flattenTools rewrites tool calls and results as plain assistant and user

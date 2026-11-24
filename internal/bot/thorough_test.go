@@ -357,9 +357,10 @@ func TestSameFinding(t *testing.T) {
 	}
 }
 
-// A tool-phase answer must have the fields the schema requires: {} would
-// read as a clean review.
-func TestHasRequired(t *testing.T) {
+// A tool-phase answer must have the fields the schema requires, and fit the
+// output: {} would read as a clean review, and so would one finding given
+// where the list belongs, if the finding inside it were decoded instead.
+func TestDecodeRequired(t *testing.T) {
 	for in, want := range map[string]bool{
 		`{"summary":"ok","comments":[]}`:                   true,
 		"```json\n{\"summary\":\"\",\"comments\":[]}\n```": true,
@@ -367,10 +368,16 @@ func TestHasRequired(t *testing.T) {
 		`{"summary":"ok"}`:                                 false,
 		`I looked at main.go.`:                             false,
 		`null`:                                             false,
+		`{"summary":"Found an issue","comments":` + divFinding + `}`: false,
 	} {
-		if got := hasRequired(reviewSchema, in); got != want {
-			t.Errorf("hasRequired(%q) = %v, want %v", in, got, want)
+		var out modelOutput
+		if got := decodeRequired(reviewSchema, in, &out); got != want {
+			t.Errorf("decodeRequired(%q) = %v, want %v", in, got, want)
 		}
+	}
+	var out modelOutput
+	if !decodeRequired(reviewSchema, reviewOf(divFinding), &out) || len(out.Comments) != 1 {
+		t.Errorf("a list of one finding decoded as %+v", out)
 	}
 }
 
@@ -693,5 +700,68 @@ func TestSearchSkipsLargeFilesAndListsDot(t *testing.T) {
 		if out := rt.list(ctx, "h", dir); !strings.Contains(out, "pkg/a.go") {
 			t.Errorf("list %q = %q; want the repository's files", dir, out)
 		}
+	}
+}
+
+// A held check that doesn't say whether a problem is present (no schema
+// enforced the field) keeps the finding: only "present": false drops it.
+func TestHeldCheckWithoutPresentKeeps(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	seedHeld(t, e, "zzz000", finding{Path: "main.go", Line: 40, Severity: "P2", Title: "Printed to stdout", Body: "Log it."})
+	e.lm.held = `{"results":[{"id":1,"line":12}]}`
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	if c := e.gh.reviews[0].Comments; len(c) != 1 || c[0].Line != 12 {
+		t.Fatalf("the held finding should be posted at line 12: %+v", c)
+	}
+}
+
+// A held finding whose file can't be traced keeps its own path: it's posted
+// as a note, not moved to another file that ends the same way.
+func TestHeldFindingNotMovedBySuffix(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.gh.compareGone = true
+	e.gh.extraFiles = []any{map[string]any{"filename": "pkg/a.go", "status": "modified", "additions": 1,
+		"patch": "@@ -1,1 +1,2 @@\n package pkg\n+var x = 1"}}
+	seedHeld(t, e, "zzz000", finding{Path: "a.go", Line: 2, Severity: "P2", Title: "Unchecked error from Close", Body: "Check it."})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	r := e.gh.reviews[0]
+	for _, c := range r.Comments {
+		if c.Path == "pkg/a.go" {
+			t.Fatalf("the finding on a.go was posted on pkg/a.go: %+v", c)
+		}
+	}
+	if !strings.Contains(r.Body, "Unchecked error from Close") || !strings.Contains(r.Body, "a.go") {
+		t.Fatalf("want the finding posted as a note on a.go:\n%s", r.Body)
+	}
+}
+
+// Until the review that posts an earlier held finding is posted, that
+// finding stays saved with the ones it holds back; then only those stay.
+func TestPostedHeldFindingsSavedUntilPosted(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(printFinding), func(cfg *settings.Settings) {
+		cfg.Review.MaxComments = 1
+		noApproval(cfg)
+	})
+	seedHeld(t, e, "aaa111", finding{Path: "main.go", Line: 11, Severity: "P2", Title: "Held before", Body: "Old."})
+	var during string
+	e.gh.onReview = func() { during, _, _ = e.st.HeldFindings(500, "acme/web", 7) }
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 || len(e.gh.reviews[0].Comments) != 1 || !strings.Contains(e.gh.reviews[0].Comments[0].Body, "Held before") {
+		t.Fatalf("want the held P2 posted: %+v", e.gh.reviews)
+	}
+	if !strings.Contains(during, "Held before") || !strings.Contains(during, "stdout") {
+		t.Errorf("while posting, held = %q; want both the finding being posted and the one held back", during)
+	}
+	if after, _, _ := e.st.HeldFindings(500, "acme/web", 7); strings.Contains(after, "Held before") || !strings.Contains(after, "stdout") {
+		t.Errorf("after posting, held = %q; want only the finding held back", after)
 	}
 }
