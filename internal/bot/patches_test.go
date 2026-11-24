@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -74,14 +75,13 @@ func TestFailedRebuildsLeaveRoom(t *testing.T) {
 	})
 	e.gh.mergeBase = "mmm333"
 	e.gh.extraFiles = []any{
-		map[string]any{"filename": "logo.png", "status": "modified"},
+		map[string]any{"filename": "blob", "status": "modified"}, // binary by its contents
 		map[string]any{"filename": "huge.go", "status": "modified"},
 		map[string]any{"filename": "late.go", "status": "modified"},
 		map[string]any{"filename": "extra.go", "status": "modified"},
 	}
 	e.gh.fileAt = map[string]string{
-		"mmm333:logo.png": "\x89PNG\x00",
-		"aaa111:logo.png": "\x89PNG\x00\x01",
+		"aaa111:blob":     "\x7fELF\x00\x01",
 		"aaa111:huge.go":  strings.Repeat("// padding line\n", 70000),
 		"mmm333:late.go":  "package late\n",
 		"aaa111:late.go":  "package late\n\nfunc Late() {}\n",
@@ -99,13 +99,50 @@ func TestFailedRebuildsLeaveRoom(t *testing.T) {
 		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
 	}
 	body := e.gh.reviews[0].Body
-	for _, want := range []string{"logo.png (binary)", "huge.go (too large for a diff)", "extra.go (file limit reached)"} {
+	for _, want := range []string{"blob (binary)", "huge.go (too large for a diff)", "extra.go (file limit reached)"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("files not reviewed lacks %q:\n%s", want, body)
 		}
 	}
 	if slices.Contains(e.gh.fileReads, "mmm333:huge.go") {
 		t.Errorf("fetched the old version of a file already too large at head: %v", e.gh.fileReads)
+	}
+}
+
+// Files GitHub sent no diff for are fetched only so far: a known binary type
+// is skipped without a fetch, and after maxFailedRebuilds files fail to
+// rebuild, the rest aren't tried, so a PR full of assets costs little.
+func TestRebuildFetchesAreCapped(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.gh.mergeBase = "mmm333"
+	e.gh.fileAt = map[string]string{}
+	e.gh.extraFiles = []any{map[string]any{"filename": "art/logo.PNG", "status": "modified"}}
+	for i := range maxFailedRebuilds + 10 {
+		name := fmt.Sprintf("assets/blob%02d", i)
+		e.gh.extraFiles = append(e.gh.extraFiles, map[string]any{"filename": name, "status": "modified"})
+		e.gh.fileAt["aaa111:"+name] = "\x00binary"
+	}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+
+	fetched := 0
+	for _, r := range e.gh.fileReads {
+		switch {
+		case strings.Contains(r, "logo.PNG"):
+			t.Errorf("fetched a file whose extension says it's binary: %s", r)
+		case strings.Contains(r, "assets/blob"):
+			fetched++
+		}
+	}
+	if fetched < maxFailedRebuilds || fetched > maxFailedRebuilds+rebuildWorkers {
+		t.Errorf("fetched %d blobs; want %d, plus at most %d in flight", fetched, maxFailedRebuilds, rebuildWorkers)
+	}
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("want 1 review, got %d", len(e.gh.reviews))
+	}
+	body := e.gh.reviews[0].Body
+	if !strings.Contains(body, "art/logo.PNG (binary)") || !strings.Contains(body, "too many others couldn't be rebuilt to try it") {
+		t.Errorf("want logo.PNG listed as binary and the rest as not tried:\n%s", body)
 	}
 }
 

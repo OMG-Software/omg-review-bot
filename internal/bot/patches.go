@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"path"
 	"strings"
 	"sync"
 
@@ -25,7 +26,28 @@ const (
 	rebuildWorkers = 4
 	// patchContext is the context lines a rebuilt patch has, as GitHub's do.
 	patchContext = 3
+	// maxFailedRebuilds is how many files a review fetches and fails to
+	// rebuild (binary, too large, unreadable) before it stops trying: a
+	// failure leaves its slot for the next file, so without a cap a pull
+	// request full of assets would cost a fetch of each on every push.
+	maxFailedRebuilds = 20
 )
+
+// binaryExts are the extensions of files taken as binary without fetching
+// them: images, fonts, archives, media, documents and compiled code.
+var binaryExts = map[string]bool{}
+
+func init() {
+	for _, e := range strings.Fields(`
+		png jpg jpeg gif webp bmp ico icns tif tiff avif heic psd
+		woff woff2 ttf otf eot
+		zip gz tgz bz2 xz zst 7z rar tar jar war
+		mp3 mp4 m4a mov avi wav ogg flac webm mkv
+		pdf doc docx xls xlsx ppt pptx
+		exe dll so dylib a o lib obj class pyc wasm`) {
+		binaryExts["."+e] = true
+	}
+}
 
 // fillPatches gives each file in files that GitHub sent no patch for a patch
 // built from its contents, or, where that can't be done, a NoDiff saying why.
@@ -41,6 +63,8 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 		case f.Status == "removed" || matchAny(ignore, f.Filename):
 		case f.Patch != "":
 			have++
+		case binaryExts[strings.ToLower(path.Ext(f.Filename))]:
+			files[i].NoDiff = "binary"
 		default:
 			todo = append(todo, i)
 			needBase = needBase || f.Status != "added"
@@ -66,14 +90,21 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 	}
 
 	// Each file is handed out only while fewer patches than room have been
-	// rebuilt, so the workers in flight overshoot by at most a few files,
-	// which the review's own file limit then leaves out.
+	// rebuilt and fewer than maxFailedRebuilds have failed, so the workers in
+	// flight overshoot by at most a few files, which the review's own file
+	// limit then leaves out. stop says why the rest aren't tried.
 	var mu sync.Mutex
-	rebuilt := 0
-	full := func() bool {
+	rebuilt, failed := 0, 0
+	stop := func() string {
 		mu.Lock()
 		defer mu.Unlock()
-		return rebuilt >= room
+		switch {
+		case rebuilt >= room:
+			return "file limit reached"
+		case failed >= maxFailedRebuilds:
+			return "GitHub sent no diff, and too many others couldn't be rebuilt to try it"
+		}
+		return ""
 	}
 	work := make(chan int)
 	var wg sync.WaitGroup
@@ -82,17 +113,19 @@ func (b *Bot) fillPatches(ctx context.Context, cl *github.Client, st settings.Se
 			for i := range work {
 				f := &files[i]
 				f.Patch, f.Additions, f.Deletions, f.NoDiff = rebuildPatch(ctx, cl, pr.Repo, *f, mergeBase, head)
+				mu.Lock()
 				if f.Patch != "" {
-					mu.Lock()
 					rebuilt++
-					mu.Unlock()
+				} else {
+					failed++
 				}
+				mu.Unlock()
 			}
 		})
 	}
 	for _, i := range todo {
-		if full() {
-			files[i].NoDiff = "file limit reached"
+		if why := stop(); why != "" {
+			files[i].NoDiff = why
 			continue
 		}
 		work <- i
@@ -111,8 +144,8 @@ func rebuildPatch(ctx context.Context, cl *github.Client, repo string, f github.
 	}
 	// One byte past the limit is enough to tell a file is too large, and
 	// head is checked before the old version is fetched at all.
-	read := func(path, ref string) (text, noDiff string) {
-		text, err := cl.FileContentUpTo(ctx, repo, path, ref, maxRebuildBytes+1)
+	read := func(file, ref string) (text, noDiff string) {
+		text, err := cl.FileContentUpTo(ctx, repo, file, ref, maxRebuildBytes+1)
 		switch {
 		case err != nil:
 			return "", unread
