@@ -84,8 +84,8 @@ func batchPrompt(header string, i, n int, bt batch, previous, found []string, pa
 	if n > 1 {
 		fmt.Fprintf(&sb, "\nThe diff is large, so it is split into %d parts. This is part %d of %d; review only the files in this part.\n", n, i+1, n)
 	}
-	if s := scope.describe(bt.paths); s != "" {
-		fmt.Fprintf(&sb, "\nThis is a re-review after new commits. The rest of the pull request was reviewed before, at commit %s. Report only problems in the code changed since then, listed below, including problems those changes cause elsewhere; put each finding on one of these lines. Findings anywhere else are discarded.\n%s", short(scope.since), s)
+	if s := scope.describe(bt); s != "" {
+		fmt.Fprintf(&sb, "\nThis is a re-review after new commits. The rest of the pull request was reviewed before, at commit %s. Report only problems in the code changed since then, listed below, including problems those changes cause elsewhere; put each finding on one of these lines, or within %d lines of one. Findings anywhere else are discarded.\n%s", short(scope.since), scopeSlack, s)
 	}
 	if pass > 1 {
 		fmt.Fprintf(&sb, "\nThis is pass %d over the same code. Earlier passes found the issues listed below. Look again, carefully, for real issues they missed: other files and functions, and other angles (error handling, edge cases, concurrency, security, resource use, compatibility, tests). Report only issues not already listed. If there are none, return an empty \"comments\" array.\n", pass)

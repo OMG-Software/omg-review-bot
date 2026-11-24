@@ -191,6 +191,32 @@ func (b *Bot) replyThreads(ctx context.Context, st settings.Settings, mc *jobCli
 	return nil
 }
 
+// releaseReplies queues the reply check for thread replies that waited for a
+// review of j's PR (see replyThreads), so they're answered unless that
+// review's fix check resolved their threads. While a review is still due or
+// under way they go on waiting for it; one that a limit stops (the PR shows
+// "limit" or "daily") lets them go, as no review is coming soon.
+func (b *Bot) releaseReplies(j job) {
+	k := prKey(j)
+	b.mu.Lock()
+	waited := b.repliesWaiting[k]
+	b.mu.Unlock()
+	if !waited {
+		return
+	}
+	pr, err := b.store.GetPR(j.repo, j.number)
+	if err != nil || pr == nil || pr.Status == "pending" || pr.Status == "reviewing" {
+		return // unreadable now: the next review of the PR tries again
+	}
+	b.mu.Lock()
+	delete(b.repliesWaiting, k)
+	b.mu.Unlock()
+	if pr.Open {
+		// handleReplies checks whether conversations are on for the org.
+		b.enqueue(job{kind: jobReplies, repo: pr.Repo, number: pr.Number, org: pr.AccountID})
+	}
+}
+
 // reviewComing reports whether a review of a commit newer than the last one
 // reviewed is due or under way.
 func reviewComing(st settings.Settings, pr *store.PR) bool {

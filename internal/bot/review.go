@@ -67,6 +67,9 @@ var reviewSchema = map[string]any{
 }
 
 func (b *Bot) handleReview(ctx context.Context, j job) {
+	// However the job ends (reviewed, failed, or stopped by a limit), thread
+	// replies that waited for it are let go, unless a review is still due.
+	defer b.releaseReplies(j)
 	// Before prMu: the queued comment may still be being posted.
 	qn := b.takeQueued(ctx, j)
 	b.prMu.Lock()
@@ -204,19 +207,6 @@ func (b *Bot) handleReview(ctx context.Context, j job) {
 		b.recompute(cur, st) // the head may have moved while we were reviewing
 	}
 	_ = b.store.SavePR(cur)
-	if cur.Status != "pending" && cur.Status != "reviewing" {
-		// Thread replies that waited for this review (see replyThreads) are
-		// answered now, unless its fix check resolved their threads. While
-		// another review is due, they wait for that one.
-		k := prKey(j)
-		b.mu.Lock()
-		waited := b.repliesWaiting[k]
-		delete(b.repliesWaiting, k)
-		b.mu.Unlock()
-		if waited && cur.Open && conversationsOn(st) {
-			b.enqueue(job{kind: jobReplies, repo: cur.Repo, number: cur.Number, org: cur.AccountID})
-		}
-	}
 	// The run loop may be asleep until a deadline worked out before this
 	// one (a retry, say) existed.
 	b.kickDue()
@@ -344,7 +334,8 @@ func (b *Bot) updateNotice(cl *github.Client, pr *store.PR, id int64, body strin
 type batch struct {
 	text  string
 	paths []string
-	files string // full contents of the part's changed files, where they fit
+	files string            // full contents of the part's changed files, where they fit
+	spans map[string][]span // the new-file lines of each file's hunks the part shows
 }
 
 type plan struct {
@@ -359,7 +350,10 @@ type plan struct {
 func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 	p := plan{files: map[string]*diff.File{}}
 	ignore := compileGlobs(st.Review.IgnorePatterns)
-	type unit struct{ path, text string }
+	type unit struct {
+		path, text string
+		spans      []span
+	}
 	var units []unit
 	for _, f := range files {
 		switch {
@@ -387,20 +381,24 @@ func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 			header = fmt.Sprintf("### File: %s (renamed from %s, +%d -%d)\n", f.Filename, f.PreviousFilename, f.Additions, f.Deletions)
 		}
 		cur, has := header, false
+		var spans []span
 		for i := range df.Hunks {
 			ht := df.Hunks[i].Render()
 			if len(header)+len(ht) > budget {
 				ht = textutil.Truncate(ht, budget-len(header)-64) + "\n(hunk truncated)\n"
 			}
 			if has && len(cur)+len(ht) > budget {
-				units = append(units, unit{f.Filename, cur})
-				cur, has = header+"(continued)\n", false
+				units = append(units, unit{f.Filename, cur, spans})
+				cur, has, spans = header+"(continued)\n", false, nil
 			}
 			cur += ht
 			has = true
+			if sp, ok := hunkSpan(df.Hunks[i]); ok {
+				spans = append(spans, sp)
+			}
 		}
 		if has {
-			units = append(units, unit{f.Filename, cur})
+			units = append(units, unit{f.Filename, cur, spans})
 		}
 	}
 	var cur batch
@@ -413,6 +411,10 @@ func buildPlan(st settings.Settings, files []github.PRFile, budget int) plan {
 		if len(cur.paths) == 0 || cur.paths[len(cur.paths)-1] != u.path {
 			cur.paths = append(cur.paths, u.path)
 		}
+		if cur.spans == nil {
+			cur.spans = map[string][]span{}
+		}
+		cur.spans[u.path] = append(cur.spans[u.path], u.spans...)
 	}
 	if cur.text != "" {
 		p.batches = append(p.batches, cur)
@@ -920,7 +922,7 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 		}
 	}()
 	for i, bt := range p.batches {
-		if !in.scope.touches(bt.paths) {
+		if !in.scope.touches(bt) {
 			fmt.Fprintf(&raw, "===== part %d/%d: unchanged since %s, so not reviewed again =====\n\n", i+1, len(p.batches), short(in.scope.since))
 			continue
 		}

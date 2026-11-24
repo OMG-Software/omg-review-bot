@@ -8,6 +8,7 @@ import (
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
+	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
 // Tests for what keeps a pull request from going round and round: replies
@@ -165,7 +166,7 @@ func TestReReviewOnlyOnChangedLines(t *testing.T) {
 	}
 	prompts := e.lm.prompts["code_review"]
 	last := prompts[len(prompts)-1]
-	for _, want := range []string{"This is a re-review after new commits", "at commit aaa111", "- main.go: lines 20-22"} {
+	for _, want := range []string{"This is a re-review after new commits", "at commit aaa111", "- main.go: lines 21\n"} {
 		if !strings.Contains(last, want) {
 			t.Errorf("re-review prompt missing %q:\n%s", want, last)
 		}
@@ -253,5 +254,100 @@ func TestPassRank(t *testing.T) {
 		if got := passRank(st); got != rank(c.want) {
 			t.Errorf("passRank(comment %s, approval %s, request %s) = %d, want %d (%s)", c.comment, c.approval, c.request, got, rank(c.want), c.want)
 		}
+	}
+}
+
+// Only changed lines count, not the context around them: a finding just past
+// a hunk's context is outside the change. A removal counts at the line after
+// it, or before it at a hunk's end.
+func TestChangesInCountsChangedLinesOnly(t *testing.T) {
+	s := &reviewScope{since: "aaa111", files: map[string]*changedLines{
+		"a.go": changesIn("@@ -97,6 +97,7 @@\n p\n q\n r\n+added\n s\n t\n u"), // 100 added; 97-99, 101-103 context
+		"b.go": changesIn("@@ -10,4 +10,3 @@\n a\n-gone\n c\n d"),              // removal before line 11
+		"c.go": changesIn("@@ -10,3 +10,2 @@\n a\n b\n-gone"),                  // removal at the end, after line 11
+		"d.go": changesIn(""),                                                  // change not shown
+	}}
+	for _, c := range []struct {
+		path string
+		line int
+		want bool
+	}{
+		{"a.go", 100, true}, {"a.go", 103, true}, {"a.go", 97, true},
+		{"a.go", 104, false}, {"a.go", 106, false}, {"a.go", 96, false},
+		{"b.go", 11, true}, {"b.go", 14, true}, {"b.go", 15, false},
+		{"c.go", 11, true}, {"c.go", 15, false},
+		{"d.go", 500, true}, {"e.go", 1, false},
+	} {
+		if got := s.covers(finding{Path: c.path, Line: c.line}); got != c.want {
+			t.Errorf("covers(%s:%d) = %v, want %v", c.path, c.line, got, c.want)
+		}
+	}
+}
+
+// A file split over several parts: only the part showing the changed lines
+// is reviewed again, and its prompt lists only those lines.
+func TestScopeTouchesPartsByLines(t *testing.T) {
+	line := strings.Repeat("x", 100)
+	hunk := func(start int) string {
+		return fmt.Sprintf("@@ -%d,3 +%d,3 @@\n %s\n-%s\n+%s\n %s", start, start, line, line, line, line)
+	}
+	patch := hunk(1) + "\n" + hunk(200)
+	p := buildPlan(settings.Defaults(), []github.PRFile{{Filename: "big.go", Status: "modified", Patch: patch}}, 600)
+	if len(p.batches) != 2 {
+		t.Fatalf("parts = %d, want the file split in 2", len(p.batches))
+	}
+	for i, want := range []span{{1, 3}, {200, 202}} {
+		if sp := p.batches[i].spans["big.go"]; len(sp) != 1 || sp[0] != want {
+			t.Errorf("part %d spans = %v, want [%v]", i+1, sp, want)
+		}
+	}
+	s := &reviewScope{since: "aaa111", files: map[string]*changedLines{"big.go": changesIn(hunk(200))}}
+	if s.touches(p.batches[0]) || !s.touches(p.batches[1]) {
+		t.Errorf("touches = %v, %v; want only the second part", s.touches(p.batches[0]), s.touches(p.batches[1]))
+	}
+	if d := s.describe(p.batches[1]); d != "- big.go: lines 201\n" {
+		t.Errorf("describe = %q", d)
+	}
+}
+
+// Ranges past the listed ones are still allowed, and the prompt says so.
+func TestDescribeKeepsUnlistedRangesAllowed(t *testing.T) {
+	var lines []int
+	for i := 0; i < maxScopeRanges+5; i++ {
+		lines = append(lines, 1+2*i)
+	}
+	s := &reviewScope{since: "aaa111", files: map[string]*changedLines{"a.go": {lines: lines}}}
+	d := s.describe(batch{paths: []string{"a.go"}})
+	want := fmt.Sprintf("and 5 more changed ranges after line %d (lines added or changed in the diff there count too)", lines[maxScopeRanges-1])
+	if !strings.Contains(d, want) {
+		t.Errorf("describe = %q, want it to mention %q", d, want)
+	}
+}
+
+// Replies that waited for a review are let go when a limit stops it, and go
+// on waiting while a review is still due.
+func TestRepliesReleasedWithoutAReview(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	pr := &store.PR{Repo: "acme/web", Number: 7, AccountID: 500, Open: true, HeadSHA: "bbb222", ReviewedSHA: "aaa111", Status: "pending"}
+	if err := e.st.SavePR(pr); err != nil {
+		t.Fatal(err)
+	}
+	j := job{kind: jobReview, repo: "acme/web", number: 7}
+	e.b.repliesWaiting[prKey(j)] = true
+
+	e.b.releaseReplies(j)
+	if len(e.b.jobs) != 0 || !e.b.repliesWaiting[prKey(j)] {
+		t.Fatalf("released with a review still due: %d jobs queued", len(e.b.jobs))
+	}
+	pr.Status = "limit"
+	if err := e.st.SavePR(pr); err != nil {
+		t.Fatal(err)
+	}
+	e.b.releaseReplies(j)
+	if len(e.b.jobs) != 1 || e.b.repliesWaiting[prKey(j)] {
+		t.Fatalf("not released once the limit stopped the review: %d jobs queued", len(e.b.jobs))
+	}
+	if next := e.b.dequeued(<-e.b.jobs); next.kind != jobReplies || next.number != 7 {
+		t.Errorf("queued %+v, want the reply check", next)
 	}
 }
