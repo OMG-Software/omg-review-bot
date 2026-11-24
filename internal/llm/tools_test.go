@@ -129,4 +129,10 @@ func TestToolsRefused(t *testing.T) {
 	if err == nil || errors.Is(err, ErrToolsUnsupported) {
 		t.Errorf("rate limited: err = %v", err)
 	}
+	// Nor is a missing model, though its name mentions tools.
+	status, body = http.StatusNotFound, `{"error":"model tool-x not found"}`
+	_, err = c.Chat(context.Background(), Request{Messages: toolConvo[:1], Tools: []Tool{readTool}})
+	if err == nil || errors.Is(err, ErrToolsUnsupported) {
+		t.Errorf("missing model: err = %v", err)
+	}
 }

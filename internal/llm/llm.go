@@ -75,10 +75,15 @@ var ErrToolsUnsupported = errors.New("the model or server does not support tool 
 // tools was rejected as a bad request that mentions them.
 func toolsRefused(req Request, err error) error {
 	var he *httpError
-	// Rate limits, sign-in and timeouts are ordinary failures, whatever the
-	// message says (a model may be named "...tool...").
+	// Rate limits, sign-in, timeouts and a missing model or endpoint are
+	// ordinary failures, whatever the message says (a model may be named
+	// "...tool..."). The words are matched broadly otherwise: some refusals
+	// name no rejection ("auto" tool choice requires --enable-auto-tool-choice),
+	// and a wrong match costs only one retry without tools on this model,
+	// after which a real error fails over as usual.
 	if len(req.Tools) > 0 && errors.As(err, &he) && he.status >= 400 && he.status < 500 &&
 		he.status != http.StatusUnauthorized && he.status != http.StatusForbidden &&
+		he.status != http.StatusNotFound &&
 		he.status != http.StatusRequestTimeout && he.status != http.StatusTooManyRequests &&
 		mentionsTools(he.body) {
 		return fmt.Errorf("%w: %v", ErrToolsUnsupported, err)

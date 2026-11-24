@@ -52,9 +52,9 @@ type toolCache struct {
 	files map[string]toolFile
 	bytes int // size of the cached files
 	trees map[string]toolTree
-	// loading holds the files being fetched, closed when the fetch ends:
-	// models share the cache and read in parallel, and a second reader of a
-	// file waits for the first rather than fetching it again.
+	// loading holds the files and listings being fetched, closed when the
+	// fetch ends: models share the cache and read in parallel, and a second
+	// reader waits for the first rather than fetching it again (see claim).
 	loading map[string]chan struct{}
 }
 
@@ -176,31 +176,13 @@ func cleanRepoPath(p string) string {
 func (rt *repoTools) file(ctx context.Context, ref, path string) (string, error) {
 	key := ref + "\x00" + path
 	c := rt.cache
-	var done chan struct{}
-	for done == nil {
-		c.mu.Lock()
-		if f, ok := c.files[key]; ok {
-			c.mu.Unlock()
-			return f.content, f.err
-		}
-		wait, busy := c.loading[key]
-		if !busy {
-			if c.loading == nil {
-				c.loading = map[string]chan struct{}{}
-			}
-			done = make(chan struct{})
-			c.loading[key] = done
-		}
-		c.mu.Unlock()
-		if busy {
-			// Look again once it's fetched: cached then, unless it couldn't
-			// be (too large, or a failed read), and then it's read here.
-			select {
-			case <-wait:
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
-		}
+	var f toolFile
+	done, err := c.claim(ctx, key, func() (ok bool) { f, ok = c.files[key]; return ok })
+	if err != nil {
+		return "", err
+	}
+	if done == nil {
+		return f.content, f.err
 	}
 	content, err := rt.cl.FileContent(ctx, rt.repo, path, ref)
 	c.mu.Lock()
@@ -211,10 +193,46 @@ func (rt *repoTools) file(ctx context.Context, ref, path string) (string, error)
 		c.files[key] = toolFile{content, err}
 		c.bytes += len(content)
 	}
-	delete(c.loading, key)
-	close(done)
+	c.release(key, done)
 	c.mu.Unlock()
 	return content, err
+}
+
+// claim is how a cache read starts: it returns nil if cached (hit reports
+// that, under c.mu), and otherwise a channel the caller, now the one fetching
+// key, passes to release once it has stored what it fetched. Meanwhile other
+// readers of key wait, then look again: cached by then, unless it couldn't be
+// (too large, or a failed read), and then they fetch it themselves.
+func (c *toolCache) claim(ctx context.Context, key string, hit func() bool) (chan struct{}, error) {
+	for {
+		c.mu.Lock()
+		if hit() {
+			c.mu.Unlock()
+			return nil, nil
+		}
+		wait, busy := c.loading[key]
+		if !busy {
+			if c.loading == nil {
+				c.loading = map[string]chan struct{}{}
+			}
+			done := make(chan struct{})
+			c.loading[key] = done
+			c.mu.Unlock()
+			return done, nil
+		}
+		c.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// release ends a claim, with c.mu held.
+func (c *toolCache) release(key string, done chan struct{}) {
+	delete(c.loading, key)
+	close(done)
 }
 
 // settled reports whether a GitHub read's outcome can be cached for the rest
@@ -226,10 +244,13 @@ func settled(err error) bool {
 
 func (rt *repoTools) tree(ctx context.Context, ref string) toolTree {
 	c := rt.cache
-	c.mu.Lock()
-	t, ok := c.trees[ref]
-	c.mu.Unlock()
-	if ok {
+	key := "\x00tree\x00" + ref // apart from the files' keys, which start with a ref
+	var t toolTree
+	done, err := c.claim(ctx, key, func() (ok bool) { t, ok = c.trees[ref]; return ok })
+	if err != nil {
+		return toolTree{err: err}
+	}
+	if done == nil {
 		return t
 	}
 	var files []github.TreeFile
@@ -239,11 +260,12 @@ func (rt *repoTools) tree(ctx context.Context, ref string) toolTree {
 		t.paths = append(t.paths, f.Path)
 		t.sizes[f.Path] = f.Size
 	}
+	c.mu.Lock()
 	if settled(t.err) {
-		c.mu.Lock()
 		c.trees[ref] = t
-		c.mu.Unlock()
 	}
+	c.release(key, done)
+	c.mu.Unlock()
 	return t
 }
 

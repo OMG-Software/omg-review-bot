@@ -873,3 +873,33 @@ func TestSummaryFromALaterPass(t *testing.T) {
 		t.Fatalf("the second pass's summary should be posted: %+v", e.gh.reviews)
 	}
 }
+
+// Models listing the repository at once share one fetch of the listing.
+func TestToolTreeFetchedOnce(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.b.pollOnce(e.ctx) // sets up the App
+	drain(e.ctx, e.b)
+	e.gh.mu.Lock()
+	before := e.gh.treeCalls
+	e.gh.mu.Unlock()
+	rt := newRepoTools(e.b.app.Installation(10), settings.Defaults(), "acme/web", "h", "")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if tr := rt.fork().tree(e.ctx, "h"); tr.err != nil || len(tr.paths) == 0 {
+				t.Errorf("tree = %+v", tr)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	e.gh.mu.Lock()
+	defer e.gh.mu.Unlock()
+	if n := e.gh.treeCalls - before; n != 1 {
+		t.Errorf("listed the repository %d times; want once", n)
+	}
+}
