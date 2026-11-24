@@ -814,6 +814,18 @@ func TestHeldFindingOnBinaryFileNotChecked(t *testing.T) {
 	if len(e.gh.reviews) != 1 || !strings.Contains(e.gh.reviews[0].Body+fmt.Sprint(e.gh.reviews[0].Comments), "Printed to stdout") {
 		t.Fatalf("the held finding should still be posted: %+v", e.gh.reviews)
 	}
+	// Kept without a check, and the review's log says so.
+	rs, err := e.st.RecentReviews(500, 1)
+	if err != nil || len(rs) != 1 {
+		t.Fatalf("recent reviews: %v, %v", rs, err)
+	}
+	r, err := e.st.GetReview(rs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Raw, "not checked: the file is binary") || !strings.Contains(r.Raw, "(1 of them kept without a check)") {
+		t.Errorf("the raw log should say the held finding wasn't checked:\n%.1500s", r.Raw)
+	}
 }
 
 // A search the ignore patterns kept from every file that could match says

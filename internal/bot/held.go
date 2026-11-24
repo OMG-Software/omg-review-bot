@@ -114,12 +114,25 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 		byPath[f.Path] = append(byPath[f.Path], f)
 	}
 
+	unchecked := 0
 	for _, path := range paths {
 		fs := byPath[path]
 		b.setCurrent(ctx, pr, "Checking held findings in %s on %s#%d", path, pr.Repo, pr.Number)
-		content, err := rt.file(ctx, head, path)
-		if err != nil || isBinary(content) { // nothing a model can check: kept as they are
+		// A finding that can't be checked is kept as it is, and said to be:
+		// it counts as open, and the next review checks it again.
+		skip := func(why string) {
+			b.logf("warn", pr.Repo, pr.Number, "held findings in %s weren't checked (%s), so they're kept as they were", path, why)
+			fmt.Fprintf(raw, "===== held findings check: %s =====\nnot checked: %s\n\n", path, why)
 			kept = append(kept, fs...)
+			unchecked += len(fs)
+		}
+		content, err := rt.file(ctx, head, path)
+		if err != nil {
+			skip(fmt.Sprintf("couldn't read the file: %v", err))
+			continue
+		}
+		if isBinary(content) {
+			skip("the file is binary")
 			continue
 		}
 		var issues strings.Builder
@@ -131,7 +144,7 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 		total := (st.LLM.ContextTokens - st.LLM.MaxOutputTokens - 256) * charsPerToken
 		budget := total - len(heldSystemPrompt) - issues.Len() - 1000
 		if budget < 2000 {
-			kept = append(kept, fs...)
+			skip("the model's context has no room for the file")
 			continue
 		}
 		user := fmt.Sprintf("Pull request %s#%d: %s\nFile: %s (latest commit %s)\n\nCurrent file (line numbers on the left):\n```\n%s```\n\nProblems found earlier:\n%s\nRespond with the JSON object only.",
@@ -144,6 +157,7 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 		if err != nil {
 			b.logf("warn", pr.Repo, pr.Number, "held findings check for %s failed, so they're kept: %v", path, err)
 			kept = append(kept, fs...)
+			unchecked += len(fs)
 			continue
 		}
 		gone := map[int]bool{}
@@ -178,7 +192,7 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 			kept[i].SeenPath = kept[i].Path
 		}
 	}
-	fmt.Fprintf(raw, "held findings: %d from the last review, %d still apply\n\n", len(held), len(kept))
+	fmt.Fprintf(raw, "held findings: %d from the last review, %d still apply (%d of them kept without a check)\n\n", len(held), len(kept), unchecked)
 	return kept, usage, nil
 }
 
