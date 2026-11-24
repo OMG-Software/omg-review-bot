@@ -667,9 +667,6 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		return gp, nil
 	}
 
-	if len(lcs) > 1 {
-		b.setCurrent(ctx, pr, "Reviewing %s#%d with %d models", pr.Repo, pr.Number, len(lcs))
-	}
 	// Findings an earlier review held back go first, where they still apply.
 	carried, hu, err := b.recheckHeld(ctx, st, aux, cl, rt, pr, head, files, &raw)
 	rec.PromptTokens += hu.PromptTokens
@@ -677,6 +674,11 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 	if err != nil {
 		// Going on without them would post a review that drops them.
 		return nil, err
+	}
+	// Set after the held check, which shows its own progress: with several
+	// models, the passes don't set it, and this is what the bot is doing.
+	if len(lcs) > 1 {
+		b.setCurrent(ctx, pr, "Reviewing %s#%d with %d models", pr.Repo, pr.Number, len(lcs))
 	}
 	// Each model reviews the whole diff; with several (collate), side by side.
 	passes := make([]reviewPass, len(lcs))

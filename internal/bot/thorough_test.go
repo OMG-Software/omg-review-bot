@@ -1,10 +1,14 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"sync"
@@ -942,5 +946,70 @@ func TestToolArgumentsCountBeforeRunning(t *testing.T) {
 	}
 	if n := strings.Count(r.Raw, "[tool] read_file skipped (no room left)"); n != 2 || strings.Contains(r.Raw, "[tool] read_file {") {
 		t.Errorf("want both calls skipped for room, none run; the raw log has %d skipped:\n%.1500s", n, r.Raw)
+	}
+}
+
+// With several models, the held check's progress line gives way to the
+// review's once the models start: the passes don't set it themselves.
+func TestManyModelsActivityAfterHeldCheck(t *testing.T) {
+	second := &fakeLLM{review: `{"summary":"Second view.","comments":[]}`}
+	var b *Bot
+	var mu sync.Mutex
+	var seen []string
+	h := second.handler(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		mu.Lock()
+		if b != nil && bytes.Contains(body, []byte(`"tools"`)) { // only reviews offer tools
+			for _, a := range b.Status().Working {
+				seen = append(seen, a.What)
+			}
+		}
+		mu.Unlock()
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	e := newReviewEnv(t, reviewOf(), func(cfg *settings.Settings) {
+		cfg.Review.ApprovalLevel, cfg.Review.RequestChangesLevel = settings.LevelOff, settings.LevelOff
+		cfg.Models = settings.Models{Strategy: settings.StrategyCollate,
+			Configs: []settings.LLM{cfg.LLM, modelAt("second", srv.URL)}}
+	})
+	seedHeld(t, e, "zzz000", finding{Path: "main.go", Line: 11, Severity: "P2", Title: "Printed to stdout", Body: "Log it."})
+	mu.Lock()
+	b = e.b
+	mu.Unlock()
+	e.b.pollOnce(e.ctx)
+	drain(context.WithValue(e.ctx, workerSlot{}, 0), e.b) // as worker 0, which shows progress
+	if len(e.lm.prompts["held_check"]) == 0 {
+		t.Fatal("the held finding wasn't checked, so the test shows nothing")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) == 0 {
+		t.Fatal("the second model was never asked to review")
+	}
+	for _, s := range seen {
+		if !strings.HasPrefix(s, "Reviewing acme/web#7 with 2 models") {
+			t.Errorf("while the models reviewed, the activity was %q", s)
+		}
+	}
+}
+
+// A file's final newline ends its last line, as in the diff gutter and
+// read_file, rather than numbering an empty line after it.
+func TestNumberedFileEndsAtLastLine(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"a\nb\n", "    1 | a\n    2 | b\n"},
+		{"a\r\nb", "    1 | a\n    2 | b\n"},
+		{"a\n\n", "    1 | a\n    2 | \n"},
+		{"", ""},
+	} {
+		if got := numberedFile(c.in); got != c.want {
+			t.Errorf("numberedFile(%q) = %q; want %q", c.in, got, c.want)
+		}
+	}
+	if got := fileView("a\nb\n", []int{2}, 1); strings.Contains(got, "    3 |") {
+		t.Errorf("fileView numbers a line past the end: %q", got)
 	}
 }

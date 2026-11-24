@@ -512,7 +512,7 @@ func numberedExcerpt(content string, line, radius int) string {
 
 // numberedFile renders a whole file with line numbers.
 func numberedFile(content string) string {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	lines := fileLines(content)
 	var sb strings.Builder
 	for i, l := range lines {
 		fmt.Fprintf(&sb, "%5d | %s\n", i+1, l)
@@ -526,7 +526,7 @@ func fileView(content string, around []int, budget int) string {
 	if whole := numberedFile(content); len(whole) <= budget {
 		return whole
 	}
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	lines := fileLines(content)
 	render := func(from, to int, sb *strings.Builder) {
 		for i := from; i <= to; i++ {
 			fmt.Fprintf(sb, "%5d | %s\n", i, lines[i-1])
@@ -550,6 +550,16 @@ func fileView(content string, around []int, budget int) string {
 		sb.WriteString("  ... |\n")
 	}
 	return textutil.Truncate(sb.String(), budget)
+}
+
+// fileLines splits a file into its lines as the diff gutter numbers them: a
+// final newline ends the last line rather than starting another.
+func fileLines(content string) []string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	return lines
 }
 
 // findingCount is "1 finding" or "n findings".

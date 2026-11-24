@@ -284,10 +284,7 @@ func (rt *repoTools) readFile(ctx context.Context, ref, path string, from, to, l
 	if isBinary(content) {
 		return fmt.Sprintf("%s is a binary file.", path)
 	}
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-	if n := len(lines); n > 0 && lines[n-1] == "" {
-		lines = lines[:n-1]
-	}
+	lines := fileLines(content)
 	from = max(from, 1)
 	if to <= 0 || to > len(lines) {
 		to = len(lines)
