@@ -765,3 +765,22 @@ func TestPostedHeldFindingsSavedUntilPosted(t *testing.T) {
 		t.Errorf("after posting, held = %q; want only the finding held back", after)
 	}
 }
+
+// A long list of earlier reviews' comments doesn't crowd this review's own
+// findings out of a later pass's prompt.
+func TestBatchPromptKeepsRoomForFound(t *testing.T) {
+	var previous []string
+	for i := range 200 {
+		previous = append(previous, fmt.Sprintf("main.go:%d: an earlier review's comment about this line", i))
+	}
+	found := []string{"main.go:11: Division by zero panics", "main.go:12: Result printed to stdout"}
+	out := batchPrompt("PR\n", 0, 1, batch{text: "diff\n"}, previous, found, 2, 2000)
+	for _, f := range found {
+		if !strings.Contains(out, f) {
+			t.Errorf("prompt lacks this review's finding %q", f)
+		}
+	}
+	if !strings.Contains(out, "an earlier review's comment") || !strings.Contains(out, "more\n") {
+		t.Error("the earlier comments should fill the rest of the room, and say how many more there are")
+	}
+}

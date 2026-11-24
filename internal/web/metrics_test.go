@@ -220,8 +220,8 @@ func TestStopReviewsButton(t *testing.T) {
 	s := newTestSite(t)
 	s.seedOrgs()
 	s.signIn() // alice: an owner of acme only
-	if code, _ := s.post("/reviews/stop", nil); code == http.StatusSeeOther && s.b.Stopped() {
-		t.Fatal("a non-administrator stopped reviews")
+	if code, _ := s.post("/reviews/stop", nil); s.b.Stopped() {
+		t.Fatalf("a non-administrator stopped reviews (HTTP %d)", code)
 	}
 	if err := s.st.SetUserAdmin(aliceID, true); err != nil {
 		t.Fatal(err)

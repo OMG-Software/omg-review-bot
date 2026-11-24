@@ -75,7 +75,8 @@ func prHeader(gp *github.PullRequest) string {
 // batchPrompt is the user prompt for one pass over one part of the diff.
 // previous are the bot's comments from earlier reviews; found are this
 // review's findings so far (earlier passes, and findings held from the last
-// review). Both lists together take at most listRoom characters.
+// review). Both lists together take at most listRoom characters, up to
+// half of it kept for found.
 func batchPrompt(header string, i, n int, bt batch, previous, found []string, pass, listRoom int) string {
 	var sb strings.Builder
 	sb.WriteString(header)
@@ -85,7 +86,15 @@ func batchPrompt(header string, i, n int, bt batch, previous, found []string, pa
 	if pass > 1 {
 		fmt.Fprintf(&sb, "\nThis is pass %d over the same code. Earlier passes found the issues listed below. Look again, carefully, for real issues they missed: other files and functions, and other angles (error handling, edge cases, concurrency, security, resource use, compatibility, tests). Report only issues not already listed. If there are none, return an empty \"comments\" array.\n", pass)
 	}
-	room := listRoom
+	// This review's findings get up to half the room first: without them a
+	// later pass re-reports what's found and the passes stop early. The
+	// earlier reviews' comments get the rest, and found what they leave.
+	need := 0
+	for _, it := range found {
+		need += len(it) + 3 // "- " and the newline
+	}
+	reserve := min(need, listRoom/2)
+	room := listRoom - reserve
 	list := func(intro string, items []string) {
 		if len(items) == 0 {
 			return
@@ -103,6 +112,7 @@ func batchPrompt(header string, i, n int, bt batch, previous, found []string, pa
 		}
 	}
 	list("\nYou already raised these issues on these files in an earlier review. Do NOT repeat them; only report new problems:\n", previous)
+	room += reserve
 	list("\nThese issues have already been found in this review and will be posted. Do NOT repeat them:\n", found)
 	sb.WriteString("\nDiff (gutter = new-file line number, then '+' added / '-' removed / ' ' unchanged):\n\n")
 	sb.WriteString(bt.text)
