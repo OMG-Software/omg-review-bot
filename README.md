@@ -495,9 +495,9 @@ event checks it for replies, so polling only catches anything missed.
    the skill's context and verification steps: reading definitions, finding callers, and checking
    a finding against the real code before reporting it. The tools only read the PR's own
    repository through the installation's API; nothing is run. Turn them off with *Let the model
-   read the repository* on a model's settings (any model that may review with it off turns them off); a model server that refuses tools gets the review without
-   them. The prompt tells the model to ignore any limit in the skill on how many findings to
-   report.
+   read the repository* in a model's settings: a review offers them only if every model it may
+   use has it on. A model server that refuses tools gets the review without them. The prompt
+   tells the model to ignore any limit in the skill on how many findings to report.
 4. The model returns JSON findings. The bot then asks again about the **same code**, listing
    what's been found so far, until a pass finds nothing new worth posting (at most 5 passes per
    part), so one review finds what there is rather than leaving it for later pushes. The bot
@@ -640,8 +640,12 @@ for you. For a manual install under `/opt`, see [deploy/prbot.service](deploy/pr
 for the unit file and install commands. Either way it writes logs to the journal:
 `journalctl -u prbot -f`.
 
-**Updating.** Run `go install github.com/OMG-Software/omg-review-bot/cmd/prbot@latest` (or
-rebuild, or install the newer package), then restart the bot. Reviews that were interrupted are re-queued on startup. When
+**Updating.** First click **Stop reviews** under the review slots on the dashboard. The reviews
+and replies under way finish, but no new ones start; due ones wait. Once every slot is idle, the
+dashboard says it's safe to restart. Then run
+`go install github.com/OMG-Software/omg-review-bot/cmd/prbot@latest` (or rebuild, or install the
+newer package) and restart the bot, which starts reviewing again on its own (**Resume reviews**
+does it without a restart). Reviews interrupted anyway are re-queued on startup. When
 updating from a version without organizations, the database is migrated on startup and each
 repository is linked to its org on the next repo sync (**Sync from GitHub** does it at once).
 Until then, the activity entries for a repository that isn't linked yet are shown only to
@@ -694,7 +698,8 @@ boot:
 sudo systemctl enable --now prbot
 ```
 
-An upgrade restarts a running bot on the new version. Removing the package stops the service but
+An upgrade restarts a running bot on the new version; click **Stop reviews** on the dashboard and
+wait for the review slots to go idle first, so no review is cut short. Removing the package stops the service but
 keeps the `prbot` user and `/var/lib/prbot`, because the database there holds the GitHub App key;
 delete them by hand if you're done with the bot. To clear the admin password of a packaged
 install, run `sudo -u prbot prbot -data /var/lib/prbot -reset-password`.

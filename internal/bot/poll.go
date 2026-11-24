@@ -402,6 +402,9 @@ func (b *Bot) releaseLimited(st settings.Settings) {
 }
 
 func (b *Bot) enqueueDue(st settings.Settings) {
+	if b.Stopped() {
+		return // due PRs stay pending, and are queued once work resumes
+	}
 	b.releaseLimited(st) // first, so a PR it frees is queued now
 	b.releaseDailyCapped(st)
 	go b.retryDailyNotices(st) // off the run loop: it calls GitHub

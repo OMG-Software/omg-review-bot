@@ -390,6 +390,18 @@ func (s *Server) reposSync(w http.ResponseWriter, r *http.Request) {
 	redirectMsg(w, r, "/repos", fmt.Sprintf("Found %d repositories.", n))
 }
 
+// reviewsStop lets the reviews under way finish but starts no more, so the
+// bot can be upgraded or restarted safely.
+func (s *Server) reviewsStop(w http.ResponseWriter, r *http.Request) {
+	s.bot.StopReviews()
+	redirectMsg(w, r, "/", "New reviews are stopped. Restart the bot once every review slot is idle.")
+}
+
+func (s *Server) reviewsResume(w http.ResponseWriter, r *http.Request) {
+	s.bot.ResumeReviews()
+	redirectMsg(w, r, "/", "Reviews resumed.")
+}
+
 func (s *Server) reposAll(w http.ResponseWriter, r *http.Request) {
 	on := r.FormValue("enabled") == "1"
 	if err := s.store.SetAllReposEnabled(store.AllAccounts, on); err != nil {

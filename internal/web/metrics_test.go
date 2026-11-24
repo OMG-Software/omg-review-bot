@@ -211,3 +211,37 @@ func TestByWeek(t *testing.T) {
 		t.Errorf("a year's weeks: %d, first %d days, unit %q", len(y), y[0].Span, periodUnit(y))
 	}
 }
+
+// An administrator can stop new reviews from the dashboard (to restart the
+// bot safely) and resume them; nobody else can.
+func TestStopReviewsButton(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice: an owner of acme only
+	if code, _ := s.post("/reviews/stop", nil); code == http.StatusSeeOther && s.b.Stopped() {
+		t.Fatal("a non-administrator stopped reviews")
+	}
+	if err := s.st.SetUserAdmin(aliceID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, body, _ := s.get("/"); !strings.Contains(body, `action="/reviews/stop"`) {
+		t.Fatal("the dashboard has no Stop reviews button")
+	}
+	s.post("/reviews/stop", nil)
+	if !s.b.Stopped() {
+		t.Fatal("reviews not stopped")
+	}
+	_, body, _ := s.get("/")
+	for _, want := range []string{"New reviews are stopped", "safe to upgrade and restart", `action="/reviews/resume"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("stopped dashboard lacks %q", want)
+		}
+	}
+	if strings.Contains(body, `action="/reviews/stop"`) {
+		t.Error("stopped dashboard still offers Stop reviews")
+	}
+	s.post("/reviews/resume", nil)
+	if s.b.Stopped() {
+		t.Fatal("reviews not resumed")
+	}
+}

@@ -158,6 +158,8 @@ func (s *Server) routes() {
 	a("GET /reviews", s.reviewsPage)
 	a("GET /repos", s.reposPage)
 	a("POST /repos/sync", s.reposSync)
+	a("POST /reviews/stop", s.reviewsStop)
+	a("POST /reviews/resume", s.reviewsResume)
 	a("POST /repos/all", s.reposAll)
 	a("POST /repos/{id}/toggle", s.repoToggle)
 	a("GET /settings", s.settingsPage)

@@ -200,3 +200,25 @@ func TestHeldFindingDroppedWhenFixed(t *testing.T) {
 		t.Fatalf("fixed held finding was posted: %+v", e.gh.reviews)
 	}
 }
+
+// While reviews are stopped, due PRs stay pending and manual reviews are
+// refused; resuming reviews them.
+func TestStoppedReviewsWait(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.b.StopReviews()
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	pr, _ := e.st.GetPR("acme/web", 7)
+	if len(e.gh.reviews) != 0 || pr == nil || pr.Status != "pending" {
+		t.Fatalf("reviewed while stopped: %d reviews, PR %+v", len(e.gh.reviews), pr)
+	}
+	if err := e.b.ReviewNow(pr.Repo, pr.Number, pr.AccountID); err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Errorf("Review now while stopped: err = %v", err)
+	}
+	e.b.ResumeReviews()
+	e.b.enqueueDue(e.b.Settings())
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 1 {
+		t.Fatalf("not reviewed after resuming: %d reviews", len(e.gh.reviews))
+	}
+}

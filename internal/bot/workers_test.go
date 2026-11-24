@@ -299,3 +299,48 @@ func (e *workerEnv) waitingFor(j job) int {
 	defer e.b.mu.Unlock()
 	return len(e.b.active[prKey(j)])
 }
+
+// Stopping reviews lets the jobs under way finish but starts no more until
+// work resumes, so the bot can be restarted without cutting a review short.
+func TestStopReviewsLetsRunningJobsFinish(t *testing.T) {
+	e := newWorkerEnv(t)
+	first := replies("acme/web", 1)
+	e.b.enqueue(first)
+	if j := e.next(); j.key() != first.key() {
+		t.Fatalf("started %s", j.key())
+	}
+	e.b.StopReviews()
+	later := []job{replies("acme/web", 2), replies("acme/api", 3)}
+	for _, j := range later {
+		e.b.enqueue(j)
+	}
+	e.quiet()
+	if s := e.b.Status(); !s.Stopped || len(s.Working) != 1 {
+		t.Fatalf("status while stopping = %+v, want stopped with one job still running", s)
+	}
+	e.finish(first)
+	e.quiet()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(e.b.Status().Working) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the running job never finished")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	e.b.ResumeReviews()
+	got := map[string]bool{}
+	for range later {
+		j := e.next()
+		got[j.key()] = true
+		e.finish(j)
+	}
+	for _, j := range later {
+		if !got[j.key()] {
+			t.Fatalf("after resuming, started %v; want %s too", got, j.key())
+		}
+	}
+	if e.b.Status().Stopped {
+		t.Error("still stopped after resuming")
+	}
+}
