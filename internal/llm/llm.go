@@ -80,11 +80,18 @@ func toolsRefused(req Request, err error) error {
 	if len(req.Tools) > 0 && errors.As(err, &he) && he.status >= 400 && he.status < 500 &&
 		he.status != http.StatusUnauthorized && he.status != http.StatusForbidden &&
 		he.status != http.StatusRequestTimeout && he.status != http.StatusTooManyRequests &&
-		strings.Contains(strings.ToLower(he.body), "tool") {
+		mentionsTools(he.body) {
 		return fmt.Errorf("%w: %v", ErrToolsUnsupported, err)
 	}
 	return err
 }
+
+// toolWords are how servers name tools when they refuse them ("does not
+// support tools", "function calling is not supported", "functions are not
+// enabled for this model").
+var toolWords = regexp.MustCompile(`(?i)\btools?\b|tool_calls?|tool_choice|function[ _-]?call|\bfunctions\b`)
+
+func mentionsTools(body string) bool { return toolWords.MatchString(body) }
 
 type httpError struct {
 	method, url string

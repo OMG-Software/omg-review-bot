@@ -61,6 +61,7 @@ type fakeGitHub struct {
 	extraFiles    []any            // more files in the PR, after main.go and go.sum
 	compareFiles  []any            // the files a compare lists; nil = main.go
 	compareGone   bool             // a compare fails: its base commit is gone (a force-push)
+	failReview    bool             // posting a review fails (a 400)
 	onReview      func()           // runs once after recording a review, before responding
 }
 
@@ -136,6 +137,8 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			send(f.comments)
 		case p == "/repos/acme/web/pulls/7/reviews" && r.Method == http.MethodGet:
 			send(f.reviewLog)
+		case p == "/repos/acme/web/pulls/7/reviews" && r.Method == http.MethodPost && f.failReview:
+			w.WriteHeader(http.StatusBadRequest)
 		case p == "/repos/acme/web/pulls/7/reviews" && r.Method == http.MethodPost:
 			var req github.ReviewRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)

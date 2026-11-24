@@ -323,9 +323,9 @@ func TestNothingToReviewKeepsHeldFindings(t *testing.T) {
 	}
 }
 
-// The same issue reported twice, on one line or in another pass, is one
-// finding at its most severe; the same kind of problem on another line
-// with a different description, even the next line, is another.
+// The same issue reported twice on one line, in one pass or another, is one
+// finding at its most severe; the same kind of problem on another line,
+// even the next one and in the same words, is another.
 func TestSameFinding(t *testing.T) {
 	sql := func(line int, sev, body string) finding {
 		return finding{Path: "db.go", Line: line, Severity: sev, Title: "SQL injection", Body: body}
@@ -336,17 +336,14 @@ func TestSameFinding(t *testing.T) {
 	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(11, "P1", "The sort column comes from the request and is formatted into ORDER BY.")) {
 		t.Error("two queries on adjacent lines with different descriptions should be two findings")
 	}
-	if !sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(11, "P1", "The user ID is concatenated into this lookup query.")) {
-		t.Error("the same description a line apart should be the same finding")
+	if sameFinding(sql(10, "P1", "The users query concatenates untrusted input into SQL."), sql(11, "P1", "The orders query concatenates untrusted input into SQL.")) {
+		t.Error("two queries on adjacent lines with near-identical descriptions should be two findings")
 	}
-	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(12, "P1", "The sort column comes from the request and is formatted into ORDER BY.")) {
-		t.Error("two queries 2 lines apart with different descriptions should be two findings")
+	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(18, "P1", "The user ID is concatenated into the lookup query.")) {
+		t.Error("findings 8 lines apart should be two findings, whatever they say")
 	}
-	if sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(18, "P1", "The sort column comes from the request and is formatted into ORDER BY.")) {
-		t.Error("two queries 8 lines apart with different descriptions should be two findings")
-	}
-	if !sameFinding(sql(10, "P1", "The user ID is concatenated into the lookup query."), sql(18, "P1", "The user ID is concatenated into the lookup query here.")) {
-		t.Error("the same description 8 lines apart should be the same finding")
+	if sameFinding(sql(10, "P1", "x"), finding{Path: "db.go", Line: 10, Severity: "P1", Title: "Unchecked error", Body: "x"}) {
+		t.Error("different issues on one line should be two findings")
 	}
 
 	df := diff.Parse("db.go", "@@ -1,20 +1,20 @@\n"+strings.Repeat("+x\n", 20))
@@ -529,5 +526,45 @@ func TestHeldFindingKeptWhenRenameUnknown(t *testing.T) {
 	}
 	if body := e.gh.reviews[0].Body; !strings.Contains(body, "Unchecked error from Close") || strings.Contains(body, "Leaked file handle") {
 		t.Fatalf("want the finding on the unknown file posted as a note, and the deleted file's dropped:\n%s", body)
+	}
+}
+
+// Held findings are saved before the review promising them is posted; if
+// posting fails, what was held before is put back for the retry.
+func TestHeldFindingsRestoredWhenPostFails(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(divFinding, printFinding), func(cfg *settings.Settings) {
+		cfg.Review.MaxComments = 1
+		noApproval(cfg)
+	})
+	old := finding{Path: "main.go", Line: 11, Severity: "P3", Title: "Held before", Body: "Old."}
+	seedHeld(t, e, "aaa111", old) // on the head, so it's carried unchecked
+	e.gh.failReview = true
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 0 {
+		t.Fatalf("posted %d reviews through a failing endpoint", len(e.gh.reviews))
+	}
+	data, head, _ := e.st.HeldFindings(500, "acme/web", 7)
+	var got []finding
+	_ = json.Unmarshal([]byte(data), &got)
+	if head != "aaa111" || len(got) != 1 || got[0].Title != old.Title {
+		t.Fatalf("held = %q at %q; want the findings held before put back", data, head)
+	}
+}
+
+// With nothing to review, held findings follow a rename since they were
+// held, and stay for the next review under the new name.
+func TestNothingToReviewFollowsRename(t *testing.T) {
+	e := newReviewEnv(t, reviewOf(), noApproval)
+	e.gh.mainStatus = "removed"
+	// The PR's list knows the file only by its name at the base.
+	e.gh.extraFiles = []any{map[string]any{"filename": "c.go", "status": "renamed", "previous_filename": "a.go", "additions": 5000}}
+	e.gh.compareFiles = []any{map[string]any{"filename": "c.go", "previous_filename": "b.go"}}
+	seedHeld(t, e, "zzz000", finding{Path: "b.go", Line: 3, Severity: "P2", Title: "Unchecked error", Body: "Check it."})
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	data, _, err := e.st.HeldFindings(500, "acme/web", 7)
+	if err != nil || !strings.Contains(data, `"path":"c.go"`) {
+		t.Fatalf("held = %q (err %v); want the finding kept under c.go", data, err)
 	}
 }

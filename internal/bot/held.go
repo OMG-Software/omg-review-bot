@@ -81,38 +81,15 @@ func (b *Bot) recheckHeld(ctx context.Context, st settings.Settings, lc llm.Clie
 		return nil, usage, err
 	}
 	status := prFileStatus(files)
-	var changed map[string]bool // nil: every file may have changed
-	moved := map[string]string{}
-	if heldHead == head {
-		changed = map[string]bool{}
-	} else if cfs, err := cl.CompareFiles(ctx, pr.Repo, heldHead, head); err == nil {
-		changed = make(map[string]bool, len(cfs))
-		for _, f := range cfs {
-			changed[f.Filename] = true
-			if f.PreviousFilename != "" {
-				changed[f.PreviousFilename] = true
-				moved[f.PreviousFilename] = f.Filename
-			}
-		}
-	}
+	changed, moved := heldChanges(ctx, cl, pr.Repo, heldHead, head)
 
 	byPath := map[string][]finding{}
 	var paths []string
 	for _, f := range held {
 		old := f.Path
-		// Renamed since the findings were held, or (for a path from before
-		// the PR) by the PR itself.
-		if np, ok := moved[f.Path]; ok {
-			f.Path = np
-		} else if np, ok := status.renamed[f.Path]; ok {
-			f.Path = np
-		}
-		if !status.inPR(f.Path) {
-			// Dropped once it's known the PR no longer changes the file. If
-			// the comparison failed, it may just have been renamed since,
-			// to a name we can't tell: kept, as it was (it can't be checked,
-			// and is posted as a note).
-			if changed == nil && status.status[f.Path] != "removed" {
+		f, inPR, keep := status.place(f, changed, moved)
+		if !inPR {
+			if keep { // unchecked, and posted as a note
 				kept = append(kept, f)
 			}
 			continue
@@ -229,26 +206,69 @@ func (s prFiles) inPR(path string) bool {
 	return ok && st != "removed"
 }
 
+// heldChanges compares the commit findings were held on with head: the files
+// changed since (nil when that can't be told: every file may have), and the
+// renames since, old name to new.
+func heldChanges(ctx context.Context, cl *github.Client, repo, heldHead, head string) (changed map[string]bool, moved map[string]string) {
+	moved = map[string]string{}
+	if heldHead == head {
+		return map[string]bool{}, moved
+	}
+	cfs, err := cl.CompareFiles(ctx, repo, heldHead, head)
+	if err != nil {
+		return nil, moved
+	}
+	changed = make(map[string]bool, len(cfs))
+	for _, f := range cfs {
+		changed[f.Filename] = true
+		if f.PreviousFilename != "" {
+			changed[f.PreviousFilename] = true
+			moved[f.PreviousFilename] = f.Filename
+		}
+	}
+	return changed, moved
+}
+
+// place moves a held finding to its file's name now: renamed since it was
+// held (moved), or, for a name from before the PR, by the PR itself. inPR is
+// whether the PR still changes the file. If it doesn't, keep says whether
+// the finding stays anyway: when the comparison failed (changed is nil),
+// the file may have been renamed to a name that can't be told, so only a
+// file the PR deletes drops its findings.
+func (s prFiles) place(f finding, changed map[string]bool, moved map[string]string) (_ finding, inPR, keep bool) {
+	if np, ok := moved[f.Path]; ok {
+		f.Path = np
+	} else if np, ok := s.renamed[f.Path]; ok {
+		f.Path = np
+	}
+	if s.inPR(f.Path) {
+		return f, true, true
+	}
+	return f, false, changed == nil && s.status[f.Path] != "removed"
+}
+
 // pruneHeld is for a review with nothing to review: it can't check the held
-// findings, so it drops only those on files the PR no longer changes, and
-// keeps the rest (with the commit they were found on) for the next review.
-// It returns how many are left.
-func (b *Bot) pruneHeld(pr *store.PR, files []github.PRFile) (int, error) {
+// findings, so it drops only those it knows are on files the PR no longer
+// changes, and keeps the rest (renamed, with the commit they were found on)
+// for the next review. It returns how many are left.
+func (b *Bot) pruneHeld(ctx context.Context, cl *github.Client, pr *store.PR, head string, files []github.PRFile) (int, error) {
 	held, heldHead, err := b.loadHeld(pr)
 	if err != nil || len(held) == 0 {
 		return 0, err
 	}
 	status := prFileStatus(files)
+	changed, moved := heldChanges(ctx, cl, pr.Repo, heldHead, head)
 	var left []finding
+	same := true
 	for _, f := range held {
-		if np, ok := status.renamed[f.Path]; ok {
-			f.Path = np
-		}
-		if status.inPR(f.Path) {
+		old := f.Path
+		f, _, keep := status.place(f, changed, moved)
+		if keep {
 			left = append(left, f)
 		}
+		same = same && keep && f.Path == old
 	}
-	if len(left) == len(held) {
+	if same {
 		return len(left), nil
 	}
 	return len(left), b.saveHeld(pr, heldHead, left)

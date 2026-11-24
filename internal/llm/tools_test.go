@@ -116,6 +116,13 @@ func TestToolsRefused(t *testing.T) {
 	if err == nil || errors.Is(err, ErrToolsUnsupported) {
 		t.Errorf("without tools: err = %v", err)
 	}
+	// Other words for tools.
+	for _, msg := range []string{`function calling is not supported for this model`, `"tool_choice" is not allowed`, `functions are not enabled`} {
+		body = msg
+		if _, err := c.Chat(context.Background(), Request{Messages: toolConvo[:1], Tools: []Tool{readTool}}); !errors.Is(err, ErrToolsUnsupported) {
+			t.Errorf("%s: err = %v, want ErrToolsUnsupported", msg, err)
+		}
+	}
 	// A rate limit is not a refusal, whatever the model is called.
 	status, body = http.StatusTooManyRequests, `{"error":"rate limit exceeded for model codetool"}`
 	_, err = c.Chat(context.Background(), Request{Messages: toolConvo[:1], Tools: []Tool{readTool}})

@@ -644,7 +644,7 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		// review: those on files the PR no longer changes go, the rest wait
 		// for the next review (a file can be left out only because its
 		// diff is too large to show, say).
-		heldLeft, err := b.pruneHeld(pr, files)
+		heldLeft, err := b.pruneHeld(ctx, cl, pr, head, files)
 		if err != nil {
 			return nil, err
 		}
@@ -752,6 +752,16 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		rv, err := cl.CreateReview(ctx, pr.Repo, pr.Number, req)
 		return rv, drafts, err
 	}
+	// The held findings are saved before the review that promises them is
+	// posted: if they can't be, nothing is posted and the review is retried.
+	// If posting fails, the findings held before are put back for the retry.
+	prevHeld, prevHead, err := b.store.HeldFindings(pr.AccountID, pr.Repo, pr.Number)
+	if err != nil {
+		return nil, fmt.Errorf("read the findings held for this review: %w", err)
+	}
+	if err := b.saveHeld(pr, head, held); err != nil {
+		return nil, fmt.Errorf("keep %d finding(s) for the next review: %w", len(held), err)
+	}
 	rv, drafts, err := post(ri, event)
 	if err != nil && github.IsStatus(err, 422) && len(ri.inline) > 0 {
 		// GitHub rejected an inline position (e.g. the PR moved on). Post everything in the body instead.
@@ -768,10 +778,10 @@ func (b *Bot) reviewPR(ctx context.Context, st settings.Settings, pr *store.PR, 
 		rv, drafts, err = post(ri, event)
 	}
 	if err != nil {
+		if rerr := b.store.SetHeldFindings(pr.AccountID, pr.Repo, pr.Number, prevHead, prevHeld); rerr != nil {
+			b.logf("warn", pr.Repo, pr.Number, "could not put back the findings held before this review: %v", rerr)
+		}
 		return nil, fmt.Errorf("post review: %w", err)
-	}
-	if err := b.saveHeld(pr, head, held); err != nil {
-		b.logf("warn", pr.Repo, pr.Number, "could not keep %d finding(s) for the next review: %v", len(held), err)
 	}
 	// A change request can only be standing if the bot reviewed the PR before,
 	// so a first review skips listing the reviews just to find none.
@@ -1035,15 +1045,13 @@ func normFinding(p plan, f finding) (finding, bool) {
 }
 
 // sameFinding reports whether two findings are the same issue: the same
-// file and much the same claim on the same line. On different lines (the
-// same kind of problem in two places nearby, even adjacent ones), it takes
-// much the same description too.
+// file and line, and much the same claim. Findings on different lines are
+// never merged, however alike: two queries side by side can have the same
+// flaw, described in the same words, and both need fixing. The cost is the
+// odd duplicate when a later pass places one a line off.
 func sameFinding(a, b finding) bool {
-	if a.Path != b.Path || !(strings.EqualFold(a.Title, b.Title) || similarity(a.Title, b.Title) >= 0.5) {
-		return false
-	}
-	d := abs(a.Line - b.Line)
-	return d == 0 || (d <= 10 && similarity(a.Body, b.Body) >= 0.5)
+	return a.Path == b.Path && a.Line == b.Line &&
+		(strings.EqualFold(a.Title, b.Title) || similarity(a.Title, b.Title) >= 0.5)
 }
 
 // seenFinding reports whether fs already has f. If it does, at a lower
