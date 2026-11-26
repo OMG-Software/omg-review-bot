@@ -606,10 +606,11 @@ conversation (for example `@omg-review-bot review`), and the bot queues a review
 **Review now** does: it covers the whole PR, goes past *Most reviews per PR* and ignores the
 wait after push, drafts and skip labels, but not the daily review limit. The usual "Queued for
 review" comment confirms it. Only people with write access to the repository can ask; anyone
-else, or a request the bot can't take (a review already queued or running, the daily limit
-reached), gets a reply saying why. The command must be a line of its own, so a question such as
-"@<app-name> reviewing this, why…?" is answered as a mention, and a quoted request isn't taken
-as a new one. Like other mentions, it needs *Replies / mentions* to have mentions on.
+else, or a request the bot can't take (a closed PR, a review already queued or running, the
+daily limit reached), gets a reply saying why. The command must be a line of its own, so a
+question such as "@<app-name> reviewing this, why…?" is answered as a mention, and a quoted
+request, or one in a code block, isn't taken as a new one. Like other mentions, it needs
+*Replies / mentions* to have mentions on.
 
 The bot ignores other bots, replies at most *Max bot replies per thread* times per thread, and
 never answers the same message twice. As a backup, PRs with activity in the last 14 days are
