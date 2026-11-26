@@ -39,7 +39,7 @@
 <h2 class="section">Last 30 days, all organizations</h2>
 {{template "stat-tiles" .D.Stats}}
 <div class="grid2">
-  <div class="card">{{template "day-chart" .D.Days}}</div>
+  <div class="card">{{template "org-day-chart" .D.OrgDays}}</div>
   <div class="card"><figure class="chart"><figcaption><b>Findings posted by level</b>{{if .D.Stats.Undetailed}} <span class="muted">· not known for {{.D.Stats.Undetailed}} earlier {{if eq .D.Stats.Undetailed 1}}review{{else}}reviews{{end}}</span>{{end}}</figcaption>{{sevChart .D.Stats.Sev}}</figure></div>
 </div>
 

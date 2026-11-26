@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -169,6 +170,52 @@ func TestRepoAndOrgMetrics(t *testing.T) {
 	days, err := st.ReviewsPerDay(1, 1, ref)
 	if err != nil || len(days) != 1 || days[0].Sev != [5]int{1, 1, 2, 1, 3} || days[0].Fixed != 1 {
 		t.Errorf("the reviews' day = %+v (%v)", days, err)
+	}
+}
+
+// TestPostedPerDayByOrg: each organization's posted reviews per day, over
+// the same days as ReviewsPerDay, add up to its totals.
+func TestPostedPerDayByOrg(t *testing.T) {
+	st := openMetricsStore(t)
+	now := time.Date(2026, 3, 10, 15, 0, 0, 0, time.UTC)
+	day := func(d, h int) int64 { return time.Date(2026, 3, d, h, 0, 0, 0, time.UTC).Unix() }
+	for _, r := range []Review{
+		{Repo: "acme/web", Number: 1, AccountID: 1, Status: "posted", StartedAt: day(10, 9)},
+		{Repo: "acme/web", Number: 2, AccountID: 1, Status: "posted", StartedAt: day(10, 11)},
+		{Repo: "acme/web", Number: 3, AccountID: 1, Status: "error", StartedAt: day(10, 12)}, // not posted
+		{Repo: "acme/web", Number: 4, AccountID: 1, Status: "posted", StartedAt: day(9, 23)},
+		{Repo: "globex/app", Number: 1, AccountID: 2, Status: "posted", StartedAt: day(10, 1)},
+		{Repo: "gone/app", Number: 1, AccountID: 9, Status: "posted", StartedAt: day(8, 0)},  // no stored organization
+		{Repo: "acme/web", Number: 5, AccountID: 1, Status: "posted", StartedAt: day(7, 23)}, // before the 3 days
+	} {
+		addReview(t, st, r)
+	}
+	got, err := st.PostedPerDayByOrg(3, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []string
+	for _, c := range got {
+		rows = append(rows, fmt.Sprintf("%s %d %q %d", c.Day.Format("2006-01-02"), c.AccountID, c.Login, c.Posted))
+	}
+	want := `[2026-03-08 9 "" 1 2026-03-09 1 "acme" 1 2026-03-10 1 "acme" 2 2026-03-10 2 "globex" 1]`
+	if fmt.Sprint(rows) != want {
+		t.Errorf("per day by organization = %v, want %s", rows, want)
+	}
+	days, err := st.ReviewsPerDay(AllAccounts, 3, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range days {
+		n := 0
+		for _, c := range got {
+			if c.Day.Equal(d.Day) {
+				n += c.Posted
+			}
+		}
+		if n != d.Posted {
+			t.Errorf("%s: organizations' reviews add up to %d, the day's to %d", d.Day.Format("2006-01-02"), n, d.Posted)
+		}
 	}
 }
 

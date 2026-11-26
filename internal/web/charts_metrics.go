@@ -134,7 +134,7 @@ func sevLegend() string {
 	var sb strings.Builder
 	sb.WriteString(`<ul class="viz-legend">`)
 	for i, s := range settings.Severities {
-		fmt.Fprintf(&sb, `<li><span class="viz-swatch viz-s%d"></span>%s</li>`, i+1, html.EscapeString(s.Label))
+		fmt.Fprintf(&sb, `<li><span class="viz-swatch %s"></span>%s</li>`, sevColor(i), html.EscapeString(s.Label))
 	}
 	sb.WriteString(`</ul>`)
 	return sb.String()
@@ -162,7 +162,7 @@ func sevStackChart(label string, rows []stackRow) template.HTML {
 				continue
 			}
 			w := max(2, rowChartPlotW*float64(n)/float64(peak))
-			cls := segClass(k, w)
+			cls := segClass(sevColor(k), w)
 			if k == last {
 				fmt.Fprintf(&sb, `<path class="%s" d="%s"/>`, cls, hbarEnd(x, cy, w, rowChartBarH))
 			} else {
@@ -176,20 +176,86 @@ func sevStackChart(label string, rows []stackRow) template.HTML {
 	return template.HTML(sb.String())
 }
 
-// segClass is a stacked segment's classes: its level, and "short" when its
+// sevColor is a finding level's color class (level 0 is P1).
+func sevColor(level int) string { return fmt.Sprintf("viz-s%d", level+1) }
+
+// segClass is a stacked segment's classes: its color, and "short" when its
 // length along the stack is under 4 units. The 2-unit gap stroke, centred on
 // the edge, would then cover the whole segment, so a short one goes without.
-func segClass(level int, length float64) string {
-	cls := fmt.Sprintf("viz-seg viz-s%d", level+1)
+func segClass(color string, length float64) string {
+	cls := "viz-seg " + color
 	if length < 4 {
 		cls += " short"
 	}
 	return cls
 }
 
+// colSeg is one segment of a stacked column: a count and its color class.
+type colSeg struct {
+	N     int
+	Color string
+}
+
 // sevDayChart is a column per day of the findings posted, stacked by level
 // from P1 at the baseline.
 func sevDayChart(days []store.DayStats) template.HTML {
+	aria := fmt.Sprintf("Findings posted per %s by level, last %d days", periodUnit(days), daysCovered(days))
+	return stackedDayChart(days, aria, sevLegend(), func(i int) ([]colSeg, string) {
+		d := days[i]
+		segs := make([]colSeg, len(d.Sev))
+		for k, n := range d.Sev {
+			segs[k] = colSeg{N: n, Color: sevColor(k)}
+		}
+		tip := sevTip(periodLabel(d), d.Sev)
+		if d.Fixed > 0 {
+			tip += fmt.Sprintf("; %d earlier findings confirmed fixed", d.Fixed)
+		}
+		return segs, tip
+	})
+}
+
+// orgDayChart is a column per day (or week) of the reviews posted, stacked
+// by organization in the order of its series.
+func orgDayChart(o orgDays) template.HTML {
+	aria := fmt.Sprintf("Reviews posted per %s by organization, last %d days", periodUnit(o.Days), daysCovered(o.Days))
+	return stackedDayChart(o.Days, aria, orgLegend(o.Series), func(i int) ([]colSeg, string) {
+		d := o.Days[i]
+		segs := make([]colSeg, len(o.Series))
+		var parts []string
+		for k, s := range o.Series {
+			segs[k] = colSeg{N: s.Posted[i], Color: s.Color()}
+			if s.Posted[i] > 0 {
+				parts = append(parts, fmt.Sprintf("%s: %d", s.Label, s.Posted[i]))
+			}
+		}
+		tip := fmt.Sprintf("%s: %d reviews posted", periodLabel(d), d.Posted)
+		if len(parts) > 0 {
+			tip += " (" + strings.Join(parts, " · ") + ")"
+		}
+		tip += fmt.Sprintf("; %d findings (%d at P1–P2)", d.Findings, d.Serious)
+		if d.Errors > 0 {
+			tip += fmt.Sprintf(", %d failed", d.Errors)
+		}
+		return segs, tip
+	})
+}
+
+// orgLegend names the organizations' colors. As with the levels, identity
+// is never by color alone: the hover titles and the table name them too.
+func orgLegend(series []orgSeries) string {
+	var sb strings.Builder
+	sb.WriteString(`<ul class="viz-legend">`)
+	for _, s := range series {
+		fmt.Fprintf(&sb, `<li><span class="viz-swatch %s"></span>%s</li>`, s.Color(), html.EscapeString(s.Label))
+	}
+	sb.WriteString(`</ul>`)
+	return sb.String()
+}
+
+// stackedDayChart is a column per day (or week) of segments stacked from
+// the baseline in the order col gives them, under legend. col gives one
+// column's segments and its hover text; aria is the chart's accessible name.
+func stackedDayChart(days []store.DayStats, aria, legend string, col func(int) ([]colSeg, string)) template.HTML {
 	if len(days) == 0 {
 		return ""
 	}
@@ -201,20 +267,27 @@ func sevDayChart(days []store.DayStats) template.HTML {
 		gridLines        = 2
 		barShare         = 0.62
 	)
+	segs := make([][]colSeg, len(days))
+	tips := make([]string, len(days))
 	peak := 0
-	for _, d := range days {
-		peak = max(peak, sevTotal(d.Sev))
+	for i := range days {
+		segs[i], tips[i] = col(i)
+		total := 0
+		for _, s := range segs[i] {
+			total += s.N
+		}
+		peak = max(peak, total)
 	}
 	ymax := niceMax(peak)
 	slot := plotW / float64(len(days))
 	labelEvery := dayLabelEvery(len(days))
 	var sb strings.Builder
-	sb.WriteString(sevLegend())
+	sb.WriteString(legend)
 	thin := ""
 	if slot*barShare < 4 {
 		thin = " thin" // too narrow for the gap between segments
 	}
-	fmt.Fprintf(&sb, `<svg class="viz%s" viewBox="0 0 %.0f %.0f" role="img" aria-label="Findings posted per %s by level, last %d days">`, thin, width, height, periodUnit(days), daysCovered(days))
+	fmt.Fprintf(&sb, `<svg class="viz%s" viewBox="0 0 %.0f %.0f" role="img" aria-label="%s">`, thin, width, height, html.EscapeString(aria))
 	for i := 0; i <= gridLines; i++ {
 		v := ymax * i / gridLines
 		y := top + plotH - plotH*float64(v)/float64(ymax)
@@ -225,20 +298,22 @@ func sevDayChart(days []store.DayStats) template.HTML {
 		x := left + slot*float64(i)
 		bw := slot * barShare
 		bx := x + (slot-bw)/2
-		tip := sevTip(periodLabel(d), d.Sev)
-		if d.Fixed > 0 {
-			tip += fmt.Sprintf("; %d earlier findings confirmed fixed", d.Fixed)
-		}
 		sb.WriteString(`<g class="viz-col">`)
-		fmt.Fprintf(&sb, `<title>%s</title>`, html.EscapeString(tip))
+		fmt.Fprintf(&sb, `<title>%s</title>`, html.EscapeString(tips[i]))
 		fmt.Fprintf(&sb, `<rect class="viz-hit" x="%.1f" y="%.0f" width="%.1f" height="%.0f"/>`, x, top, slot, plotH)
-		last, base := lastLevel(d.Sev), top+plotH
-		for k, n := range d.Sev {
-			if n == 0 {
+		last := -1 // the top segment, which gets the rounded corners
+		for k, s := range segs[i] {
+			if s.N > 0 {
+				last = k
+			}
+		}
+		base := top + plotH
+		for k, s := range segs[i] {
+			if s.N == 0 {
 				continue
 			}
-			h := max(1.5, plotH*float64(n)/float64(ymax))
-			cls := segClass(k, h)
+			h := max(1.5, plotH*float64(s.N)/float64(ymax))
+			cls := segClass(s.Color, h)
 			if k == last {
 				fmt.Fprintf(&sb, `<path class="%s" d="%s"/>`, cls, barTop(bx, base-h, bw, h))
 			} else {
@@ -391,4 +466,114 @@ func orgLabel(login string) string {
 		return "(no organization)"
 	}
 	return login
+}
+
+// maxOrgSeries is how many organizations the reviews-per-day chart colors
+// apart: the categorical palette's eight hues (viz-c1..viz-c8 in app.css).
+const maxOrgSeries = 8
+
+// orgSeries is one organization's part of the reviews-per-day chart, or the
+// organizations past maxOrgSeries folded into one.
+type orgSeries struct {
+	Label  string
+	Slot   int   // its color: 1..maxOrgSeries, or 0 for the folded organizations
+	Posted []int // reviews posted in each of the chart's columns
+}
+
+// Color is the series' color class.
+func (s orgSeries) Color() string { return fmt.Sprintf("viz-c%d", s.Slot) }
+
+// orgDays is the reviews posted per day (or week) split by organization,
+// for the charts of every organization. Each series' Posted lines up with Days.
+type orgDays struct {
+	Days   []store.DayStats
+	Series []orgSeries
+}
+
+// splitByOrg splits each day's reviews posted by organization. days are
+// ReviewsPerDay's entries for every organization and counts are
+// PostedPerDayByOrg's for the same days; with weekly, both are summed by
+// week, as byWeek does.
+//
+// Up to maxOrgSeries organizations get a series each; past that, the most
+// active maxOrgSeries-1 do and the rest share the last. A login on two
+// accounts (an organization installed again) is one series, named as the
+// latest account spells it, as are the reviews linked to no stored
+// organization. The series are in a fixed
+// order, by account ID (when the organization was first seen), with no
+// organization and then the folded ones last. An organization so keeps its
+// color, and its place in each column, from one period to the next while
+// the same organizations are charted, and the colors still go in palette
+// order with none skipped, which is what keeps neighbors in a stack apart.
+func splitByOrg(days []store.DayStats, counts []store.OrgDayPosted, weekly bool) orgDays {
+	at := make(map[int64]int, len(days)) // each day's column
+	for i, d := range days {
+		at[d.Day.Unix()] = i
+	}
+	type group struct {
+		login  string // as the latest account with it spells it
+		first  int64  // the lowest account ID with the login
+		latest int64  // the highest
+		total  int
+		posted []int
+	}
+	groups := map[string]*group{}
+	var gs []*group
+	for _, c := range counts {
+		i, ok := at[c.Day.Unix()]
+		if !ok || c.Posted == 0 {
+			continue
+		}
+		key := strings.ToLower(c.Login)
+		g := groups[key]
+		if g == nil {
+			g = &group{login: c.Login, first: c.AccountID, latest: c.AccountID, posted: make([]int, len(days))}
+			groups[key] = g
+			gs = append(gs, g)
+		}
+		if c.AccountID > g.latest {
+			g.login, g.latest = c.Login, c.AccountID
+		}
+		g.first = min(g.first, c.AccountID)
+		g.total += c.Posted
+		g.posted[i] += c.Posted
+	}
+	// The most active first, to choose which get a series of their own.
+	sort.SliceStable(gs, func(a, b int) bool {
+		if gs[a].total != gs[b].total {
+			return gs[a].total > gs[b].total
+		}
+		return gs[a].first < gs[b].first
+	})
+	var rest []*group
+	if len(gs) > maxOrgSeries {
+		gs, rest = gs[:maxOrgSeries-1], gs[maxOrgSeries-1:]
+	}
+	sort.SliceStable(gs, func(a, b int) bool {
+		if (gs[a].login == "") != (gs[b].login == "") {
+			return gs[b].login == ""
+		}
+		return gs[a].first < gs[b].first
+	})
+	out := orgDays{Days: days}
+	for k, g := range gs {
+		out.Series = append(out.Series, orgSeries{Label: orgLabel(g.login), Slot: k + 1, Posted: g.posted})
+	}
+	if len(rest) > 0 {
+		other := orgSeries{Label: fmt.Sprintf("%d other organizations", len(rest)), Posted: make([]int, len(days))}
+		for _, g := range rest {
+			for i, n := range g.posted {
+				other.Posted[i] += n
+			}
+		}
+		out.Series = append(out.Series, other)
+	}
+	if weekly {
+		spans := weekSpans(len(days))
+		out.Days = byWeek(days)
+		for k := range out.Series {
+			out.Series[k].Posted = sumSpans(out.Series[k].Posted, spans)
+		}
+	}
+	return out
 }
