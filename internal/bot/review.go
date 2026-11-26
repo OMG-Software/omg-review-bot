@@ -898,6 +898,12 @@ func passRank(st settings.Settings) int {
 	return comment
 }
 
+// errEmptyReview: every part the model reviewed came back with no summary and
+// no finding. That's a failed review, not a clean one: it's what a malformed
+// answer reads as once the fields it lost are empty, so it's tried again and
+// never approved.
+var errEmptyReview = errors.New("the model's review was empty: no summary and no findings for any part")
+
 // reviewPass is one model's review of the whole diff, batch by batch.
 type reviewPass struct {
 	label     string // the model(s) that answered
@@ -928,11 +934,20 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 			fmt.Fprintf(&raw, "%d finding(s) left out: not on code changed since %s\n\n", outside, short(in.scope.since))
 		}
 	}()
+	reviewed, said := false, false // a part was reviewed; the model gave a summary or a finding
+	defer func() {
+		// Not a clean review: a reply can be valid JSON and still say nothing,
+		// and posting that would approve code no one looked at.
+		if ps.err == nil && reviewed && !said {
+			ps.err = errEmptyReview
+		}
+	}()
 	for i, bt := range p.batches {
 		if !in.scope.touches(bt) {
 			fmt.Fprintf(&raw, "===== part %d/%d: unchanged since %s, so not reviewed again =====\n\n", i+1, len(p.batches), short(in.scope.since))
 			continue
 		}
+		reviewed = true
 		inPart := map[string]bool{}
 		for _, path := range bt.paths {
 			inPart[path] = true
@@ -966,14 +981,21 @@ func (b *Bot) reviewPass(ctx context.Context, st settings.Settings, pr *store.PR
 				b.logf("warn", pr.Repo, pr.Number, "review pass %d of part %d/%d by %s failed, so the part ends there: %v", pass, i+1, len(p.batches), lc.Label(), err)
 				break
 			}
-			if s := strings.TrimSpace(out.Summary); s != "" && !summarized {
-				ps.summaries, summarized = append(ps.summaries, s), true
+			if s := strings.TrimSpace(out.Summary); s != "" {
+				said = true
+				if !summarized {
+					ps.summaries, summarized = append(ps.summaries, s), true
+				}
 			}
 			fresh := 0
 			for _, f := range out.Comments {
 				f.Seen, f.SeenPath = "", "" // set when it's held, not by the model
 				f, ok := normFinding(p, f)
-				if !ok || isDuplicate(f, in.mine) {
+				if !ok {
+					continue
+				}
+				said = true // even if posted before or off the changes: the model did review
+				if isDuplicate(f, in.mine) {
 					continue
 				}
 				if !in.scope.covers(f) {
@@ -1088,10 +1110,10 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 		total.PromptTokens += resp.PromptTokens
 		total.CompletionTokens += resp.CompletionTokens
 		rawAll.WriteString(resp.Content)
-		if lastErr = llm.DecodeJSON(resp.Content, out); lastErr == nil {
+		if lastErr = decodeRequired(schema, resp.Content, out); lastErr == nil {
 			return total, nil
 		}
-		hint := "Your reply was not a valid JSON object in the required format."
+		hint := fmt.Sprintf("Your reply was not a valid JSON object in the required format (%v).", lastErr)
 		switch {
 		case resp.Truncated && schemaName == "code_review":
 			// Not a cap on findings: the review asks again for what's left out.
@@ -1105,6 +1127,16 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 		rawAll.WriteString("\n----- retry -----\n")
 	}
 	return total, badJSON{lastErr}
+}
+
+// decodeRequired decodes the JSON object in content into out if it has every
+// field the schema requires: {} or one finding on its own would otherwise
+// read as an answer that found nothing. An object without them is skipped
+// whole, never searched for one inside it, and a malformed one isn't passed
+// over for an object inside or after it (see llm.DecodeRequired).
+func decodeRequired(schema map[string]any, content string, out any) error {
+	req, _ := schema["required"].([]string)
+	return llm.DecodeRequired(content, req, out)
 }
 
 func (b *Bot) synthesizeSummary(ctx context.Context, lc llm.Client, st settings.Settings, gp *github.PullRequest, parts []string, fs []finding) string {

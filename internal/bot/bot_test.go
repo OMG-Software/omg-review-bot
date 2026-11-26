@@ -287,6 +287,7 @@ type fakeLLM struct {
 	held    string // held_check reply
 	prompts map[string][]string
 	systems map[string][]string
+	lasts   map[string][]string // each request's last message (a retry's hint), by kind
 
 	// A request offering tools is a review (only reviews offer them).
 	reviews     []string         // replies for successive reviews, before review
@@ -376,10 +377,11 @@ func (l *fakeLLM) handler(t *testing.T) http.Handler {
 		}
 		user := req.Messages[1].Content
 		if l.prompts == nil {
-			l.prompts, l.systems = map[string][]string{}, map[string][]string{}
+			l.prompts, l.systems, l.lasts = map[string][]string{}, map[string][]string{}, map[string][]string{}
 		}
 		l.prompts[kind] = append(l.prompts[kind], user)
 		l.systems[kind] = append(l.systems[kind], req.Messages[0].Content)
+		l.lasts[kind] = append(l.lasts[kind], req.Messages[len(req.Messages)-1].Content)
 		content := "A plain-text answer."
 		switch kind {
 		case "code_review":

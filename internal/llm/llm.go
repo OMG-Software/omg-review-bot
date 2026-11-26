@@ -725,7 +725,17 @@ func StripThinking(s string) string {
 // that is JSON but doesn't fit v is skipped whole: the objects nested in it
 // aren't tried, or {"comments": {...one finding...}} would decode as the
 // finding, read as an answer with no comments.
-func DecodeJSON(s string, v any) error {
+func DecodeJSON(s string, v any) error { return DecodeRequired(s, nil, v) }
+
+// DecodeRequired is DecodeJSON for an object that must have every key in
+// required: one without them is skipped whole, like one that doesn't fit v.
+//
+// Commas left before a closing ']' or '}' are dropped. Any other malformed
+// object ends the search with its error: a broken object is the answer gone
+// wrong, and the objects in or after it (its findings, a fragment cut off
+// with it) are not taken as the answer instead. Only braces in prose,
+// "{like this}", which don't start with a key, are passed over.
+func DecodeRequired(s string, required []string, v any) error {
 	s = StripThinking(s)
 	var lastErr error = errors.New("no JSON object found")
 	tries := 0
@@ -734,18 +744,148 @@ func DecodeJSON(s string, v any) error {
 			continue
 		}
 		tries++
-		var raw json.RawMessage
-		dec := json.NewDecoder(strings.NewReader(s[i:]))
-		if err := dec.Decode(&raw); err != nil {
+		raw, n, err := firstObject(s[i:])
+		if err != nil {
+			if startsWithKey(s[i:]) {
+				return err
+			}
 			lastErr = err
+			continue
+		}
+		if err := hasKeys(raw, required); err != nil {
+			lastErr = err
+			i += n - 1
 			continue
 		}
 		if err := json.Unmarshal(raw, v); err != nil {
 			lastErr = err
-			i += int(dec.InputOffset()) - 1
+			i += n - 1
 			continue
 		}
 		return nil
 	}
 	return lastErr
+}
+
+// firstObject decodes the JSON value s starts with, dropping trailing commas
+// if that's all that's wrong with it. n is its length in s.
+func firstObject(s string) (raw json.RawMessage, n int, err error) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	if err = dec.Decode(&raw); err == nil {
+		return raw, int(dec.InputOffset()), nil
+	}
+	if fixed := dropTrailingCommas(s); fixed != s {
+		var fr json.RawMessage
+		if json.NewDecoder(strings.NewReader(fixed)).Decode(&fr) == nil {
+			// Commas don't change the braces, so the object ends where its
+			// braces close in s.
+			return fr, max(braceGroupEnd(s), 1), nil
+		}
+	}
+	var se *json.SyntaxError
+	switch {
+	case errors.As(err, &se):
+		return nil, 0, fmt.Errorf("%w, just after `%s`", err, before(s, int(se.Offset)))
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return nil, 0, fmt.Errorf("the JSON object is incomplete: %w", err)
+	}
+	return nil, 0, err
+}
+
+// hasKeys checks that the JSON object raw has every key in required.
+func hasKeys(raw json.RawMessage, required []string) error {
+	if len(required) == 0 {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	for _, k := range required {
+		if _, ok := m[k]; !ok {
+			return fmt.Errorf("the JSON object has no %q field", k)
+		}
+	}
+	return nil
+}
+
+// startsWithKey reports whether s, which starts with '{', goes on as a JSON
+// object does, with a key: an object, not braces in prose.
+func startsWithKey(s string) bool {
+	return strings.HasPrefix(strings.TrimLeft(s[1:], " \t\r\n"), `"`)
+}
+
+// before is the text of s up to off (where the decoder stopped, the byte it
+// stopped on included), at most 40 bytes of it, on one line: shown with a
+// decoding error so the model can find the mistake.
+func before(s string, off int) string {
+	off = min(max(off, 0), len(s))
+	t := strings.ToValidUTF8(s[max(0, off-40):off], "")
+	return strings.NewReplacer("\n", " ", "\r", " ", "\t", " ", "`", "'").Replace(t)
+}
+
+// strScan follows JSON text byte by byte, telling bytes in strings apart.
+type strScan struct{ in, esc bool }
+
+// outside reports whether c, the next byte, is outside a string. Quotes
+// count as inside.
+func (sc *strScan) outside(c byte) bool {
+	switch {
+	case sc.esc:
+		sc.esc = false
+	case sc.in && c == '\\':
+		sc.esc = true
+	case c == '"':
+		sc.in = !sc.in
+	default:
+		return !sc.in
+	}
+	return false
+}
+
+// dropTrailingCommas removes each comma outside strings that comes right
+// before a ']' or '}' (whitespace between is kept).
+func dropTrailingCommas(s string) string {
+	var sc strScan
+	var b strings.Builder
+	last := 0
+	for i := 0; i < len(s); i++ {
+		if !sc.outside(s[i]) || s[i] != ',' {
+			continue
+		}
+		j := i + 1
+		for j < len(s) && strings.IndexByte(" \t\r\n", s[j]) >= 0 {
+			j++
+		}
+		if j < len(s) && (s[j] == ']' || s[j] == '}') {
+			b.WriteString(s[last:i])
+			last = i + 1
+		}
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// braceGroupEnd is the length of the brace group s starts with, strings
+// skipped; 0 if it never closes.
+func braceGroupEnd(s string) int {
+	var sc strScan
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		if !sc.outside(s[i]) {
+			continue
+		}
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth--; depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return 0
 }

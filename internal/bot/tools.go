@@ -548,12 +548,17 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 			raw.WriteString(resp.Content)
 			// Without the schema enforced, the answer must at least have
 			// the fields it requires: {} would read as "nothing found".
-			if !resp.Truncated && decodeRequired(schema, resp.Content, out) {
-				return total, raw.String(), nil
+			why := "it was cut off"
+			if !resp.Truncated {
+				err := decodeRequired(schema, resp.Content, out)
+				if err == nil {
+					return total, raw.String(), nil
+				}
+				why = err.Error()
 			}
 			// An answer, but not the JSON asked for: ask again with the schema.
 			msgs = append(msgs, llm.Message{Role: "assistant", Content: textutil.Truncate(llm.StripThinking(resp.Content), 4000)},
-				llm.Message{Role: "user", Content: "That was not the JSON object asked for."})
+				llm.Message{Role: "user", Content: "That was not the JSON object asked for (" + why + ")."})
 			raw.WriteString("\n----- asking for the JSON answer -----\n")
 			break
 		}
@@ -592,28 +597,6 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 	total.PromptTokens += u.PromptTokens
 	total.CompletionTokens += u.CompletionTokens
 	return total, raw.String() + r, err
-}
-
-// decodeRequired decodes the JSON object in content into out if it has every
-// field the schema requires. The object checked is the one decoded: one that
-// has the fields but doesn't fit out (a single finding where a list belongs)
-// is refused, not searched for another object inside it.
-func decodeRequired(schema map[string]any, content string, out any) bool {
-	var raw json.RawMessage
-	if llm.DecodeJSON(content, &raw) != nil {
-		return false
-	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil || m == nil {
-		return false
-	}
-	req, _ := schema["required"].([]string)
-	for _, k := range req {
-		if _, ok := m[k]; !ok {
-			return false
-		}
-	}
-	return json.Unmarshal(raw, out) == nil
 }
 
 // flattenTools rewrites tool calls and results as plain assistant and user

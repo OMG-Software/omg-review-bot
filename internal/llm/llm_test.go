@@ -168,3 +168,99 @@ func TestDecodeJSONSkipsNestedObjects(t *testing.T) {
 		t.Errorf("a later top-level object should still be found: %+v, %v", v, err)
 	}
 }
+
+// Synthetic reviews with the defects models produce: a comma left after the
+// comments list or inside it, and a quote not escaped inside a string. Each
+// broken object has well-formed findings in it, which must never be taken as
+// the answer (they'd read as a review with no summary and no findings).
+const (
+	finding1 = `{"path":"main.go","line":11,"severity":"P2","title":"Division by zero","body":"Always panics."}`
+	finding2 = `{"path":"main.go","line":12,"severity":"P3","title":"Printed, not logged","body":"Use the logger."}`
+
+	commaAfterList = `{"summary":"Adds a division.","comments":[` + finding1 + `,` + finding2 + `],}`
+	commaInList    = "{\"summary\":\"Adds a division.\",\"comments\":[\n" + finding1 + ",\n" + finding2 + ", ], }"
+	unescapedQuote = `{"summary":"Adds a division.","comments":[` + finding1 +
+		`,{"path":"main.go","line":12,"severity":"P3","title":"Printed","body":"Call "log.Printf" instead."}]}`
+)
+
+type review struct {
+	Summary  string           `json:"summary"`
+	Comments []map[string]any `json:"comments"`
+}
+
+var reviewKeys = []string{"summary", "comments"}
+
+func TestDecodeRequiredRepairsTrailingCommas(t *testing.T) {
+	for name, in := range map[string]string{
+		"comma after the list": commaAfterList,
+		"comma in the list":    commaInList,
+		"fenced, with chatter": "Here it is:\n```json\n" + commaAfterList + "\n```\nDone.",
+	} {
+		var v review
+		if err := DecodeRequired(in, reviewKeys, &v); err != nil || v.Summary != "Adds a division." || len(v.Comments) != 2 {
+			t.Errorf("%s: got %+v, %v; want the summary and both findings", name, v, err)
+		}
+	}
+	// Only commas outside strings go: text that looks like one stays.
+	var v review
+	if err := DecodeRequired(`{"summary":"keep ,] and \",}\" here","comments":[],}`, reviewKeys, &v); err != nil || v.Summary != `keep ,] and ",}" here` {
+		t.Errorf("summary = %q, %v; want the string as written", v.Summary, err)
+	}
+}
+
+func TestDecodeRequiredRejectsBrokenObjects(t *testing.T) {
+	for name, c := range map[string]struct{ in, wantErr string }{
+		// The decoder's error, and where: the retry tells the model.
+		"unescaped quote": {unescapedQuote, "\"body\":\"Call \"l`"},
+		"cut off":         {`{"summary":"Adds a division.","comments":[` + finding1 + `,{"path":"ma`, "incomplete"},
+		// A fragment with every required field inside a broken object is
+		// still a fragment.
+		"fragment with the fields": {`{"summary":"Outer.","comments":[{"summary":"Inner.","comments":[]}],"note":"say "hi""}`, "just after"},
+		"missing field":            {`{"summary":"Adds a division."}`, `no "comments" field`},
+		"a finding alone":          {finding1, `no "summary" field`},
+	} {
+		v := review{}
+		err := DecodeRequired(c.in, reviewKeys, &v)
+		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: error %v, want one containing %q", name, err, c.wantErr)
+		}
+		if v.Summary != "" || v.Comments != nil {
+			t.Errorf("%s: decoded %+v from a broken answer", name, v)
+		}
+		// Without required keys too: a finding must not stand in for a
+		// broken review, whatever the caller checks.
+		v = review{}
+		if name != "missing field" && name != "a finding alone" {
+			if err := DecodeJSON(c.in, &v); err == nil {
+				t.Errorf("%s: DecodeJSON took %+v from a broken object", name, v)
+			}
+		}
+	}
+	// A later top-level object is still found past one without the fields,
+	// and past braces in prose.
+	for _, in := range []string{
+		`{"comments":{"a":1}} then {"summary":"ok","comments":[]}`,
+		`{"analysis":"x"} {"summary":"ok","comments":[]}`,
+		`use {braces} wisely {"summary":"ok","comments":[]}`,
+	} {
+		var v review
+		if err := DecodeRequired(in, reviewKeys, &v); err != nil || v.Summary != "ok" {
+			t.Errorf("%s: got %+v, %v", in, v, err)
+		}
+	}
+}
+
+func TestDropTrailingCommas(t *testing.T) {
+	for in, want := range map[string]string{
+		`[1,2,]`:                    `[1,2]`,
+		"{\"a\":[1,\n ],\n}":        "{\"a\":[1\n ]\n}",
+		`{"a":"x,]","b":"\",}"}`:    `{"a":"x,]","b":"\",}"}`,
+		`{"a":"\\",}`:               `{"a":"\\"}`, // an escaped backslash ends the string
+		`{"a":1,"b":2}`:             `{"a":1,"b":2}`,
+		`{"a":[{"b":1},{"c":2},],}`: `{"a":[{"b":1},{"c":2}]}`,
+	} {
+		if got := dropTrailingCommas(in); got != want {
+			t.Errorf("dropTrailingCommas(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
