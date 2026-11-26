@@ -390,6 +390,7 @@ var funcs = template.FuncMap{
 	"rankChart":     rankChart,
 	"sevStackChart": sevStackChart,
 	"sevDayChart":   sevDayChart,
+	"orgDayChart":   orgDayChart,
 	"periodUnit":    periodUnit,
 	"ms": func(n int64) string {
 		if n <= 0 {

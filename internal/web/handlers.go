@@ -189,6 +189,7 @@ func (s *Server) dashboardData() map[string]any {
 	now := time.Now()
 	stats, _ := s.store.ReviewStatsSince(store.AllAccounts, store.DayWindowStart(30, now)) // the chart's days
 	days, _ := s.store.ReviewsPerDay(store.AllAccounts, 30, now)
+	byOrg, _ := s.store.PostedPerDayByOrg(30, now)
 	repos, _ := s.store.RepoStatsSince(store.AllAccounts, store.DayWindowStart(30, now), 10)
 	reviews, _ := s.store.RecentReviews(store.AllAccounts, 10)
 	acts, _ := s.store.RecentActivity(store.AllAccounts, 15, "", 0)
@@ -198,8 +199,8 @@ func (s *Server) dashboardData() map[string]any {
 	st := s.bot.Settings()
 	return map[string]any{
 		"Reviews": reviews, "Activity": acts, "Counts": counts, "Stats": stats, "Days": days, "Orgs": orgs,
-		"RepoRows": repoReviewRows(repos, 10),
-		"Users":    users, "SignIn": st.GitHub.SignInOn(), "WebhookOn": st.GitHub.WebhookSecret != "",
+		"OrgDays": splitByOrg(days, byOrg, false), "RepoRows": repoReviewRows(repos, 10),
+		"Users": users, "SignIn": st.GitHub.SignInOn(), "WebhookOn": st.GitHub.WebhookSecret != "",
 		"Deliveries24h": s.store.CountDeliveriesSince(time.Now().Add(-24 * time.Hour).Unix()),
 	}
 }
