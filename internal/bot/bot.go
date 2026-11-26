@@ -153,6 +153,10 @@ type Bot struct {
 	// repliesWaiting holds the PRs (prKey) whose thread replies wait for the
 	// review of a new push (see replyThreads), so that review's end answers them.
 	repliesWaiting map[string]bool
+	// commandsTaken holds the review-request comments (by ID) whose review
+	// was queued but that couldn't be recorded as handled: a later scan
+	// records them instead of queuing the review again (see markCommand).
+	commandsTaken map[int64]bool
 	// active holds each PR (prKey) a worker is running a job for, with the
 	// jobs for that PR taken off the queue meanwhile. Those run next on the
 	// same worker, in order, so no two jobs for one PR ever overlap.
@@ -204,6 +208,7 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		running:         map[string]bool{},
 		after:           map[string]job{},
 		repliesWaiting:  map[string]bool{},
+		commandsTaken:   map[int64]bool{},
 		active:          map[string][]job{},
 		roundRobin:      map[int64]int{},
 		orgBusy:         map[int64]int{},

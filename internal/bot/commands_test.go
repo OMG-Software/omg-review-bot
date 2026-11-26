@@ -1,6 +1,8 @@
 package bot
 
 import (
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -115,5 +117,58 @@ func TestReviewCommand(t *testing.T) {
 	check()
 	if n := len(e.lm.prompts["text"]); n != 1 || len(e.gh.reviews) != 2 {
 		t.Errorf("want the mention answered (1 chat prompt, 2 reviews), got %d prompts and %d reviews", n, len(e.gh.reviews))
+	}
+}
+
+// A request whose review was queued but that couldn't be recorded as handled
+// doesn't queue another review on the next check; it's recorded once it can be.
+func TestReviewCommandQueuedOnceWhenNotRecorded(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(*settings.Settings) {})
+	e.gh.perms = map[string]string{"alice": "write"}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	pr, err := e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || len(e.gh.reviews) != 1 {
+		t.Fatalf("expected the first review of a tracked PR: %d reviews, %v", len(e.gh.reviews), err)
+	}
+	check := func() {
+		t.Helper()
+		if err := e.b.CheckReplies(pr.Repo, pr.Number, pr.AccountID); err != nil {
+			t.Fatal(err)
+		}
+		drain(e.ctx, e.b)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(e.b.dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER fail_handled BEFORE INSERT ON handled_comments BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`); err != nil {
+		t.Fatal(err)
+	}
+	e.say("alice", "@testbot review")
+	check()
+	check()
+	if len(e.gh.reviews) != 2 {
+		t.Fatalf("an unrecorded request was reviewed %d times, want once", len(e.gh.reviews)-1)
+	}
+	if e.st.IsHandled(8001) {
+		t.Fatal("the request was recorded while writes failed")
+	}
+
+	if _, err := db.Exec(`DROP TRIGGER fail_handled`); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	if !e.st.IsHandled(8001) || len(e.gh.reviews) != 2 {
+		t.Errorf("once writes work: recorded %v with %d reviews, want recorded with 2", e.st.IsHandled(8001), len(e.gh.reviews))
+	}
+	e.b.mu.Lock()
+	left := len(e.b.commandsTaken)
+	e.b.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d requests still held in memory after being recorded", left)
 	}
 }

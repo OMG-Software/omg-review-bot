@@ -52,7 +52,7 @@ func (b *Bot) reviewCommand(ctx context.Context, cl *github.Client, pr *store.PR
 	if reply == "" {
 		// Marked at once: the review is queued, and trying the comment
 		// again would queue another.
-		_ = b.store.MarkHandled(c.ID, "review-command", pr.Repo, pr.Number, 0)
+		b.markCommand(pr, c.ID)
 		return nil
 	}
 	posted, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, "@"+who+" "+reply)
@@ -61,4 +61,36 @@ func (b *Bot) reviewCommand(ctx context.Context, cl *github.Client, pr *store.PR
 	}
 	_ = b.store.MarkHandled(c.ID, "review-command", pr.Repo, pr.Number, posted.ID)
 	return nil
+}
+
+// markCommand records review-request comment id, whose review is queued, as
+// handled. If the write fails, the comment is kept as taken in memory, and
+// commandTaken records it on a later scan instead of letting it queue a
+// second review (which would also use up another of the day's reviews).
+func (b *Bot) markCommand(pr *store.PR, id int64) {
+	err := b.store.MarkHandled(id, "review-command", pr.Repo, pr.Number, 0)
+	b.mu.Lock()
+	first := !b.commandsTaken[id]
+	if err == nil {
+		delete(b.commandsTaken, id)
+	} else {
+		b.commandsTaken[id] = true
+	}
+	b.mu.Unlock()
+	if err != nil && first {
+		b.logf("warn", pr.Repo, pr.Number, "could not record review request %d as handled; trying again on the next check: %v", id, err)
+	}
+}
+
+// commandTaken reports whether review-request comment id has had its review
+// queued already, though it isn't recorded as handled yet; if so, it tries
+// recording it again.
+func (b *Bot) commandTaken(pr *store.PR, id int64) bool {
+	b.mu.Lock()
+	taken := b.commandsTaken[id]
+	b.mu.Unlock()
+	if taken {
+		b.markCommand(pr, id)
+	}
+	return taken
 }

@@ -321,6 +321,9 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, mc *jobCl
 			continue
 		}
 		if cmd.MatchString(c.Body) {
+			if b.commandTaken(pr, c.ID) {
+				continue
+			}
 			if err := b.reviewCommand(ctx, cl, pr, c); err != nil {
 				return err
 			}
