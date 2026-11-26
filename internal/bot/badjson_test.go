@@ -28,6 +28,7 @@ const (
 // scriptLLM answers each request with the next of its replies.
 type scriptLLM struct {
 	replies []string
+	cut     int // the first this many replies are cut off at the output limit
 	reqs    []llm.Request
 }
 
@@ -38,7 +39,11 @@ func (s *scriptLLM) Chat(_ context.Context, req llm.Request) (*llm.Response, err
 	}
 	r := s.replies[0]
 	s.replies = s.replies[1:]
-	return &llm.Response{Content: r}, nil
+	cut := s.cut > 0
+	if cut {
+		s.cut--
+	}
+	return &llm.Response{Content: r, Truncated: cut}, nil
 }
 
 func (s *scriptLLM) Models(context.Context) ([]string, error) { return nil, nil }
@@ -65,6 +70,17 @@ func TestDecodeRequiredMalformed(t *testing.T) {
 	}
 	if out.Summary != "" || out.Comments != nil {
 		t.Errorf("unescaped quote: decoded %+v", out)
+	}
+	// A summary with no list isn't a clean review: it would pass the empty
+	// review check and approve.
+	for _, in := range []string{
+		`{"summary":"Adds a division.","comments":null}`,
+		`{"summary":"Adds a division.","comments":[,]}`,
+	} {
+		out = modelOutput{}
+		if err := decodeRequired(reviewSchema, in, &out); err == nil {
+			t.Errorf("%s: decoded as %+v", in, out)
+		}
 	}
 
 	for _, c := range []struct {
@@ -113,6 +129,22 @@ func TestChatJSONRetriesMalformed(t *testing.T) {
 	}
 	if hint := lc.lastMessage(1); !strings.Contains(hint, "not a valid JSON object") || !strings.Contains(hint, badQuoteAt) {
 		t.Errorf("retry hint doesn't give the decoder's error:\n%s", hint)
+	}
+
+	// A reply cut off at the output limit isn't used, even with a complete
+	// object before the cut: it's asked for again, briefer.
+	lc = &scriptLLM{cut: 1, replies: []string{`{"summary":"Clean.","comments":[]} {"summary":"Also`, reviewOf(divFinding)}}
+	out = modelOutput{}
+	if _, _, err := b.chatJSON(t.Context(), lc, st, reviewSchema, "code_review", "sys", "user", &out); err != nil || len(lc.reqs) != 2 || len(out.Comments) != 1 {
+		t.Fatalf("cut off: %d requests, out %+v, %v; want the retry's finding", len(lc.reqs), out, err)
+	}
+	if hint := lc.lastMessage(1); !strings.Contains(hint, "cut off") {
+		t.Errorf("cut-off retry hint = %q", hint)
+	}
+	lc = &scriptLLM{cut: 2, replies: []string{reviewOf(), reviewOf(), reviewOf()}}
+	out = modelOutput{}
+	if _, _, err := b.chatJSON(t.Context(), lc, st, reviewSchema, "code_review", "sys", "user", &out); !errors.As(err, &badJSON{}) || out.Summary != "" {
+		t.Errorf("every try cut off: out %+v, error %v; want badJSON and nothing decoded", out, err)
 	}
 
 	// Trailing commas are repaired, with no retry.

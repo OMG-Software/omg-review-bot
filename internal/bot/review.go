@@ -1110,7 +1110,11 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 		total.PromptTokens += resp.PromptTokens
 		total.CompletionTokens += resp.CompletionTokens
 		rawAll.WriteString(resp.Content)
-		if lastErr = decodeRequired(schema, resp.Content, out); lastErr == nil {
+		// A reply cut off at the output limit isn't used even if it holds a
+		// complete object: what was cut may be the rest of the answer.
+		if resp.Truncated {
+			lastErr = errors.New("the reply was cut off at the output token limit")
+		} else if lastErr = decodeRequired(schema, resp.Content, out); lastErr == nil {
 			return total, nil
 		}
 		hint := fmt.Sprintf("Your reply was not a valid JSON object in the required format (%v).", lastErr)
@@ -1130,7 +1134,8 @@ func (b *Bot) chatJSONOnce(ctx context.Context, lc llm.Client, st settings.Setti
 }
 
 // decodeRequired decodes the JSON object in content into out if it has every
-// field the schema requires: {} or one finding on its own would otherwise
+// field the schema requires, none of them null: {}, "comments": null or one
+// finding on its own would otherwise
 // read as an answer that found nothing. An object without them is skipped
 // whole, never searched for one inside it, and a malformed one isn't passed
 // over for an object inside or after it (see llm.DecodeRequired).

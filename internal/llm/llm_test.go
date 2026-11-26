@@ -209,15 +209,22 @@ func TestDecodeRequiredRepairsTrailingCommas(t *testing.T) {
 }
 
 func TestDecodeRequiredRejectsBrokenObjects(t *testing.T) {
-	for name, c := range map[string]struct{ in, wantErr string }{
+	for name, c := range map[string]struct {
+		in, wantErr string
+		keysOnly    bool // valid JSON, refused only for the required keys
+	}{
 		// The decoder's error, and where: the retry tells the model.
-		"unescaped quote": {unescapedQuote, "\"body\":\"Call \"l`"},
-		"cut off":         {`{"summary":"Adds a division.","comments":[` + finding1 + `,{"path":"ma`, "incomplete"},
+		"unescaped quote": {in: unescapedQuote, wantErr: "\"body\":\"Call \"l`"},
+		"cut off":         {in: `{"summary":"Adds a division.","comments":[` + finding1 + `,{"path":"ma`, wantErr: "incomplete"},
 		// A fragment with every required field inside a broken object is
 		// still a fragment.
-		"fragment with the fields": {`{"summary":"Outer.","comments":[{"summary":"Inner.","comments":[]}],"note":"say "hi""}`, "just after"},
-		"missing field":            {`{"summary":"Adds a division."}`, `no "comments" field`},
-		"a finding alone":          {finding1, `no "summary" field`},
+		"fragment with the fields": {in: `{"summary":"Outer.","comments":[{"summary":"Inner.","comments":[]}],"note":"say "hi""}`, wantErr: "just after"},
+		// Something is missing before that comma: it isn't repaired into an
+		// empty list.
+		"orphan comma":    {in: `{"summary":"Adds a division.","comments":[,]}`, wantErr: "looking for beginning of value"},
+		"missing field":   {in: `{"summary":"Adds a division."}`, wantErr: `no "comments" field`, keysOnly: true},
+		"null list":       {in: `{"summary":"Adds a division.","comments":null}`, wantErr: `"comments" field is null`, keysOnly: true},
+		"a finding alone": {in: finding1, wantErr: `no "summary" field`, keysOnly: true},
 	} {
 		v := review{}
 		err := DecodeRequired(c.in, reviewKeys, &v)
@@ -230,7 +237,7 @@ func TestDecodeRequiredRejectsBrokenObjects(t *testing.T) {
 		// Without required keys too: a finding must not stand in for a
 		// broken review, whatever the caller checks.
 		v = review{}
-		if name != "missing field" && name != "a finding alone" {
+		if !c.keysOnly {
 			if err := DecodeJSON(c.in, &v); err == nil {
 				t.Errorf("%s: DecodeJSON took %+v from a broken object", name, v)
 			}
@@ -258,6 +265,12 @@ func TestDropTrailingCommas(t *testing.T) {
 		`{"a":"\\",}`:               `{"a":"\\"}`, // an escaped backslash ends the string
 		`{"a":1,"b":2}`:             `{"a":1,"b":2}`,
 		`{"a":[{"b":1},{"c":2},],}`: `{"a":[{"b":1},{"c":2}]}`,
+		`{"a":"x",}`:                `{"a":"x"}`, // after a string
+		// No value before the comma: left for the decoder to refuse.
+		`[,]`:         `[,]`,
+		`{"a":[ , ]}`: `{"a":[ , ]}`,
+		`{,}`:         `{,}`,
+		`[1,,]`:       `[1,,]`,
 	} {
 		if got := dropTrailingCommas(in); got != want {
 			t.Errorf("dropTrailingCommas(%q) = %q, want %q", in, got, want)

@@ -728,7 +728,8 @@ func StripThinking(s string) string {
 func DecodeJSON(s string, v any) error { return DecodeRequired(s, nil, v) }
 
 // DecodeRequired is DecodeJSON for an object that must have every key in
-// required: one without them is skipped whole, like one that doesn't fit v.
+// required, none of them null: one without them is skipped whole, like one
+// that doesn't fit v.
 //
 // Commas left before a closing ']' or '}' are dropped. Any other malformed
 // object ends the search with its error: a broken object is the answer gone
@@ -792,7 +793,9 @@ func firstObject(s string) (raw json.RawMessage, n int, err error) {
 	return nil, 0, err
 }
 
-// hasKeys checks that the JSON object raw has every key in required.
+// hasKeys checks that the JSON object raw has every key in required, none
+// of them null. Decoding into v rejects a value of the wrong type, but takes
+// null for any field: "comments": null would read as an empty list.
 func hasKeys(raw json.RawMessage, required []string) error {
 	if len(required) == 0 {
 		return nil
@@ -802,8 +805,12 @@ func hasKeys(raw json.RawMessage, required []string) error {
 		return err
 	}
 	for _, k := range required {
-		if _, ok := m[k]; !ok {
+		v, ok := m[k]
+		if !ok {
 			return fmt.Errorf("the JSON object has no %q field", k)
+		}
+		if string(v) == "null" {
+			return fmt.Errorf("the JSON object's %q field is null", k)
 		}
 	}
 	return nil
@@ -843,9 +850,12 @@ func (sc *strScan) outside(c byte) bool {
 	return false
 }
 
-// dropTrailingCommas removes each comma outside strings that comes right
-// before a ']' or '}' (whitespace between is kept).
+// dropTrailingCommas removes each comma outside strings that ends a value
+// and comes right before a ']' or '}' (whitespace between is kept). One
+// with no value before it, as in [,], isn't a trailing comma: something is
+// missing there, and it's left for the decoder to refuse.
 func dropTrailingCommas(s string) string {
+	const space = " \t\r\n"
 	var sc strScan
 	var b strings.Builder
 	last := 0
@@ -854,10 +864,17 @@ func dropTrailingCommas(s string) string {
 			continue
 		}
 		j := i + 1
-		for j < len(s) && strings.IndexByte(" \t\r\n", s[j]) >= 0 {
+		for j < len(s) && strings.IndexByte(space, s[j]) >= 0 {
 			j++
 		}
-		if j < len(s) && (s[j] == ']' || s[j] == '}') {
+		// Only whitespace lies between, so this byte is outside strings too
+		// (a quote here closes a string: a value ends there).
+		k := i - 1
+		for k >= 0 && strings.IndexByte(space, s[k]) >= 0 {
+			k--
+		}
+		afterValue := k >= 0 && strings.IndexByte("[{,", s[k]) < 0
+		if afterValue && j < len(s) && (s[j] == ']' || s[j] == '}') {
 			b.WriteString(s[last:i])
 			last = i + 1
 		}
