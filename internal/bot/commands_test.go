@@ -36,6 +36,15 @@ func TestAsksForReview(t *testing.T) {
 		"```\nnever closed\n@testbot review":           false,
 		"Like this:\n\n    @testbot review":            false,
 		"\t@testbot review":                            false,
+		// In a code span, which can run across lines.
+		"`\n@testbot review\n`":                  false,
+		"Like ``\r\n@testbot review\r\n`` this.": false,
+		"Use `a` and `b`.\n@testbot review":      true, // the spans close on their line
+		"A stray ` backtick.\n@testbot review":   true, // nothing closes it
+		"`\n@testbot review\n``":                 true, // a run of another length doesn't close it
+		"`\n\n@testbot review\n\n`":              true, // spans end with their paragraph
+		"```\n`\n```\n@testbot review\n`":        true, // a backtick in a fence opens nothing
+		"> An earlier point.\n@testbot review":   true, // typed under a quote: the commenter's own
 	} {
 		if asksForReview(re, s) != want {
 			t.Errorf("%q: got %v want %v", s, !want, want)

@@ -610,7 +610,7 @@ else, or a request the bot can't take (a closed PR, a review already queued or r
 daily limit reached, reviews stopped for a restart), gets a reply saying why. One that fails for
 another reason (GitHub or the bot's database unavailable, a full review queue) is tried again. The command must be a line of its own, so a
 question such as "@<app-name> reviewing this, why…?" is answered as a mention, and a quoted
-request, or one in a code block, isn't taken as a new one. Like other mentions, it needs
+request, or one shown as code (in a code block or between backticks), isn't taken as a new one. Like other mentions, it needs
 *Replies / mentions* to have mentions on.
 
 The bot ignores other bots, replies at most *Max bot replies per thread* times per thread, and

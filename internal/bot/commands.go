@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
@@ -19,18 +20,24 @@ func reviewCommandRE(slug string) *regexp.Regexp {
 }
 
 // asksForReview reports whether a PR conversation comment asks for a review:
-// whether a line of its own outside fenced code blocks matches cmd (see
-// reviewCommandRE). A line of its own, so a question that happens to start with
-// the word ("@bot reviewing this, why …?") is answered as a mention; and not
-// quoted ("> @bot review") or in code, so quoting the command or showing how
-// it's used doesn't queue a review.
+// whether a line of its own matches cmd (see reviewCommandRE), outside fenced
+// code blocks and code spans. A line of its own, so a question that happens to
+// start with the word ("@bot reviewing this, why …?") is answered as a
+// mention; and not quoted ("> @bot review") or in code, so quoting the command
+// or showing how it's used doesn't queue a review. A line typed straight under
+// a quote does count, though GitHub shows it in the quote: GitHub's quote reply
+// marks every line it quotes, so that line is the commenter's own.
 func asksForReview(cmd *regexp.Regexp, body string) bool {
-	fence := "" // the open fence ("```", "~~~~" …); "" outside one
+	fence := ""       // the open fence ("```", "~~~~" …); "" outside one
+	var para []string // the lines of the paragraph so far, outside fences
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		if run, rest := fenceRun(line); run != "" {
 			if fence == "" {
-				fence = run
+				if commandIn(cmd, para) {
+					return true
+				}
+				fence, para = run, nil
 				continue
 			}
 			if run[0] == fence[0] && len(run) >= len(fence) && strings.TrimSpace(rest) == "" {
@@ -38,11 +45,64 @@ func asksForReview(cmd *regexp.Regexp, body string) bool {
 				continue
 			}
 		}
-		if fence == "" && cmd.MatchString(line) {
-			return true
+		switch {
+		case fence != "":
+		case strings.TrimSpace(line) == "": // a paragraph ends, and code spans with it
+			if commandIn(cmd, para) {
+				return true
+			}
+			para = nil
+		default:
+			para = append(para, line)
 		}
 	}
+	return commandIn(cmd, para)
+}
+
+// commandIn reports whether a line of paragraph para matches cmd outside a
+// code span. A span can run across lines: "`", "@bot review", "`" is code.
+func commandIn(cmd *regexp.Regexp, para []string) bool {
+	spans := codeSpans(strings.Join(para, "\n"))
+	at := 0 // where the line starts in the joined paragraph
+	for _, line := range para {
+		if cmd.MatchString(line) && !slices.ContainsFunc(spans, func(s [2]int) bool { return s[0] <= at && at < s[1] }) {
+			return true
+		}
+		at += len(line) + 1
+	}
 	return false
+}
+
+// codeSpans returns where text's code spans are (from after the opening
+// backticks to the closing ones), paired as CommonMark does: a run of
+// backticks opens a span that the next run of the same length closes, and a
+// run nothing closes is plain text.
+func codeSpans(text string) [][2]int {
+	type run struct{ at, n int }
+	var runs []run
+	for i := 0; i < len(text); {
+		if text[i] != '`' {
+			i++
+			continue
+		}
+		j := i
+		for j < len(text) && text[j] == '`' {
+			j++
+		}
+		runs = append(runs, run{i, j - i})
+		i = j
+	}
+	var spans [][2]int
+	for i := 0; i < len(runs); i++ {
+		for j := i + 1; j < len(runs); j++ {
+			if runs[j].n == runs[i].n {
+				spans = append(spans, [2]int{runs[i].at + runs[i].n, runs[j].at})
+				i = j
+				break
+			}
+		}
+	}
+	return spans
 }
 
 // fenceRun returns the run of 3 or more backticks or tildes that would open or
