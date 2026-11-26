@@ -377,13 +377,13 @@ func TestDecodeRequired(t *testing.T) {
 		`{"summary":"Found an issue","comments":` + divFinding + `}`: false,
 	} {
 		var out modelOutput
-		if got := decodeRequired(reviewSchema, in, &out); got != want {
-			t.Errorf("decodeRequired(%q) = %v, want %v", in, got, want)
+		if err := decodeRequired(reviewSchema, in, &out); (err == nil) != want {
+			t.Errorf("decodeRequired(%q) = %v, want ok %v", in, err, want)
 		}
 	}
 	var out modelOutput
-	if !decodeRequired(reviewSchema, reviewOf(divFinding), &out) || len(out.Comments) != 1 {
-		t.Errorf("a list of one finding decoded as %+v", out)
+	if err := decodeRequired(reviewSchema, reviewOf(divFinding), &out); err != nil || len(out.Comments) != 1 {
+		t.Errorf("a list of one finding decoded as %+v (%v)", out, err)
 	}
 }
 
