@@ -26,7 +26,18 @@ const signInTTL = 15 * time.Minute
 type pendingSignIn struct {
 	attempt chatgpt.Attempt
 	url     string // where the sign-in starts
+	// account is the model's sign-in when the attempt started: if it's
+	// changed by the time it finishes, someone else signed the model in
+	// or out meanwhile, and the attempt is out of date.
+	account string
 	expires time.Time
+}
+
+var errStaleSignIn = errors.New("the model's ChatGPT sign-in changed while you were signing in: start again")
+
+// stale reports whether c's sign-in changed since p started.
+func (p pendingSignIn) stale(c *settings.LLM) bool {
+	return c.Account != p.account || c.ChatGPTClient != p.attempt.ClientID
 }
 
 // signInKey: an attempt belongs to the person who started it, for one model
@@ -94,7 +105,7 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 			return
 		}
 		s.sweepSignIns()
-		s.signIns.Store(key, pendingSignIn{attempt: a, url: u, expires: time.Now().Add(signInTTL)})
+		s.signIns.Store(key, pendingSignIn{attempt: a, url: u, account: c.Account, expires: time.Now().Add(signInTTL)})
 		toModel(w, r, sc, id, "msg", "Open the ChatGPT sign-in below, then paste back the address it ends on.")
 
 	case "chatgpt-cancel":
@@ -133,8 +144,12 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 			// Kept: the next sign-in asks for the plan's use again.
 			_, _ = s.applyModels(r, sc, func(m *settings.Models) (string, error) {
 				return "kept the ChatGPT app registration of a sign-in that didn't allow the plan's use",
-					setChatGPT(m, id, func(c *settings.LLM) {
+					setChatGPT(m, id, func(c *settings.LLM) error {
+						if p.stale(c) {
+							return errStaleSignIn
+						}
 						c.ChatGPTClient, c.AccountEmail, c.AccountSubject = who.ClientID, who.Email, who.Subject
+						return nil
 					})
 			})
 		case errors.Is(err, chatgpt.ErrOtherAccount):
@@ -151,9 +166,13 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 		}
 		msg, err := s.applyModels(r, sc, func(m *settings.Models) (string, error) {
 			var label string
-			err := setChatGPT(m, id, func(c *settings.LLM) {
+			err := setChatGPT(m, id, func(c *settings.LLM) error {
+				if p.stale(c) {
+					return errStaleSignIn
+				}
 				c.Account, c.AccountEmail, c.AccountSubject, c.ChatGPTClient = acct, who.Email, who.Subject, who.ClientID
 				label = c.Label()
+				return nil
 			})
 			return fmt.Sprintf("signed %s (%s) in to ChatGPT as %s", label, where, email), err
 		})
@@ -167,10 +186,11 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 	case "chatgpt-signout":
 		msg, err := s.applyModels(r, sc, func(m *settings.Models) (string, error) {
 			var label string
-			err := setChatGPT(m, id, func(c *settings.LLM) {
+			err := setChatGPT(m, id, func(c *settings.LLM) error {
 				// The sign-in is ended once saved (applyModels).
 				c.Account, c.AccountEmail, c.AccountSubject, c.ChatGPTClient = "", "", "", ""
 				label = c.Label()
+				return nil
 			})
 			return fmt.Sprintf("signed %s (%s) out of ChatGPT", label, where), err
 		})
@@ -193,8 +213,9 @@ func orUnknown(email string) string {
 }
 
 // setChatGPT applies set to the model id of m, which must still be a
-// ChatGPT plan model.
-func setChatGPT(m *settings.Models, id string, set func(*settings.LLM)) error {
+// ChatGPT plan model. It runs under the models' lock (applyModels), so set
+// sees the model as saved.
+func setChatGPT(m *settings.Models, id string, set func(*settings.LLM) error) error {
 	for i := range m.Configs {
 		c := &m.Configs[i]
 		if c.ID != id {
@@ -203,8 +224,7 @@ func setChatGPT(m *settings.Models, id string, set func(*settings.LLM)) error {
 		if c.Provider != settings.ProviderChatGPT {
 			return errors.New("that model no longer uses the ChatGPT plan")
 		}
-		set(c)
-		return nil
+		return set(c)
 	}
 	return errors.New("that model is no longer there")
 }

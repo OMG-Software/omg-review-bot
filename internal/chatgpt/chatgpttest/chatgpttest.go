@@ -44,6 +44,8 @@ type Server struct {
 	// NoReplacement leaves the replacement refresh token out of renewals
 	// (still using up the old one).
 	NoReplacement bool
+	// OnRefresh, if set, runs as each renewal is answered.
+	OnRefresh func()
 
 	codes   map[string]grant
 	live    map[string]string // refresh token → client
@@ -187,6 +189,9 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		s.used[rt] = true
 		s.Refreshes++
 		client = c
+		if s.OnRefresh != nil {
+			s.OnRefresh()
+		}
 	default:
 		oauthErr(w, "unsupported_grant_type")
 		return

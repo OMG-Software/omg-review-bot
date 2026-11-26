@@ -183,6 +183,46 @@ func TestChatGPTUnreadableSetRemoved(t *testing.T) {
 	}
 }
 
+// TestChatGPTStaleAttempt: an attempt started before someone else signed
+// the model in (or out) can't finish over what they did: its new sign-in
+// is ended, and the model keeps theirs.
+func TestChatGPTStaleAttempt(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	oa := chatgpttest.New(t)
+	s.b.UseChatGPTAuth(oa.Client())
+	s.post("/orgs/acme/models/add", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"chatgpt"}, "model": {"gpt-b"}})
+	s.post("/orgs/acme/models/m1/chatgpt-start", url.Values{})
+	_, body, _ := s.get("/orgs/acme/models")
+	link := regexp.MustCompile(`href="(` + regexp.QuoteMeta(oa.URL) + `/authorize\?[^"]+)"`).FindStringSubmatch(body)
+	if link == nil {
+		t.Fatal("no sign-in link")
+	}
+	callback := oa.Approve(t, html.UnescapeString(link[1]))
+
+	// Meanwhile, as if another owner had signed the model in.
+	m, err := s.b.OrgModels(acmeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Configs[0].Account, m.Configs[0].ChatGPTClient = "their-sign-in", "their-client"
+	if err := s.b.SetOrgModels(acmeID, m); err != nil {
+		t.Fatal(err)
+	}
+	_, hdr := s.post("/orgs/acme/models/m1/chatgpt-finish", url.Values{"callback": {callback}})
+	if loc, _ := url.QueryUnescape(hdr.Get("Location")); !strings.Contains(loc, "changed while you were signing in") {
+		t.Errorf("finishing a stale attempt: %s", loc)
+	}
+	if m, _ := s.b.OrgModels(acmeID); m.Configs[0].Account != "their-sign-in" || m.Configs[0].ChatGPTClient != "their-client" {
+		t.Errorf("model after a stale attempt: %+v", m.Configs[0])
+	}
+	waitRevokes(t, oa, 1)
+	if keys, _ := s.st.Keys("chatgpt:sign-in:"); len(keys) != 0 {
+		t.Errorf("the stale attempt's sign-in was kept: %v", keys)
+	}
+}
+
 func waitRevokes(t *testing.T, oa *chatgpttest.Server, n int) {
 	t.Helper()
 	for range 200 {

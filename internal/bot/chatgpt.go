@@ -355,6 +355,10 @@ func (t chatgptTokens) Token(ctx context.Context, refused string) (string, error
 		// refresh token OpenAI has just used up.
 		t.b.chatgptUnsaved.Store(t.id, unsavedSignIn{set: t.set, cred: cred})
 		t.b.log.Warn("save renewed ChatGPT sign-in (kept until it saves)", "err", err)
+	} else {
+		// An earlier renewal kept unsaved is now out of date: saved later,
+		// it would put back the refresh token this one used up.
+		t.b.chatgptUnsaved.Delete(t.id)
 	}
 	if !cred.PlanUsage() {
 		return "", chatgpt.ErrNoPlanUsage

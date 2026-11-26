@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"log/slog"
@@ -392,4 +393,63 @@ func TestDropAllChatGPT(t *testing.T) {
 		t.Errorf("set 8's sign-in: %v", err)
 	}
 	waitRevoked(t, srv, 2)
+}
+
+// TestChatGPTUnsavedThenRenewed: when a renewal kept unsaved still can't be
+// saved, is renewed again, and that one saves, the older one is let go of:
+// saved later, it would put back a used-up refresh token.
+func TestChatGPTUnsavedThenRenewed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := chatgpttest.New(t)
+	b.chatgptAuth = srv.Client()
+	id, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	expire(t, b, id, 7)
+
+	// Saves of sign-ins fail, as with a full disk, until a renewal lets them.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`CREATE TRIGGER no_save BEFORE UPDATE ON kv WHEN NEW.key LIKE 'chatgpt:sign-in:%' BEGIN SELECT RAISE(ABORT, 'disk full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	ts := chatgptTokens{b: b, id: id, set: 7}
+	if _, err := ts.Token(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	x, ok := b.chatgptUnsaved.Load(id)
+	if !ok {
+		t.Fatal("the unsaved renewal wasn't kept")
+	}
+	older := x.(unsavedSignIn)
+	older.cred.Expiry = time.Now().Add(-time.Minute) // due again
+	b.chatgptUnsaved.Store(id, older)
+
+	srv.OnRefresh = func() { _, _ = db.Exec(`DROP TRIGGER no_save`) }
+	tok, err := ts.Token(context.Background(), "")
+	if err != nil || tok == older.cred.AccessToken || srv.Refreshes != 2 {
+		t.Fatalf("second renewal = %q, %v after %d renewals", tok, err, srv.Refreshes)
+	}
+	if _, ok := b.chatgptUnsaved.Load(id); ok {
+		t.Error("the older renewal is still kept unsaved")
+	}
+	if again, err := ts.Token(context.Background(), ""); err != nil || again != tok {
+		t.Errorf("next token = %q, %v, want %q", again, err, tok)
+	}
+	saved, _ := b.loadChatGPT(id, 7)
+	if saved.RefreshToken == older.cred.RefreshToken || !srv.Live(saved.RefreshToken) {
+		t.Errorf("saved refresh token %q (live %v), the older was %q", saved.RefreshToken, srv.Live(saved.RefreshToken), older.cred.RefreshToken)
+	}
+	b.DropChatGPT(id, 7)
+	if r := waitRevoked(t, srv, 1); !slices.Contains(r, saved.RefreshToken) {
+		t.Errorf("revoked %v, want the live %q", r, saved.RefreshToken)
+	}
 }
