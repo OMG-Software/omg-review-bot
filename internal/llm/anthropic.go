@@ -80,13 +80,21 @@ func (a *anthropicClient) Chat(ctx context.Context, req Request) (*Response, err
 	stream := a.client.Messages.NewStreaming(ctx, params)
 	defer stream.Close()
 	var msg anthropic.Message
+	stopped := false
 	for stream.Next() {
-		if err := msg.Accumulate(stream.Current()); err != nil {
+		ev := stream.Current()
+		if err := msg.Accumulate(ev); err != nil {
 			return nil, fmt.Errorf("read Claude's answer: %w", err)
 		}
+		stopped = stopped || ev.Type == "message_stop"
 	}
 	if err := stream.Err(); err != nil {
 		return nil, toolsRefused(req, anthropicError(err))
+	}
+	// A stream can end cleanly part-way through, with no error: what came
+	// before message_stop isn't the whole answer.
+	if !stopped {
+		return nil, errors.New("claude's answer stream ended before it was complete")
 	}
 	if msg.StopReason == anthropic.StopReasonRefusal {
 		why := string(msg.StopDetails.Category)

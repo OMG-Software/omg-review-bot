@@ -341,7 +341,7 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	body := map[string]any{
 		"model":    o.cfg.Model,
-		"messages": openAIMessages(req.Messages),
+		"messages": openAIMessages(req.Messages, o.cfg.Model),
 		"stream":   false,
 	}
 	if !o.noTemp.Load() {
@@ -375,6 +375,9 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
 				Reasoning        string `json:"reasoning"` // OpenRouter's name for it
+				// OpenRouter's reasoning as the model gave it (signed or
+				// encrypted, for some), to send back with the tool results.
+				ReasoningDetails json.RawMessage `json:"reasoning_details"`
 				ToolCalls        []struct {
 					ID       string `json:"id"`
 					Function struct {
@@ -428,7 +431,7 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 			return nil, err
 		}
 	}
-	return &Response{
+	resp := &Response{
 		Content:          c.Message.Content,
 		ToolCalls:        calls,
 		Reasoning:        c.Message.ReasoningContent,
@@ -436,12 +439,30 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 		CompletionTokens: out.Usage.CompletionTokens,
 		Truncated:        c.FinishReason == "length",
 		Duration:         time.Since(start),
-	}, nil
+	}
+	if len(calls) > 0 && hasJSONItems(c.Message.ReasoningDetails) {
+		resp.Native = openAITurn{model: o.cfg.Model, details: c.Message.ReasoningDetails}
+	}
+	return resp, nil
 }
 
-// openAIMessages encodes messages for /v1/chat/completions, with tool calls
-// and their results in OpenAI's shape.
-func openAIMessages(msgs []Message) []map[string]any {
+// openAITurn is the structured reasoning an assistant turn with tool calls
+// came with (OpenRouter's reasoning_details), sent back unchanged with the
+// tool results, but only to the model that wrote it.
+type openAITurn struct {
+	model   string
+	details json.RawMessage
+}
+
+// hasJSONItems reports whether raw is a JSON array with something in it.
+func hasJSONItems(raw json.RawMessage) bool {
+	var items []json.RawMessage
+	return json.Unmarshal(raw, &items) == nil && len(items) > 0
+}
+
+// openAIMessages encodes messages for /v1/chat/completions to model, with
+// tool calls and their results in OpenAI's shape.
+func openAIMessages(msgs []Message, model string) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		e := map[string]any{"role": m.Role, "content": m.Content}
@@ -452,7 +473,9 @@ func openAIMessages(msgs []Message) []map[string]any {
 					"function": map[string]any{"name": tc.Name, "arguments": string(argsObject(tc.Arguments))}})
 			}
 			e["tool_calls"] = tcs
-			if m.Reasoning != "" {
+			if t, ok := m.Native.(openAITurn); ok && t.model == model {
+				e["reasoning_details"] = t.details
+			} else if m.Reasoning != "" {
 				e["reasoning_content"] = m.Reasoning
 			}
 		}

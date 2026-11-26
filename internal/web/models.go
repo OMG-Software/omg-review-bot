@@ -225,9 +225,9 @@ func (s *Server) applyModels(r *http.Request, sc modelScope, change func(*settin
 	mu := s.modelsLock(sc)
 	mu.Lock()
 	defer mu.Unlock()
-	m, err := s.loadModels(sc)
-	if err != nil && sc.org != nil && r.PathValue("action") != "delete" {
-		return "", err
+	m, loadErr := s.loadModels(sc)
+	if loadErr != nil && sc.org != nil && r.PathValue("action") != "delete" {
+		return "", loadErr
 	}
 	before := settings.Models{Configs: slices.Clone(m.Configs)}
 	msg, err := change(&m)
@@ -237,7 +237,13 @@ func (s *Server) applyModels(r *http.Request, sc modelScope, change func(*settin
 	if err != nil {
 		return "", err
 	}
-	s.bot.ForgetChatGPT(sc.set(), before, m)
+	if loadErr != nil {
+		// An unreadable set was removed: which sign-ins its models named
+		// can't be told, so all of the set's go.
+		s.bot.DropAllChatGPT(sc.set())
+	} else {
+		s.bot.ForgetChatGPT(sc.set(), before, m)
+	}
 	s.logModels(sc, r, msg)
 	return msg, nil
 }

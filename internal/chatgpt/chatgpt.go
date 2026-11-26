@@ -72,6 +72,9 @@ var (
 	// ErrSignInEnded: the refresh token can't be used any more (expired,
 	// revoked or replaced): the account has to be signed in again.
 	ErrSignInEnded = errors.New("the ChatGPT sign-in has expired or was revoked: sign in again on the Models page")
+	// ErrOtherAccount: a returning client's sign-in came back for another
+	// account than the one it was registered for.
+	ErrOtherAccount = errors.New("that's another ChatGPT account than the one the model was signed in with")
 )
 
 // Client talks to OpenAI's sign-in endpoints.
@@ -110,7 +113,10 @@ type Attempt struct {
 	// it in again; "" registers a new one.
 	ClientID  string
 	LoginHint string // the account's email, to sign the same one in again
-	HostID    string // this bot's host ID (see NewHostID)
+	// Subject is the account (the ID token's sub) ClientID was registered
+	// for: a sign-in for any other is refused. "" checks nothing.
+	Subject string
+	HostID  string // this bot's host ID (see NewHostID)
 	// Consent asks for consent again: the plan's use was declined last time.
 	Consent bool
 	Created time.Time
@@ -226,7 +232,8 @@ func (c Credentials) PlanUsage() bool { return slices.Contains(c.Scopes, PlanSco
 
 // Finish checks the callback against its attempt, exchanges the code and
 // checks the ID token. The credentials are returned with ErrNoPlanUsage if
-// the plan's use wasn't granted.
+// the plan's use wasn't granted, or ErrOtherAccount if they're for another
+// account than a.Subject: either way, the caller should revoke them.
 func (c *Client) Finish(ctx context.Context, a Attempt, cb Callback) (Credentials, error) {
 	if cb.State != a.State {
 		return Credentials{}, errors.New("that address is from another sign-in: start again")
@@ -266,6 +273,11 @@ func (c *Client) Finish(ctx context.Context, a Attempt, cb Callback) (Credential
 	if cred.RefreshToken == "" {
 		return Credentials{}, errors.New("the ChatGPT sign-in returned no refresh token, so it couldn't be renewed: start again")
 	}
+	// A client is registered for one account: signing that client in again
+	// must sign the same account in, not replace it with another.
+	if a.Subject != "" && cred.Subject != a.Subject {
+		return cred, ErrOtherAccount
+	}
 	if !cred.PlanUsage() {
 		return cred, ErrNoPlanUsage
 	}
@@ -275,6 +287,10 @@ func (c *Client) Finish(ctx context.Context, a Attempt, cb Callback) (Credential
 // Refresh renews cred's access token. Each renewal replaces the refresh
 // token too, so the caller must keep the new cred (and never refresh one
 // session twice at once).
+//
+// A renewal that comes back without the replacement has still used up the
+// old refresh token, so cred is left with none: its new access token works
+// until it expires, and then the sign-in has ended.
 func (c *Client) Refresh(ctx context.Context, cred *Credentials) error {
 	tr, err := c.token(ctx, url.Values{
 		"grant_type":    {"refresh_token"},
@@ -290,7 +306,20 @@ func (c *Client) Refresh(ctx context.Context, cred *Credentials) error {
 		return fmt.Errorf("couldn't renew the ChatGPT sign-in: %w", err)
 	}
 	c.apply(cred, tr)
+	if tr.RefreshToken == "" {
+		cred.RefreshToken = ""
+	}
 	return nil
+}
+
+// Temporary reports whether a failed call to OpenAI's sign-in may work if
+// tried again: the network or OpenAI failed, rather than the request.
+func Temporary(err error) bool {
+	var oe *OAuthError
+	if !errors.As(err, &oe) {
+		return !errors.Is(err, context.Canceled)
+	}
+	return oe.Status >= 500 || oe.Status == http.StatusTooManyRequests
 }
 
 // Revoke ends cred's renewable session at OpenAI.

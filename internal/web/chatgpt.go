@@ -13,7 +13,8 @@ import (
 
 // A ChatGPT plan model (settings.ProviderChatGPT) is signed in from its card
 // on the models page. "Sign in with ChatGPT" starts an attempt, kept here
-// (it holds the PKCE verifier, which never leaves the server), and shows
+// (it holds the PKCE verifier, which goes only to OpenAI's token endpoint,
+// never through the browser), and shows
 // the link that opens OpenAI's sign-in. The sign-in ends on a 127.0.0.1
 // page, which the browser can't load unless the bot runs on the same
 // computer, so the person pastes that page's address back, and the bot
@@ -106,26 +107,39 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 			fail(err) // the attempt stays: paste the right address
 			return
 		}
-		x, ok := s.signIns.LoadAndDelete(key) // used once
+		gone := fmt.Errorf("that sign-in has expired (they last %d minutes) or was already finished: start again", int(signInTTL/time.Minute))
+		x, ok := s.signIns.Load(key)
 		if !ok || time.Now().After(x.(pendingSignIn).expires) {
-			fail(fmt.Errorf("that sign-in has expired (they last %d minutes) or was already finished: start again", int(signInTTL/time.Minute)))
+			fail(gone)
 			return
 		}
 		p := x.(pendingSignIn)
 		if cb.State != p.attempt.State {
-			s.signIns.Store(key, p) // still waiting for its own address
+			// Left waiting for its own address.
 			fail(errors.New("that address is from another sign-in: paste the address the latest one ended on, or start again"))
+			return
+		}
+		// Used once: only if it's still the attempt just read, not one
+		// finished or started again meanwhile.
+		if !s.signIns.CompareAndDelete(key, x) {
+			fail(gone)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 		defer cancel()
 		acct, who, err := s.bot.FinishChatGPT(ctx, sc.set(), p.attempt, cb)
-		if errors.Is(err, chatgpt.ErrNoPlanUsage) {
+		switch {
+		case errors.Is(err, chatgpt.ErrNoPlanUsage):
 			// Kept: the next sign-in asks for the plan's use again.
 			_, _ = s.applyModels(r, sc, func(m *settings.Models) (string, error) {
 				return "kept the ChatGPT app registration of a sign-in that didn't allow the plan's use",
-					setChatGPT(m, id, func(c *settings.LLM) { c.ChatGPTClient, c.AccountEmail = who.ClientID, who.Email })
+					setChatGPT(m, id, func(c *settings.LLM) {
+						c.ChatGPTClient, c.AccountEmail, c.AccountSubject = who.ClientID, who.Email, who.Subject
+					})
 			})
+		case errors.Is(err, chatgpt.ErrOtherAccount):
+			err = fmt.Errorf("you signed in as %s, which isn't the ChatGPT account this model uses (%s), so the model keeps its sign-in: to use another account, sign the model out first",
+				orUnknown(who.Email), orUnknown(p.attempt.LoginHint))
 		}
 		if err != nil {
 			fail(err)
@@ -169,6 +183,13 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 	default:
 		s.notFound(w, r)
 	}
+}
+
+func orUnknown(email string) string {
+	if email == "" {
+		return "an account with no email"
+	}
+	return email
 }
 
 // setChatGPT applies set to the model id of m, which must still be a

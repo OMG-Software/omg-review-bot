@@ -159,6 +159,7 @@ func TestResponsesRenewsToken(t *testing.T) {
 // server that stores nothing couldn't look up, before its output.
 func TestResponsesToolTurn(t *testing.T) {
 	srv, got := planServer(t, "", completed(
+		`{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"enc-1"}`,
 		`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"repo.read_file","arguments":"{\"path\":\"a.go\"}","status":"completed"}`),
 		completed(planText))
 	c := plan(t, srv, &tokens{})
@@ -170,10 +171,14 @@ func TestResponsesToolTurn(t *testing.T) {
 	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "call_1" || resp.ToolCalls[0].Name != "read_file" || resp.ToolCalls[0].Arguments != `{"path":"a.go"}` {
 		t.Fatalf("tool calls = %+v", resp.ToolCalls)
 	}
-	tools, _ := (<-got).body["tools"].([]any)
+	first := (<-got).body
+	tools, _ := first["tools"].([]any)
 	ns, _ := tools[0].(map[string]any)
 	if len(tools) != 1 || ns["type"] != "namespace" || ns["name"] != toolNamespace || len(ns["tools"].([]any)) != 1 {
 		t.Errorf("tools = %v", tools)
+	}
+	if inc, _ := first["include"].([]any); len(inc) != 1 || inc[0] != "reasoning.encrypted_content" {
+		t.Errorf("include = %v, want the encrypted reasoning", first["include"])
 	}
 
 	turn := append(msgs, Message{Role: "assistant", ToolCalls: resp.ToolCalls, Native: resp.Native},
@@ -182,15 +187,65 @@ func TestResponsesToolTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := (<-got).body["input"].([]any)
-	if len(in) != 3 {
+	if len(in) != 4 {
 		t.Fatalf("input = %v", in)
 	}
-	call, out := in[1].(map[string]any), in[2].(map[string]any)
+	// The reasoning goes back ahead of the call it led to, as it came.
+	rs, call, out := in[1].(map[string]any), in[2].(map[string]any), in[3].(map[string]any)
+	if rs["type"] != "reasoning" || rs["encrypted_content"] != "enc-1" || rs["id"] != nil {
+		t.Errorf("reasoning sent back = %v", rs)
+	}
 	if call["type"] != "function_call" || call["call_id"] != "call_1" || call["name"] != "repo.read_file" || call["id"] != nil {
 		t.Errorf("call sent back = %v", call)
 	}
 	if out["type"] != "function_call_output" || out["call_id"] != "call_1" || out["output"] != "package a" {
 		t.Errorf("output = %v", out)
+	}
+
+	// Another model (a failover) gets the call, not this one's reasoning.
+	other, got2 := planServer(t, "", completed(planText))
+	c2, _ := New(Config{Provider: "chatgpt", BaseURL: other.URL + "/v1", Model: "gpt-c", Tokens: &tokens{}})
+	if _, err := c2.Chat(context.Background(), Request{Messages: turn, Tools: []Tool{readTool}}); err != nil {
+		t.Fatal(err)
+	}
+	in = (<-got2).body["input"].([]any)
+	if len(in) != 3 || in[1].(map[string]any)["type"] != "function_call" {
+		t.Errorf("input to another model = %v", in)
+	}
+}
+
+// TestResponsesIncompleteCall: a call cut off at the output cap isn't run
+// or sent back; with no other call, the answer is cut off.
+func TestResponsesIncompleteCall(t *testing.T) {
+	trunc := "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[" +
+		`{"type":"function_call","call_id":"call_1","name":"repo.read_file","arguments":"{\"path\":\"a","status":"incomplete"}` + "]}}\n\n"
+	srv, _ := planServer(t, "", trunc)
+	resp, err := plan(t, srv, &tokens{}).Chat(context.Background(), Request{Messages: []Message{{Role: "user", Content: "Hi"}}, Tools: []Tool{readTool}})
+	if err != nil || len(resp.ToolCalls) != 0 || !resp.Truncated || resp.Native != nil {
+		t.Errorf("incomplete call = %+v, %v", resp, err)
+	}
+}
+
+// TestResponsesNoEncryptedReasoning: a model that won't give its reasoning
+// encrypted is asked again without, and isn't asked for it again.
+func TestResponsesNoEncryptedReasoning(t *testing.T) {
+	srv, got := planServer(t, "",
+		apiError{400, `{"error":{"message":"Encrypted content is not supported with this model.","type":"invalid_request_error","param":"include"}}`},
+		completed(planText))
+	c := plan(t, srv, &tokens{})
+	hi := Request{Messages: []Message{{Role: "user", Content: "Hi"}}}
+	if _, err := c.Chat(context.Background(), hi); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	if _, ok := (<-got).body["include"]; ok {
+		t.Error("asked again for the encrypted reasoning")
+	}
+	if _, err := c.Chat(context.Background(), hi); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := (<-got).body["include"]; ok {
+		t.Error("asked for the encrypted reasoning after the model refused it")
 	}
 }
 

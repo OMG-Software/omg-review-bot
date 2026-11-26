@@ -39,6 +39,11 @@ type Server struct {
 	ExpiresIn int
 	// Nonce, if set, replaces the sign-in's nonce in the ID token.
 	Nonce string
+	// FailRevokes is how many revocations to come fail with a 503.
+	FailRevokes int
+	// NoReplacement leaves the replacement refresh token out of renewals
+	// (still using up the old one).
+	NoReplacement bool
 
 	codes   map[string]grant
 	live    map[string]string // refresh token → client
@@ -194,6 +199,10 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	if nonce != "" {
 		out["id_token"] = s.idToken(client, nonce)
 	}
+	if s.NoReplacement && f.Get("grant_type") == "refresh_token" {
+		delete(s.live, rt)
+		delete(out, "refresh_token")
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
@@ -217,7 +226,19 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tok := r.PostForm.Get("token")
+	if s.FailRevokes > 0 {
+		s.FailRevokes--
+		http.Error(w, `{"error":"server_error"}`, http.StatusServiceUnavailable)
+		return
+	}
+	f := r.PostForm
+	tok := f.Get("token")
+	// A live token is revoked only by its own client, named as a refresh
+	// token; one already invalid is answered 200 all the same.
+	if client, ok := s.live[tok]; ok && (f.Get("client_id") != client || f.Get("token_type_hint") != "refresh_token") {
+		oauthErr(w, "invalid_request")
+		return
+	}
 	s.revoked = append(s.revoked, tok)
 	delete(s.live, tok)
 	w.WriteHeader(http.StatusOK)

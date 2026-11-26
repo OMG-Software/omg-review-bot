@@ -236,11 +236,15 @@ func TestAnthropicToolTurn(t *testing.T) {
 // tries the next model); a 4xx about tools is ErrToolsUnsupported; other
 // errors say what the API said.
 func TestAnthropicRefusalsAndErrors(t *testing.T) {
+	// A stream that ends cleanly after some text, before message_stop.
+	cut := claudeAnswer("end_turn", nil, obj{"type": "text", "text": "Half an ans"})
+	cut = cut[:len(cut)-3]
 	srv, _ := claudeServer(t,
 		claudeAnswer("refusal", obj{"type": "refusal", "category": "cyber", "explanation": "Not this."}),
 		apiError{400, `{"type":"error","error":{"type":"invalid_request_error","message":"tools.0.input_schema: invalid"}}`},
 		apiError{401, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`},
-		claudeAnswer("max_tokens", nil, obj{"type": "thinking", "thinking": "Hmm", "signature": "s"}))
+		claudeAnswer("max_tokens", nil, obj{"type": "thinking", "thinking": "Hmm", "signature": "s"}),
+		cut)
 	c := claude(t, srv, "k")
 	hi := Request{Messages: []Message{{Role: "user", Content: "Hi"}}}
 	if _, err := c.Chat(context.Background(), hi); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "cyber") {
@@ -256,6 +260,9 @@ func TestAnthropicRefusalsAndErrors(t *testing.T) {
 	}
 	if _, err := c.Chat(context.Background(), Request{Messages: hi.Messages, MaxTokens: 600}); err == nil || !strings.Contains(err.Error(), "reasoning") {
 		t.Errorf("all thinking, cut off = %v, want the reasoning-exhausted error", err)
+	}
+	if resp, err := c.Chat(context.Background(), hi); err == nil || !strings.Contains(err.Error(), "ended before it was complete") {
+		t.Errorf("stream ended early = %+v, %v", resp, err)
 	}
 }
 

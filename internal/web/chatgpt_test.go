@@ -96,6 +96,18 @@ func TestChatGPTSignInFlow(t *testing.T) {
 		t.Error("the sign-in isn't in the organization's activity")
 	}
 
+	// Signing in again with another account is refused: the model keeps its
+	// sign-in, and the other one is ended.
+	oa.Subject, oa.Email = "user-999", "other@example.com"
+	if loc := finish(oa.Approve(t, start())); !strings.Contains(loc, "isn't the ChatGPT account this model uses (dev@example.com)") {
+		t.Errorf("signing in another account: %s", loc)
+	}
+	if again := model(); again.Account != c.Account || again.AccountSubject != "user-123" {
+		t.Errorf("after signing in another account: %+v", again)
+	}
+	waitRevokes(t, oa, 1)
+	oa.Subject, oa.Email = "user-123", "dev@example.com"
+
 	// Signing in again replaces the sign-in, and ends the old one.
 	first := c.Account
 	if loc := finish(oa.Approve(t, start())); strings.Contains(loc, "err=") {
@@ -104,7 +116,7 @@ func TestChatGPTSignInFlow(t *testing.T) {
 	if again := model(); again.Account == first || !again.SignedIn() {
 		t.Errorf("after signing in again: %+v", again)
 	}
-	waitRevokes(t, oa, 1)
+	waitRevokes(t, oa, 2)
 
 	// Changing the provider drops the sign-in.
 	s.post("/orgs/acme/models/m1/update", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"openai-api"},
@@ -112,7 +124,7 @@ func TestChatGPTSignInFlow(t *testing.T) {
 	if c := model(); c.SignedIn() || c.Provider != settings.ProviderOpenAI || c.ChatGPTClient != "" {
 		t.Errorf("after changing provider: %+v", c)
 	}
-	waitRevokes(t, oa, 2)
+	waitRevokes(t, oa, 3)
 
 	// And back, signed in, then out.
 	s.post("/orgs/acme/models/m1/update", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"chatgpt"}, "model": {"gpt-b"}})
@@ -126,7 +138,7 @@ func TestChatGPTSignInFlow(t *testing.T) {
 	if c := model(); c.SignedIn() || c.AccountEmail != "" {
 		t.Errorf("after signing out: %+v", c)
 	}
-	waitRevokes(t, oa, 3)
+	waitRevokes(t, oa, 4)
 
 	// A model of another provider can't be signed in.
 	s.post("/orgs/acme/models/m1/update", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"openai-api"},
@@ -136,6 +148,38 @@ func TestChatGPTSignInFlow(t *testing.T) {
 	}
 	if code, _ := s.post("/orgs/other/models/m1/chatgpt-start", url.Values{}); code == http.StatusSeeOther {
 		t.Error("a sign-in was started in an organization alice doesn't own")
+	}
+}
+
+// TestChatGPTUnreadableSetRemoved: removing an organization's models that
+// can't be read still ends the ChatGPT sign-ins they named.
+func TestChatGPTUnreadableSetRemoved(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	oa := chatgpttest.New(t)
+	s.b.UseChatGPTAuth(oa.Client())
+	s.post("/orgs/acme/models/add", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"chatgpt"}, "model": {"gpt-b"}})
+	s.post("/orgs/acme/models/m1/chatgpt-start", url.Values{})
+	_, body, _ := s.get("/orgs/acme/models")
+	link := regexp.MustCompile(`href="(` + regexp.QuoteMeta(oa.URL) + `/authorize\?[^"]+)"`).FindStringSubmatch(body)
+	if link == nil {
+		t.Fatal("no sign-in link")
+	}
+	s.post("/orgs/acme/models/m1/chatgpt-finish", url.Values{"callback": {oa.Approve(t, html.UnescapeString(link[1]))}})
+	if m, err := s.b.OrgModels(acmeID); err != nil || !m.Configs[0].SignedIn() {
+		t.Fatalf("not signed in: %+v, %v", m, err)
+	}
+
+	if err := s.st.SetOrgModels(acmeID, "v1:garbage"); err != nil {
+		t.Fatal(err)
+	}
+	if _, hdr := s.post("/orgs/acme/models/x/delete", url.Values{"all": {"1"}}); strings.Contains(hdr.Get("Location"), "err=") {
+		t.Fatalf("removing the unreadable models: %s", hdr.Get("Location"))
+	}
+	waitRevokes(t, oa, 1)
+	if keys, _ := s.st.Keys("chatgpt:sign-in:"); len(keys) != 0 {
+		t.Errorf("sign-ins left: %v", keys)
 	}
 }
 

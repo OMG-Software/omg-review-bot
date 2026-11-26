@@ -78,7 +78,7 @@ func TestChatGPTSignInSealed(t *testing.T) {
 	if who.Email != "dev@example.com" || who.ClientID != "client-abc" || who.AccessToken != "" || who.RefreshToken != "" || who.IDToken != "" {
 		t.Errorf("FinishChatGPT returned %+v, want who signed in without tokens", who)
 	}
-	raw, ok, _ := st.Get(chatgptKey(id))
+	raw, ok, _ := st.Get(chatgptKey(id, 7))
 	if !ok || !strings.HasPrefix(raw, "v1:") || strings.Contains(raw, "rt-") || strings.Contains(raw, "dev@example.com") {
 		t.Errorf("sign-in stored as %q, want sealed", raw)
 	}
@@ -90,6 +90,11 @@ func TestChatGPTSignInSealed(t *testing.T) {
 		if _, err := b.loadChatGPT(id, other); err == nil {
 			t.Errorf("set %d opened set 7's sign-in", other)
 		}
+	}
+	// Even put among set 8's, it only opens for set 7.
+	_ = st.Set(chatgptKey(id, 8), raw)
+	if _, err := b.loadChatGPT(id, 8); !errors.Is(err, errUnreadable) {
+		t.Errorf("set 7's sign-in under set 8 = %v", err)
 	}
 	host := srv.LastAuthorize.Get("ext_agent_host_id")
 	if _, u, _ := b.StartChatGPT(settings.LLM{}); !strings.Contains(u, url.QueryEscape(host)) || !strings.HasPrefix(host, "urn:uuid:") {
@@ -202,7 +207,7 @@ func TestForgetChatGPT(t *testing.T) {
 	before := settings.Models{Configs: []settings.LLM{{ID: "m1", Account: a1}, {ID: "m2", Account: a2}}}
 	after := settings.Models{Configs: []settings.LLM{{ID: "m2", Account: a2}}}
 	b.ForgetChatGPT(7, before, after)
-	if _, ok, _ := st.Get(chatgptKey(a1)); ok {
+	if _, ok, _ := st.Get(chatgptKey(a1, 7)); ok {
 		t.Error("the removed model's sign-in is still stored")
 	}
 	if _, err := b.loadChatGPT(a2, 7); err != nil {
@@ -221,8 +226,17 @@ func TestChatGPTModel(t *testing.T) {
 	first, _ := b.loadChatGPT(id, 7)
 	var calls atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The first token is refused, as if it had been ended early.
-		if calls.Add(1) == 1 || r.Header.Get("Authorization") == "Bearer "+first.AccessToken {
+		auth := r.Header.Get("Authorization")
+		if calls.Add(1) == 1 {
+			// The sign-in's token is refused, as if it had been ended early.
+			if auth != "Bearer "+first.AccessToken {
+				t.Errorf("first request's token = %q, want the sign-in's", auth)
+			}
+			http.Error(w, `{"error":{"code":"invalid_token"}}`, http.StatusUnauthorized)
+			return
+		}
+		if cur, _ := b.loadChatGPT(id, 7); auth != "Bearer "+cur.AccessToken || cur.AccessToken == first.AccessToken {
+			t.Errorf("retry's token = %q, want the renewed one", auth)
 			http.Error(w, `{"error":{"code":"invalid_token"}}`, http.StatusUnauthorized)
 			return
 		}
@@ -239,11 +253,143 @@ func TestChatGPTModel(t *testing.T) {
 	if err != nil || !strings.Contains(msg, `replied "OK"`) || srv.Refreshes != 1 {
 		t.Errorf("test = %q, %v after %d renewals", msg, err, srv.Refreshes)
 	}
-	if _, err := b.TestModel(context.Background(), cfg, 8); err == nil || !strings.Contains(err.Error(), "can't be read") {
+	if _, err := b.TestModel(context.Background(), cfg, 8); err == nil || !strings.Contains(err.Error(), "sign-in is gone") {
 		t.Errorf("another set's model using the sign-in = %v", err)
 	}
 	cfg.Account = ""
 	if _, err := b.TestModel(context.Background(), cfg, 7); err == nil || !strings.Contains(err.Error(), "isn't signed in") {
 		t.Errorf("a model with no sign-in = %v", err)
 	}
+}
+
+// TestChatGPTPlanScopeDropped: a renewal that comes back without the plan's
+// use is saved (so signing out ends the live refresh token), and its
+// access token isn't used then or after.
+func TestChatGPTPlanScopeDropped(t *testing.T) {
+	b, _, srv := chatgptBot(t)
+	id, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	srv.Scopes = "openid profile email offline_access"
+	expire(t, b, id, 7)
+	ts := chatgptTokens{b: b, id: id, set: 7}
+	for i := range 2 {
+		if tok, err := ts.Token(context.Background(), ""); !errors.Is(err, chatgpt.ErrNoPlanUsage) || tok != "" {
+			t.Errorf("call %d: %q, %v", i, tok, err)
+		}
+	}
+	if cred, _ := b.loadChatGPT(id, 7); srv.Refreshes != 1 || !srv.Live(cred.RefreshToken) {
+		t.Errorf("%d renewals; saved refresh token live: %v", srv.Refreshes, srv.Live(cred.RefreshToken))
+	}
+}
+
+// TestChatGPTNoReplacement: a renewal without the replacement refresh token
+// gives its access token, but the used-up refresh token isn't kept or sent
+// again: once that token expires, the sign-in has ended.
+func TestChatGPTNoReplacement(t *testing.T) {
+	b, _, srv := chatgptBot(t)
+	id, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	srv.NoReplacement = true
+	expire(t, b, id, 7)
+	ts := chatgptTokens{b: b, id: id, set: 7}
+	if tok, err := ts.Token(context.Background(), ""); err != nil || tok == "" {
+		t.Fatalf("renewal = %q, %v", tok, err)
+	}
+	if cred, _ := b.loadChatGPT(id, 7); cred.RefreshToken != "" {
+		t.Errorf("kept refresh token %q", cred.RefreshToken)
+	}
+	expire(t, b, id, 7)
+	if _, err := ts.Token(context.Background(), ""); !errors.Is(err, chatgpt.ErrSignInEnded) || srv.Refreshes != 1 {
+		t.Errorf("after expiry = %v, %d renewals", err, srv.Refreshes)
+	}
+}
+
+// TestChatGPTUnsavedRenewal: a renewal that couldn't be saved is used (and
+// saved) by the next call, and is the one signing out ends at OpenAI.
+func TestChatGPTUnsavedRenewal(t *testing.T) {
+	b, _, srv := chatgptBot(t)
+	id, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	renew := func() chatgpt.Credentials {
+		t.Helper()
+		cred, _ := b.loadChatGPT(id, 7)
+		if err := srv.Client().Refresh(context.Background(), &cred); err != nil {
+			t.Fatal(err)
+		}
+		b.chatgptUnsaved.Store(id, unsavedSignIn{set: 7, cred: cred}) // as when the save fails
+		return cred
+	}
+	cred := renew()
+	if _, err := (chatgptTokens{b: b, id: id, set: 8}).Token(context.Background(), ""); !errors.Is(err, errUnreadable) {
+		t.Errorf("another set's call = %v", err)
+	}
+	if tok, err := (chatgptTokens{b: b, id: id, set: 7}).Token(context.Background(), ""); err != nil || tok != cred.AccessToken {
+		t.Errorf("token = %q, %v, want the unsaved renewal's", tok, err)
+	}
+	if saved, _ := b.loadChatGPT(id, 7); saved.RefreshToken != cred.RefreshToken {
+		t.Errorf("saved refresh token %q, want %q", saved.RefreshToken, cred.RefreshToken)
+	}
+	if _, ok := b.chatgptUnsaved.Load(id); ok {
+		t.Error("still kept unsaved after saving")
+	}
+
+	cred = renew()
+	b.DropChatGPT(id, 7)
+	if r := waitRevoked(t, srv, 1); !slices.Contains(r, cred.RefreshToken) || srv.Live(cred.RefreshToken) {
+		t.Errorf("revoked %v, want the unsaved %q", r, cred.RefreshToken)
+	}
+}
+
+// TestChatGPTOtherAccount: signing a model's client in again with another
+// account is refused and that sign-in ended.
+func TestChatGPTOtherAccount(t *testing.T) {
+	b, _, srv := chatgptBot(t)
+	_, who := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	srv.Subject = "user-999"
+	cur := settings.LLM{Account: "x", ChatGPTClient: who.ClientID, AccountEmail: who.Email, AccountSubject: who.Subject}
+	a, u, _ := b.StartChatGPT(cur)
+	cb, _ := chatgpt.ParseCallback(srv.Approve(t, u))
+	if id, got, err := b.FinishChatGPT(context.Background(), 7, a, cb); !errors.Is(err, chatgpt.ErrOtherAccount) || id != "" || got.Subject != "user-999" {
+		t.Errorf("FinishChatGPT = %q, %+v, %v", id, got, err)
+	}
+	waitRevoked(t, srv, 1)
+}
+
+// TestChatGPTRevokeRetried: a revocation OpenAI fails is tried again; one
+// never confirmed is said in the set's activity.
+func TestChatGPTRevokeRetried(t *testing.T) {
+	b, st, srv := chatgptBot(t)
+	b.chatgptRetry = []time.Duration{time.Millisecond, time.Millisecond}
+	id, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	srv.FailRevokes = 2
+	b.DropChatGPT(id, 7)
+	waitRevoked(t, srv, 1)
+
+	id, _ = signInChatGPT(t, b, srv, 7, settings.LLM{})
+	srv.FailRevokes = 3
+	b.DropChatGPT(id, 7)
+	for range 200 {
+		acts, _ := st.RecentActivity(7, 10, "", 0)
+		if len(acts) > 0 {
+			if !strings.Contains(acts[0].Message, "didn't confirm") || !strings.Contains(acts[0].Message, "dev@example.com") {
+				t.Errorf("activity = %q", acts[0].Message)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("an unconfirmed revocation isn't in the set's activity")
+}
+
+// TestDropAllChatGPT: every sign-in of a set is dropped, and no other set's.
+func TestDropAllChatGPT(t *testing.T) {
+	b, st, srv := chatgptBot(t)
+	signInChatGPT(t, b, srv, 7, settings.LLM{})
+	signInChatGPT(t, b, srv, 7, settings.LLM{})
+	kept, _ := signInChatGPT(t, b, srv, 8, settings.LLM{})
+	b.DropAllChatGPT(7)
+	if keys, _ := st.Keys(chatgptKeys(7)); len(keys) != 0 {
+		t.Errorf("set 7's sign-ins left: %v", keys)
+	}
+	if _, err := b.loadChatGPT(kept, 8); err != nil {
+		t.Errorf("set 8's sign-in: %v", err)
+	}
+	waitRevoked(t, srv, 2)
 }

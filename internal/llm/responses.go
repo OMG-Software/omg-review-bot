@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/textutil"
@@ -29,20 +31,36 @@ type responses struct {
 	cfg  Config
 	base string
 	hc   *http.Client
+	// noEncrypted: the model refused to give its reasoning encrypted, so
+	// it isn't asked to again.
+	noEncrypted atomic.Bool
 }
 
 // toolNamespace is the namespace the repository tools are offered in.
 const toolNamespace = "repo"
 
-// responsesTurn is an assistant turn's tool calls as the server sent them,
-// sent back as they came (see Message.Native).
-type responsesTurn struct{ calls []json.RawMessage }
+// responsesTurn is an assistant turn with tool calls as the server sent it:
+// its output items (reasoning, text and calls), in order, sent back as
+// they came to the model that wrote them (see Message.Native).
+type responsesTurn struct {
+	model string
+	items []json.RawMessage
+}
+
+// encryptedWords are how a server names the encrypted reasoning when it
+// refuses to give it.
+var encryptedWords = regexp.MustCompile(`(?i)encrypted|\binclude\b`)
+
+func encryptedRefused(err error) bool {
+	var he *httpError
+	return errors.As(err, &he) && he.status == http.StatusBadRequest && encryptedWords.MatchString(he.body)
+}
 
 func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 	if c.cfg.Model == "" {
 		return nil, errors.New("no model selected")
 	}
-	instructions, input := responsesInput(req.Messages)
+	instructions, input := responsesInput(req.Messages, c.cfg.Model)
 	body := map[string]any{
 		"model":  c.cfg.Model,
 		"input":  input,
@@ -51,6 +69,12 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	if instructions != "" {
 		body["instructions"] = instructions
+	}
+	if !c.noEncrypted.Load() {
+		// With nothing stored at OpenAI, a reasoning model's reasoning only
+		// carries on to the next turn of a tool conversation if it's sent
+		// back, which takes it encrypted.
+		body["include"] = []string{"reasoning.encrypted_content"}
 	}
 	if len(req.Tools) > 0 {
 		body["tools"] = []any{responsesNamespace(req.Tools)}
@@ -66,15 +90,22 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	start := time.Now()
 	res, err := c.stream(ctx, body)
+	if _, asked := body["include"]; asked && encryptedRefused(err) {
+		c.noEncrypted.Store(true)
+		delete(body, "include")
+		res, err = c.stream(ctx, body)
+	}
 	if err != nil {
 		return nil, toolsRefused(req, err)
 	}
 	var text, refusal, reasoning strings.Builder
 	var calls []ToolCall
-	var turn responsesTurn
+	turn := responsesTurn{model: c.cfg.Model}
+	truncated := false
 	for _, raw := range res.Output {
 		var it struct {
 			Type      string          `json:"type"`
+			Status    string          `json:"status"`
 			CallID    string          `json:"call_id"`
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
@@ -86,6 +117,7 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 			Summary []struct {
 				Text string `json:"text"`
 			} `json:"summary"`
+			Encrypted string `json:"encrypted_content"`
 		}
 		if json.Unmarshal(raw, &it) != nil {
 			continue
@@ -100,20 +132,29 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 					refusal.WriteString(p.Refusal)
 				}
 			}
+			turn.items = append(turn.items, withoutID(raw))
 		case "function_call":
+			if it.Status != "" && it.Status != "completed" {
+				// Cut off while its arguments were being written: not run,
+				// and not sent back.
+				truncated = true
+				continue
+			}
 			id := it.CallID
 			if id == "" {
 				id = fmt.Sprintf("call_%d", len(calls))
 			}
 			calls = append(calls, ToolCall{ID: id, Name: bareToolName(it.Name), Arguments: rawArgs(it.Arguments)})
-			turn.calls = append(turn.calls, withoutID(raw))
+			turn.items = append(turn.items, withoutID(raw))
 		case "reasoning":
 			for _, s := range it.Summary {
 				reasoning.WriteString(s.Text)
 			}
+			if it.Encrypted != "" { // without it, there's nothing to send back
+				turn.items = append(turn.items, withoutID(raw))
+			}
 		}
 	}
-	truncated := false
 	if res.Status == "incomplete" && res.IncompleteDetails != nil {
 		switch res.IncompleteDetails.Reason {
 		case "max_output_tokens":
@@ -134,15 +175,15 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 		Truncated:        truncated,
 		Duration:         time.Since(start),
 	}
-	if len(turn.calls) > 0 {
+	if len(calls) > 0 {
 		out.Native = turn
 	}
 	return out, nil
 }
 
 // responsesInput splits messages into the instructions (the system prompt:
-// system messages are refused in the input) and the input items.
-func responsesInput(msgs []Message) (string, []any) {
+// system messages are refused in the input) and the input items for model.
+func responsesInput(msgs []Message, model string) (string, []any) {
 	var system []string
 	in := make([]any, 0, len(msgs))
 	for _, m := range msgs {
@@ -152,14 +193,16 @@ func responsesInput(msgs []Message) (string, []any) {
 		case "tool":
 			in = append(in, map[string]any{"type": "function_call_output", "call_id": m.ToolCallID, "output": m.Content})
 		case "assistant":
-			if strings.TrimSpace(m.Content) != "" {
-				in = append(in, map[string]any{"role": "assistant", "content": m.Content})
-			}
-			if t, ok := m.Native.(responsesTurn); ok {
-				for _, c := range t.calls {
-					in = append(in, c)
+			// The model's own turn goes back as it came, its reasoning
+			// with it; another model gets just the text and the calls.
+			if t, ok := m.Native.(responsesTurn); ok && t.model == model {
+				for _, it := range t.items {
+					in = append(in, it)
 				}
 				continue
+			}
+			if strings.TrimSpace(m.Content) != "" {
+				in = append(in, map[string]any{"role": "assistant", "content": m.Content})
 			}
 			for _, tc := range m.ToolCalls {
 				in = append(in, map[string]any{"type": "function_call", "call_id": tc.ID, "name": tc.Name, "arguments": string(argsObject(tc.Arguments))})

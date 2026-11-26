@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +25,25 @@ import (
 // takes to tell the bot's installations apart.
 const chatgptHostKey = "chatgpt:host-id"
 
-func chatgptKey(id string) string { return "chatgpt:sign-in:" + id }
+// chatgptKeys starts the keys of set's sign-ins, each followed by its ID:
+// so a set's sign-ins can be found without its models.
+func chatgptKeys(set int64) string { return "chatgpt:sign-in:" + strconv.FormatInt(set, 10) + ":" }
+
+func chatgptKey(id string, set int64) string { return chatgptKeys(set) + id }
+
+// errUnreadable: a sign-in that isn't set's (or whose seal doesn't open).
+var errUnreadable = errors.New("the model's ChatGPT sign-in can't be read: sign in again on the Models page")
+
+// unsavedSignIn is a renewed sign-in that couldn't be saved: kept, as it
+// holds the only copy of the new refresh token, until it saves.
+type unsavedSignIn struct {
+	set  int64
+	cred chatgpt.Credentials
+}
+
+// chatgptRevokeRetry are the waits before each new try at ending a
+// sign-in at OpenAI, when the network or OpenAI failed.
+var chatgptRevokeRetry = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute}
 
 func chatgptContext(id string, set int64) string {
 	return "chatgpt:" + id + ":" + strconv.FormatInt(set, 10)
@@ -86,6 +105,9 @@ func (b *Bot) StartChatGPT(cur settings.LLM) (chatgpt.Attempt, string, error) {
 	if err != nil {
 		return chatgpt.Attempt{}, "", err
 	}
+	if cur.ChatGPTClient != "" {
+		a.Subject = cur.AccountSubject // the account the client is for
+	}
 	// A client kept without a sign-in is one whose plan use was declined
 	// (see FinishChatGPT): asked for again, not just signed in.
 	a.Consent = cur.ChatGPTClient != "" && !cur.SignedIn()
@@ -99,11 +121,13 @@ func (b *Bot) StartChatGPT(cur settings.LLM) (chatgpt.Attempt, string, error) {
 // A sign-in that didn't allow the plan's use returns chatgpt.ErrNoPlanUsage
 // with who it was: the sign-in is ended (the bot can't use it), but its
 // client is worth keeping, to ask for the plan's use again (StartChatGPT).
+// One for another account than the model's (chatgpt.ErrOtherAccount) is
+// ended too, and the model's own sign-in kept.
 func (b *Bot) FinishChatGPT(ctx context.Context, set int64, a chatgpt.Attempt, cb chatgpt.Callback) (string, chatgpt.Credentials, error) {
 	c := b.chatgptClient()
 	cred, err := c.Finish(ctx, a, cb)
-	if errors.Is(err, chatgpt.ErrNoPlanUsage) {
-		b.revokeChatGPT(cred)
+	if errors.Is(err, chatgpt.ErrNoPlanUsage) || errors.Is(err, chatgpt.ErrOtherAccount) {
+		b.revokeChatGPT(set, cred)
 		return "", withoutTokens(cred), err
 	}
 	if err != nil {
@@ -114,7 +138,7 @@ func (b *Bot) FinishChatGPT(ctx context.Context, set int64, a chatgpt.Attempt, c
 		return "", chatgpt.Credentials{}, err
 	}
 	if err := b.storeChatGPT(id, set, cred); err != nil {
-		b.revokeChatGPT(cred)
+		b.revokeChatGPT(set, cred)
 		return "", chatgpt.Credentials{}, fmt.Errorf("couldn't save the ChatGPT sign-in: %w", err)
 	}
 	return id, withoutTokens(cred), nil
@@ -134,7 +158,7 @@ func newSignInID() (string, error) {
 }
 
 func (b *Bot) loadChatGPT(id string, set int64) (chatgpt.Credentials, error) {
-	sealed, ok, err := b.store.Get(chatgptKey(id))
+	sealed, ok, err := b.store.Get(chatgptKey(id, set))
 	if err != nil {
 		return chatgpt.Credentials{}, fmt.Errorf("couldn't read the database: %w", err)
 	}
@@ -147,7 +171,7 @@ func (b *Bot) loadChatGPT(id string, set int64) (chatgpt.Credentials, error) {
 	}
 	raw, err := box.Open(sealed, chatgptContext(id, set))
 	if err != nil {
-		return chatgpt.Credentials{}, errors.New("the model's ChatGPT sign-in can't be read: sign in again on the Models page")
+		return chatgpt.Credentials{}, errUnreadable
 	}
 	var cred chatgpt.Credentials
 	if err := json.Unmarshal(raw, &cred); err != nil {
@@ -169,7 +193,25 @@ func (b *Bot) storeChatGPT(id string, set int64, cred chatgpt.Credentials) error
 	if err != nil {
 		return err
 	}
-	return b.store.Set(chatgptKey(id), sealed)
+	return b.store.Set(chatgptKey(id, set), sealed)
+}
+
+// currentChatGPT returns a sign-in's latest credentials: a renewal that
+// couldn't be saved (saving it now, if it can), or else the stored ones.
+// The caller holds the sign-in's lock.
+func (b *Bot) currentChatGPT(id string, set int64) (chatgpt.Credentials, error) {
+	x, ok := b.chatgptUnsaved.Load(id)
+	if !ok {
+		return b.loadChatGPT(id, set)
+	}
+	u := x.(unsavedSignIn)
+	if u.set != set {
+		return chatgpt.Credentials{}, errUnreadable
+	}
+	if err := b.storeChatGPT(id, set, u.cred); err == nil {
+		b.chatgptUnsaved.Delete(id)
+	}
+	return u.cred, nil
 }
 
 // DropChatGPT deletes a sign-in of set and ends it at OpenAI.
@@ -180,14 +222,37 @@ func (b *Bot) DropChatGPT(id string, set int64) {
 	mu := b.chatgptLock(id)
 	mu.Lock()
 	defer mu.Unlock()
-	cred, err := b.loadChatGPT(id, set)
-	if err := b.store.Delete(chatgptKey(id)); err != nil {
-		b.log.Warn("delete ChatGPT sign-in", "err", err)
+	if _, ok, err := b.store.Get(chatgptKey(id, set)); err != nil || !ok {
+		if err != nil {
+			b.log.Warn("read ChatGPT sign-in", "err", err)
+		}
 		return
 	}
+	cred, err := b.currentChatGPT(id, set)
+	if derr := b.store.Delete(chatgptKey(id, set)); derr != nil {
+		b.log.Warn("delete ChatGPT sign-in", "err", derr)
+		return
+	}
+	b.chatgptUnsaved.Delete(id)
 	b.chatgptLocks.Delete(id)
-	if err == nil {
-		b.revokeChatGPT(cred)
+	if err != nil {
+		// Its refresh token can't be read, so only the person can end it.
+		b.chatgptUnconfirmed(set, "")
+		return
+	}
+	b.revokeChatGPT(set, cred)
+}
+
+// DropAllChatGPT drops every sign-in of set: how they're ended when the
+// set's models, which name them, can't be read.
+func (b *Bot) DropAllChatGPT(set int64) {
+	keys, err := b.store.Keys(chatgptKeys(set))
+	if err != nil {
+		b.log.Warn("list ChatGPT sign-ins", "err", err)
+		return
+	}
+	for _, k := range keys {
+		b.DropChatGPT(strings.TrimPrefix(k, chatgptKeys(set)), set)
 	}
 }
 
@@ -206,17 +271,44 @@ func (b *Bot) ForgetChatGPT(set int64, before, after settings.Models) {
 	}
 }
 
-// revokeChatGPT ends a sign-in at OpenAI, in the background: it's only
-// tidying, as the bot has already let go of the tokens.
-func (b *Bot) revokeChatGPT(cred chatgpt.Credentials) {
+// revokeChatGPT ends a sign-in at OpenAI, in the background (the bot has
+// already let go of it), trying again while the network or OpenAI fails.
+// If OpenAI never confirms it, set's activity says so (chatgptUnconfirmed).
+func (b *Bot) revokeChatGPT(set int64, cred chatgpt.Credentials) {
+	if cred.RefreshToken == "" {
+		return // nothing left that renews
+	}
 	c := b.chatgptClient()
+	waits := b.chatgptRetry
+	if waits == nil {
+		waits = chatgptRevokeRetry
+	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := c.Revoke(ctx, cred); err != nil {
-			b.log.Warn("revoke ChatGPT sign-in", "err", err)
+		for i := 0; ; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := c.Revoke(ctx, cred)
+			cancel()
+			if err == nil {
+				return
+			}
+			if !chatgpt.Temporary(err) || i == len(waits) {
+				b.log.Warn("revoke ChatGPT sign-in", "err", err)
+				b.chatgptUnconfirmed(set, cred.Email)
+				return
+			}
+			time.Sleep(waits[i])
 		}
 	}()
+}
+
+// chatgptUnconfirmed tells set's activity that a sign-in the bot let go of
+// may still be live at OpenAI, and how to end it.
+func (b *Bot) chatgptUnconfirmed(set int64, email string) {
+	who := "a ChatGPT account's sign-in"
+	if email != "" {
+		who = "the ChatGPT sign-in as " + email
+	}
+	b.store.LogAs(set, "warn", "", 0, fmt.Sprintf("OpenAI didn't confirm that %s was ended. To be sure it's ended, disconnect the app in ChatGPT's settings.", who))
 }
 
 // chatgptTokens gives a ChatGPT plan model its sign-in's access token
@@ -228,24 +320,24 @@ type chatgptTokens struct {
 }
 
 func (t chatgptTokens) Token(ctx context.Context, refused string) (string, error) {
-	cred, err := t.b.loadChatGPT(t.id, t.set)
-	if err != nil {
-		return "", err
-	}
-	usable := func() bool { return cred.AccessToken != refused && time.Until(cred.Expiry) > chatgptRenewBefore }
-	if usable() {
-		return cred.AccessToken, nil
-	}
+	// Under the sign-in's lock throughout: a renewal replaces the refresh
+	// token, so only one runs at a time, and the calls waiting on it then
+	// use its new token rather than renewing again.
 	mu := t.b.chatgptLock(t.id)
 	mu.Lock()
 	defer mu.Unlock()
-	// Another call may have renewed it while this one waited: its new token
-	// is used rather than renewing again (which would replace it at once).
-	if cred, err = t.b.loadChatGPT(t.id, t.set); err != nil {
+	cred, err := t.b.currentChatGPT(t.id, t.set)
+	if err != nil {
 		return "", err
 	}
-	if usable() {
+	if !cred.PlanUsage() {
+		return "", chatgpt.ErrNoPlanUsage
+	}
+	if cred.AccessToken != refused && time.Until(cred.Expiry) > chatgptRenewBefore {
 		return cred.AccessToken, nil
+	}
+	if cred.RefreshToken == "" {
+		return "", chatgpt.ErrSignInEnded
 	}
 	// Not cut short with the job: once OpenAI has replaced the refresh
 	// token, only its answer holds the new one, and the sign-in would be
@@ -255,8 +347,14 @@ func (t chatgptTokens) Token(ctx context.Context, refused string) (string, error
 	if err := t.b.chatgptClient().Refresh(rctx, &cred); err != nil {
 		return "", err
 	}
+	if cred.RefreshToken == "" {
+		t.b.log.Warn("a ChatGPT renewal returned no new refresh token: the sign-in ends when its access token expires", "sign-in", t.id)
+	}
 	if err := t.b.storeChatGPT(t.id, t.set, cred); err != nil {
-		return "", fmt.Errorf("couldn't save the renewed ChatGPT sign-in: %w", err)
+		// Kept until it saves (see currentChatGPT): the database holds the
+		// refresh token OpenAI has just used up.
+		t.b.chatgptUnsaved.Store(t.id, unsavedSignIn{set: t.set, cred: cred})
+		t.b.log.Warn("save renewed ChatGPT sign-in (kept until it saves)", "err", err)
 	}
 	if !cred.PlanUsage() {
 		return "", chatgpt.ErrNoPlanUsage

@@ -406,8 +406,12 @@ model's reviews and replies count against that account's plan.
 
 The bot then keeps the sign-in and renews its access token as it expires. Each renewal replaces the
 refresh token, so renewals of one sign-in run one at a time. Signing out, removing the model or
-changing its provider ends the sign-in at OpenAI. A sign-in that didn't allow the plan's use isn't
-kept, but the next one asks for it again.
+changing its provider asks OpenAI to end the sign-in, trying again for a few minutes if OpenAI
+can't be reached. If OpenAI never confirms it, or the sign-in can't be decrypted (as with an org's
+models that can't be read), the org's activity says so; disconnect the app in ChatGPT's settings
+to be sure it's ended. A sign-in that didn't allow the plan's use isn't kept, but the next one asks
+for it again. Signing a model in again takes the same ChatGPT account: to use another, sign the
+model out first.
 
 Things to know:
 - Use only your own account. The sign-in is stored encrypted, bound to the set of models it was
@@ -987,9 +991,10 @@ a public issue.
   of models it was made for, so one org's model can't use another's.
 - An Anthropic API model without a key of its own sends none: the bot never uses the host's
   `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` or other Anthropic environment settings.
-- A ChatGPT sign-in uses an authorization code with PKCE. The verifier never leaves the bot; the
-  pasted address is checked against the sign-in it started, and its ID token against OpenAI's
-  published keys, issuer, audience, expiry and nonce. Its tokens go only to OpenAI.
+- A ChatGPT sign-in uses an authorization code with PKCE. The verifier never goes through the
+  browser: the bot sends it only to OpenAI's token endpoint. The pasted address is checked against
+  the sign-in it started, and its ID token against OpenAI's published keys, issuer, audience,
+  expiry and nonce. Its tokens go only to OpenAI.
 - The bot's only GitHub actions are posting reviews, review replies and PR comments. The App
   permissions above are the minimum it needs.
 - PR titles, descriptions and code are untrusted. They're given to the model as data, and the

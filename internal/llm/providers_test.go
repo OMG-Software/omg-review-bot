@@ -97,6 +97,41 @@ func TestOpenRouter(t *testing.T) {
 	}
 }
 
+// TestOpenRouterReasoningDetails: the structured reasoning a tool call came
+// with goes back unchanged with its result, to the same model only.
+func TestOpenRouterReasoningDetails(t *testing.T) {
+	details := `[{"data":"sig-1","format":"google-gemini-v1","index":0,"type":"reasoning.encrypted"}]` // keys as json.Marshal orders them
+	srv, got := chatServer(t,
+		apiError{200, `{"choices":[{"message":{"content":"","reasoning":"Look first.","reasoning_details":` + details + `,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]},"finish_reason":"tool_calls"}]}`},
+		apiError{200, okChat})
+	c, _ := New(Config{Provider: "openrouter", BaseURL: srv.URL + "/api/v1", APIKey: "sk-or", Model: "google/gemini-x"})
+	msgs := []Message{{Role: "user", Content: "Review this."}}
+	resp, err := c.Chat(context.Background(), Request{Messages: msgs, Tools: []Tool{readTool}})
+	if err != nil || len(resp.ToolCalls) != 1 {
+		t.Fatalf("chat = %+v, %v", resp, err)
+	}
+	<-got
+	turn := append(msgs, Message{Role: "assistant", ToolCalls: resp.ToolCalls, Reasoning: resp.Reasoning, Native: resp.Native},
+		Message{Role: "tool", Content: "package a", ToolCallID: "call_1", ToolName: "read_file"})
+	if _, err := c.Chat(context.Background(), Request{Messages: turn, Tools: []Tool{readTool}}); err != nil {
+		t.Fatal(err)
+	}
+	sent := (<-got).body["messages"].([]any)[1].(map[string]any)
+	if b, _ := json.Marshal(sent["reasoning_details"]); string(b) != details || sent["reasoning_content"] != nil {
+		t.Errorf("assistant turn sent back = %v", sent)
+	}
+	// Another model gets the plain reasoning, not the first one's details.
+	other, got2 := chatServer(t, apiError{200, okChat})
+	c2, _ := New(Config{Provider: "openrouter", BaseURL: other.URL + "/api/v1", APIKey: "sk-or", Model: "vendor/other"})
+	if _, err := c2.Chat(context.Background(), Request{Messages: turn, Tools: []Tool{readTool}}); err != nil {
+		t.Fatal(err)
+	}
+	sent = (<-got2).body["messages"].([]any)[1].(map[string]any)
+	if sent["reasoning_details"] != nil || sent["reasoning_content"] != "Look first." {
+		t.Errorf("assistant turn sent to another model = %v", sent)
+	}
+}
+
 // TestReasoningTokensExhausted: a server that hides its reasoning but
 // counts it (OpenAI's reasoning models) and is cut off with no answer gets
 // the reasoning-exhausted error, not an empty answer.
