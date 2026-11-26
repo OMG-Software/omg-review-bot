@@ -320,12 +320,14 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, mc *jobCl
 			_ = b.store.MarkHandled(c.ID, "mention-skipped", pr.Repo, pr.Number, 0)
 			continue
 		}
-		if cmd.MatchString(c.Body) {
+		if asksForReview(cmd, c.Body) {
 			if b.commandTaken(pr, c.ID) {
 				continue
 			}
 			if err := b.reviewCommand(ctx, cl, pr, c); err != nil {
-				return err
+				// Tried again on a later check; the comments after it are
+				// answered meanwhile.
+				b.logf("warn", pr.Repo, pr.Number, "review request from @%s: %v", c.User.Login, err)
 			}
 			continue
 		}

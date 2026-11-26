@@ -10,14 +10,16 @@ import (
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 )
 
-func TestReviewCommandRegexp(t *testing.T) {
+func TestAsksForReview(t *testing.T) {
 	re := reviewCommandRE("testbot")
 	for s, want := range map[string]bool{
 		"@testbot review":                                true,
 		"@TestBot[bot] Review!":                          true,
 		"  @testbot review.  ":                           true,
+		"   @testbot review":                             true,
 		"Fixed the division.\r\n\r\n@testbot review\r\n": true,
 		"@testbot review\nThanks!":                       true,
+		"```go\nx := 1\n```\n@testbot review":            true,
 		"@testbot review this function please":           false,
 		"@testbot reviewing this, why flag main.go?":     false,
 		"> @testbot review":                              false,
@@ -26,8 +28,15 @@ func TestReviewCommandRegexp(t *testing.T) {
 		"@testbotx review":                               false,
 		"@testbot\nreview":                               false,
 		"`@testbot review` asks for a review, I'm told.": false,
+		// In code: shown, not asked.
+		"Here's how:\n```\n@testbot review\n```":       false,
+		"Here's how:\r\n```\r\n@testbot review\r\n```": false,
+		"~~~~\n~~~\n@testbot review\n~~~~":             false, // a shorter fence doesn't close it
+		"```\nnever closed\n@testbot review":           false,
+		"Like this:\n\n    @testbot review":            false,
+		"\t@testbot review":                            false,
 	} {
-		if re.MatchString(s) != want {
+		if asksForReview(re, s) != want {
 			t.Errorf("%q: got %v want %v", s, !want, want)
 		}
 	}
@@ -117,6 +126,48 @@ func TestReviewCommand(t *testing.T) {
 	check()
 	if n := len(e.lm.prompts["text"]); n != 1 || len(e.gh.reviews) != 2 {
 		t.Errorf("want the mention answered (1 chat prompt, 2 reviews), got %d prompts and %d reviews", n, len(e.gh.reviews))
+	}
+
+	// An account GitHub doesn't know (a deleted one) has no access.
+	e.gh.perms["ghost"] = "404"
+	e.say("ghost", "@testbot review")
+	check()
+	if len(e.gh.reviews) != 2 || !strings.HasPrefix(lastPost(), "@ghost ") || !strings.Contains(lastPost(), "write access") {
+		t.Errorf("want ghost told write access is needed, got %d reviews and %q", len(e.gh.reviews), lastPost())
+	}
+
+	// A lookup that fails leaves the request for a later check, without a
+	// reply, and the mentions after it are still answered.
+	e.gh.perms["dave"] = "502"
+	e.say("dave", "@testbot review")
+	e.say("bob", "@testbot what does main.go do?")
+	posts = len(e.gh.posted)
+	check()
+	if n := len(e.lm.prompts["text"]); n != 2 || len(e.gh.posted) != posts+1 || strings.HasPrefix(lastPost(), "@dave") {
+		t.Errorf("after dave's failed lookup: %d chat prompts (want 2), posted %q (want only bob's answer)", n, e.gh.posted[posts:])
+	}
+	e.gh.perms["dave"] = "write"
+	check()
+	if len(e.gh.reviews) != 3 {
+		t.Errorf("dave's request wasn't tried again: %d reviews, want 3", len(e.gh.reviews))
+	}
+
+	// On a closed PR, nothing is queued and the person is told why.
+	closed, err := e.st.GetPR("acme/web", 7)
+	if err != nil || closed == nil {
+		t.Fatal(err)
+	}
+	closed.Open = false
+	if err := e.st.SavePR(closed); err != nil {
+		t.Fatal(err)
+	}
+	e.say("alice", "@testbot review")
+	check()
+	if len(e.gh.reviews) != 3 || !strings.HasPrefix(lastPost(), "@alice I couldn't queue a review: acme/web#7 is closed") {
+		t.Errorf("want alice told the PR is closed, got %d reviews and %q", len(e.gh.reviews), lastPost())
+	}
+	if pr, _ := e.st.GetPR("acme/web", 7); pr == nil || pr.Status == "pending" {
+		t.Errorf("the closed PR's status was reset to pending: %+v", pr)
 	}
 }
 

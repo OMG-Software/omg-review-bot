@@ -2,28 +2,70 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
 )
 
-// reviewCommandRE matches a PR conversation comment asking the bot for a
-// review: a line of its own that is just "@<slug> review" (any case, an
-// optional "[bot]" and full stop or exclamation mark). Only a line of its own,
-// so a question that happens to start with the word ("@bot reviewing this, why
-// …?") is answered as a mention, and a quoted request ("> @bot review") isn't
-// taken as a new one.
+// reviewCommandRE matches a line asking the bot for a review: just
+// "@<slug> review" (any case, an optional "[bot]" and full stop or
+// exclamation mark), indented less than an indented code block's 4 spaces.
 func reviewCommandRE(slug string) *regexp.Regexp {
-	return regexp.MustCompile(`(?im)^[ \t]*@` + regexp.QuoteMeta(slug) + `(\[bot\])?[ \t]+review[ \t]*[.!]?[ \t\r]*$`)
+	return regexp.MustCompile(`(?i)^ {0,3}@` + regexp.QuoteMeta(slug) + `(\[bot\])?[ \t]+review[ \t]*[.!]?[ \t]*$`)
+}
+
+// asksForReview reports whether a PR conversation comment asks for a review:
+// whether a line of its own outside fenced code blocks matches cmd (see
+// reviewCommandRE). A line of its own, so a question that happens to start with
+// the word ("@bot reviewing this, why …?") is answered as a mention; and not
+// quoted ("> @bot review") or in code, so quoting the command or showing how
+// it's used doesn't queue a review.
+func asksForReview(cmd *regexp.Regexp, body string) bool {
+	fence := "" // the open fence ("```", "~~~~" …); "" outside one
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if run, rest := fenceRun(line); run != "" {
+			if fence == "" {
+				fence = run
+				continue
+			}
+			if run[0] == fence[0] && len(run) >= len(fence) && strings.TrimSpace(rest) == "" {
+				fence = ""
+				continue
+			}
+		}
+		if fence == "" && cmd.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// fenceRun returns the run of 3 or more backticks or tildes that would open or
+// close a fenced code block on line (indented at most 3 spaces), and the rest
+// of the line after it; "" if there's none.
+func fenceRun(line string) (run, rest string) {
+	t := strings.TrimLeft(line, " ")
+	if len(line)-len(t) > 3 || t == "" || (t[0] != '`' && t[0] != '~') {
+		return "", ""
+	}
+	n := len(t) - len(strings.TrimLeft(t, t[:1]))
+	if n < 3 {
+		return "", ""
+	}
+	return t[:n], t[n:]
 }
 
 // canAskForReview reports whether a repository permission (see
 // github.Client.Permission) lets its holder ask for a review in a comment:
-// write access, as pushing a commit (which gets a review anyway) needs. A
-// review asked for this way passes the per-PR review limit, so on a public
-// repository it can't be left to anyone who can comment.
+// write access, as pushing a commit (which gets a review anyway) needs. That's
+// a maintainer too, whom GitHub reports as "write". A review asked for this way
+// passes the per-PR review limit, so on a public repository it can't be left
+// to anyone who can comment.
 func canAskForReview(permission string) bool {
 	return permission == "admin" || permission == "write"
 }
@@ -31,8 +73,8 @@ func canAskForReview(permission string) bool {
 // reviewCommand acts on comment c, which asks for a review of pr: it queues a
 // manual review, as Review now in the web UI does. A review it queued is
 // answered by the review's own "Queued for review" comment; a request that
-// isn't taken gets a reply saying why. A failure to read the person's access
-// or to post the reply leaves the comment unhandled, so it's tried again.
+// isn't taken gets a reply saying why. A failure (reading the person's access,
+// queuing, posting the reply) leaves the comment unhandled, so it's tried again.
 func (b *Bot) reviewCommand(ctx context.Context, cl *github.Client, pr *store.PR, c github.IssueComment) error {
 	who := c.User.Login
 	perm, err := cl.Permission(ctx, pr.Repo, who)
@@ -40,12 +82,17 @@ func (b *Bot) reviewCommand(ctx context.Context, cl *github.Client, pr *store.PR
 		return fmt.Errorf("reading @%s's access to %s: %w", who, pr.Repo, err)
 	}
 	var reply string
+	var refused refusal
 	if !canAskForReview(perm) {
 		reply = "only people with write access to this repository can ask for a review."
 		b.logf("info", pr.Repo, pr.Number, "refused a review request from @%s (%s access)", who, perm)
-	} else if err := b.ReviewNow(pr.Repo, pr.Number, pr.AccountID); err != nil {
-		reply = "I couldn't queue a review: " + err.Error() + "."
+	} else if err := b.ReviewNow(pr.Repo, pr.Number, pr.AccountID); errors.As(err, &refused) {
+		reply = "I couldn't queue a review: " + refused.msg + "."
 		b.logf("info", pr.Repo, pr.Number, "review request from @%s not queued: %v", who, err)
+	} else if err != nil {
+		// Not a reason to give the person (the database's, say): nothing
+		// was queued, so the comment is tried again.
+		return fmt.Errorf("queuing the review @%s asked for: %w", who, err)
 	} else {
 		b.logf("info", pr.Repo, pr.Number, "@%s asked for a review in a comment", who)
 	}
@@ -55,11 +102,13 @@ func (b *Bot) reviewCommand(ctx context.Context, cl *github.Client, pr *store.PR
 		b.markCommand(pr, c.ID)
 		return nil
 	}
-	posted, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, "@"+who+" "+reply)
+	posted, err := cl.CreateIssueComment(ctx, pr.Repo, pr.Number, afterPrefix("@"+who, sanitizeModelText(reply)))
 	if err != nil {
 		return err
 	}
-	_ = b.store.MarkHandled(c.ID, "review-command", pr.Repo, pr.Number, posted.ID)
+	if err := b.store.MarkHandled(c.ID, "review-command", pr.Repo, pr.Number, posted.ID); err != nil {
+		b.logf("warn", pr.Repo, pr.Number, "could not record @%s's review request as handled; it may be answered again: %v", who, err)
+	}
 	return nil
 }
 

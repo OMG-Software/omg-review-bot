@@ -235,8 +235,16 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			f.permCalls++
 			login := strings.TrimSuffix(strings.TrimPrefix(p, "/repos/acme/web/collaborators/"), "/permission")
 			perm, ok := f.perms[login]
-			if !ok {
+			switch {
+			case !ok:
 				perm = "read" // anyone, on a public repository
+			case perm == "404": // an account GitHub doesn't know
+				w.WriteHeader(http.StatusNotFound)
+				send(map[string]any{"message": login + " is not a user"})
+				return
+			case perm == "502":
+				w.WriteHeader(http.StatusBadGateway)
+				return
 			}
 			send(map[string]any{"permission": perm, "user": map[string]any{"login": login, "type": "User"}})
 		case strings.HasPrefix(p, "/repos/acme/web/git/trees/"):

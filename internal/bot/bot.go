@@ -6,7 +6,6 @@ package bot
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -883,32 +882,50 @@ func (b *Bot) loadSkill(st settings.Settings) *skill.Skill {
 
 // ---------- actions used by the web UI ----------
 
+// refusal is a reason ReviewNow turned a request down, written for the person
+// who asked. Any other error it returns is a failure (the database's, say),
+// which isn't for showing on a pull request.
+type refusal struct{ msg string }
+
+func (r refusal) Error() string { return r.msg }
+
+func refusef(format string, args ...any) error { return refusal{fmt.Sprintf(format, args...)} }
+
 // ReviewNow queues an immediate review, ignoring debounce, drafts and skip flags.
 // ReviewNow queues a manual review of a PR of accountID's (the account the
 // caller checked the person may act for).
 func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
 	if b.Stopped() {
-		return errors.New("reviews are stopped for now (an administrator is about to restart the bot); ask again once they're back")
+		return refusef("reviews are stopped for now (an administrator is about to restart the bot); ask again once they're back")
 	}
 	b.prMu.Lock()
 	pr, err := b.store.GetPR(repo, number)
-	if err != nil || pr == nil || pr.AccountID != accountID {
+	if err != nil {
 		b.prMu.Unlock()
-		return fmt.Errorf("PR %s#%d is not tracked", repo, number)
+		return err
+	}
+	if pr == nil || pr.AccountID != accountID {
+		b.prMu.Unlock()
+		return refusef("PR %s#%d is not tracked", repo, number)
+	}
+	if !pr.Open {
+		// Its review would only be skipped as it starts.
+		b.prMu.Unlock()
+		return refusef("%s#%d is closed", repo, number)
 	}
 	if pr.Status == "reviewing" {
 		b.prMu.Unlock()
-		return fmt.Errorf("a review of %s#%d is already in progress", repo, number)
+		return refusef("a review of %s#%d is already in progress", repo, number)
 	}
 	if !allowedRepo(b.Settings(), repo) {
 		b.prMu.Unlock()
-		return fmt.Errorf("%s is paused: the \"Only these orgs\" setting excludes its owner", repo)
+		return refusef("%s is paused: the \"Only these orgs\" setting excludes its owner", repo)
 	}
 	// Unlike the per-PR round limit, the daily limit binds reviews asked for
 	// by hand too: it's the administrator's, not the organization's.
 	if q, full := b.dailyCapped(pr); full {
 		b.prMu.Unlock()
-		return dailyLimitError(q)
+		return refusal{dailyLimitError(q).Error()}
 	}
 	pr.Status = "pending"
 	pr.NotBefore = 0
@@ -919,7 +936,7 @@ func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
 		return err
 	}
 	if !b.enqueue(job{kind: jobReview, repo: repo, number: number, force: true, account: accountID, org: accountID}) {
-		return fmt.Errorf("a review of %s#%d is already queued", repo, number)
+		return refusef("a review of %s#%d is already queued", repo, number)
 	}
 	b.logf("info", repo, number, "manual review requested")
 	return nil

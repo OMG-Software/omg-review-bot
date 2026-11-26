@@ -572,15 +572,20 @@ func (c *Client) UpdateIssueComment(ctx context.Context, fullName string, commen
 	return err
 }
 
-// Permission returns login's access to a repository: "admin", "write", "read"
-// or "none" (maintain counts as write, triage as read). Unlike a comment's
-// author association, it holds for org members whose membership is private.
+// Permission returns login's access to a repository: GitHub's legacy base
+// role, "admin", "write", "read" or "none" (maintain is reported as write,
+// triage as read). Anyone has read on a public repository, and an account
+// GitHub doesn't know (a deleted one) has none. Unlike a comment's author
+// association, it holds for org members whose membership is private.
 func (c *Client) Permission(ctx context.Context, fullName, login string) (string, error) {
 	var r struct {
 		Permission string `json:"permission"`
 	}
 	path := fmt.Sprintf("/repos/%s/collaborators/%s/permission", fullName, url.PathEscape(login))
 	if _, err := c.do(ctx, http.MethodGet, path, nil, nil, &r); err != nil {
+		if IsStatus(err, http.StatusNotFound) { // "… is not a user"
+			return "none", nil
+		}
 		return "", err
 	}
 	return r.Permission, nil
