@@ -2,6 +2,7 @@ package bot
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -221,5 +222,52 @@ func TestReviewCommandQueuedOnceWhenNotRecorded(t *testing.T) {
 	e.b.mu.Unlock()
 	if left != 0 {
 		t.Errorf("%d requests still held in memory after being recorded", left)
+	}
+}
+
+// A full job queue is the bot's state, not a reason to turn a request down:
+// the request gets no reply, and it's queued once there's room.
+func TestReviewCommandRetriedWhenQueueFull(t *testing.T) {
+	const clean = `{"summary":"Looks fine.","comments":[]}`
+	e := newReviewEnv(t, clean, func(*settings.Settings) {})
+	e.gh.perms = map[string]string{"alice": "write"}
+	e.b.pollOnce(e.ctx)
+	drain(e.ctx, e.b)
+	pr, err := e.st.GetPR("acme/web", 7)
+	if err != nil || pr == nil || len(e.gh.reviews) != 1 {
+		t.Fatalf("expected the first review of a tracked PR: %d reviews, %v", len(e.gh.reviews), err)
+	}
+
+	for full := false; !full; {
+		select {
+		case e.b.jobs <- job{kind: jobReplies, repo: "acme/filler", number: 1}:
+		default:
+			full = true
+		}
+	}
+	var refused refusal
+	if err := e.b.ReviewNow(pr.Repo, pr.Number, pr.AccountID); err == nil || errors.As(err, &refused) {
+		t.Errorf("ReviewNow with a full queue = %v, want a failure that isn't a refusal", err)
+	}
+	e.say("alice", "@testbot review")
+	posts := len(e.gh.posted)
+	e.b.runJob(e.ctx, job{kind: jobReplies, repo: pr.Repo, number: pr.Number, org: pr.AccountID})
+	if len(e.gh.posted) != posts || e.st.IsHandled(8001) {
+		t.Fatalf("with a full queue: posted %q, handled %v; want no reply and the request left for later", e.gh.posted[posts:], e.st.IsHandled(8001))
+	}
+
+	for empty := false; !empty; { // the filler, unrun
+		select {
+		case <-e.b.jobs:
+		default:
+			empty = true
+		}
+	}
+	if err := e.b.CheckReplies(pr.Repo, pr.Number, pr.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	drain(e.ctx, e.b)
+	if len(e.gh.reviews) != 2 || !e.st.IsHandled(8001) {
+		t.Errorf("once there's room: %d reviews (want 2), handled %v", len(e.gh.reviews), e.st.IsHandled(8001))
 	}
 }

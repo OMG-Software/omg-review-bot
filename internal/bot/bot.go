@@ -935,8 +935,13 @@ func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
 	if err != nil {
 		return err
 	}
-	if !b.enqueue(job{kind: jobReview, repo: repo, number: number, force: true, account: accountID, org: accountID}) {
+	switch b.push(job{kind: jobReview, repo: repo, number: number, force: true, account: accountID, org: accountID}) {
+	case alreadyQueued:
 		return refusef("a review of %s#%d is already queued", repo, number)
+	case queueFull:
+		// The bot's state, not a reason to turn the request down: one from a
+		// PR comment is tried again.
+		return fmt.Errorf("the review queue is full; ask again in a moment")
 	}
 	b.logf("info", repo, number, "manual review requested")
 	return nil

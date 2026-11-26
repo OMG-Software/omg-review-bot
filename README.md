@@ -607,7 +607,8 @@ conversation (for example `@omg-review-bot review`), and the bot queues a review
 wait after push, drafts and skip labels, but not the daily review limit. The usual "Queued for
 review" comment confirms it. Only people with write access to the repository can ask; anyone
 else, or a request the bot can't take (a closed PR, a review already queued or running, the
-daily limit reached), gets a reply saying why. The command must be a line of its own, so a
+daily limit reached, reviews stopped for a restart), gets a reply saying why. One that fails for
+another reason (GitHub or the bot's database unavailable, a full review queue) is tried again. The command must be a line of its own, so a
 question such as "@<app-name> reviewing this, why…?" is answered as a mention, and a quoted
 request, or one in a code block, isn't taken as a new one. Like other mentions, it needs
 *Replies / mentions* to have mentions on.
