@@ -204,7 +204,7 @@ func (s *Server) IDToken(claims map[string]any) string {
 	body, _ := json.Marshal(claims)
 	in := base64.RawURLEncoding.EncodeToString(hdr) + "." + base64.RawURLEncoding.EncodeToString(body)
 	sum := sha256.Sum256([]byte(in))
-	sig, _ := rsa.SignPKCS1v15(rand.Reader, s.Key, crypto.SHA256, sum[:])
+	sig, _ := rsa.SignPKCS1v15(rand.Reader, s.Key, crypto.SHA256, sum[:]) // NOSONAR: signs an RS256 test token, not encryption
 	return in + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 

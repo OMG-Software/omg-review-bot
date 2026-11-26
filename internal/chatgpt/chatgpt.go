@@ -465,8 +465,12 @@ func (c *Client) verifyIDToken(ctx context.Context, tok, clientID, nonce string)
 	if err != nil {
 		return identity{}, fmt.Errorf("its signature isn't base64url: %w", err)
 	}
+	// RS256 is RSASSA-PKCS1-v1_5 with SHA-256 (RFC 7518, section 3.3), the
+	// only signature the header check above lets through. Sonar's rule on
+	// PKCS #1 v1.5 is about encryption padding, which this isn't: PSS would
+	// be another algorithm (PS256), and OpenAI doesn't sign with it.
 	sum := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], sig); err != nil {
+	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], sig); err != nil { // NOSONAR: an RS256 signature, not encryption
 		return identity{}, errors.New("its signature doesn't match OpenAI's key")
 	}
 	var cl struct {
