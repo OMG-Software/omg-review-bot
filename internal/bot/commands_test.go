@@ -45,6 +45,13 @@ func TestAsksForReview(t *testing.T) {
 		"`\n\n@testbot review\n\n`":              true, // spans end with their paragraph
 		"```\n`\n```\n@testbot review\n`":        true, // a backtick in a fence opens nothing
 		"> An earlier point.\n@testbot review":   true, // typed under a quote: the commenter's own
+		// An escaped backtick is plain text, outside a span; inside one, a
+		// backslash is text and the backtick after it still closes the span.
+		"An escaped \\` then `\n@testbot review\n`": false,
+		"\\`\n@testbot review\n`":                   true,
+		"\\\\`\n@testbot review\n`":                 false, // the backslash is escaped, not the backtick
+		"\\``\n@testbot review\n`":                  false, // the run's second backtick opens it
+		"`a\\`\n@testbot review\n`":                 true,  // "a\" is a span; the last backtick opens nothing
 	} {
 		if asksForReview(re, s) != want {
 			t.Errorf("%q: got %v want %v", s, !want, want)

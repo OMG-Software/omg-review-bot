@@ -76,9 +76,14 @@ func commandIn(cmd *regexp.Regexp, para []string) bool {
 // codeSpans returns where text's code spans are (from after the opening
 // backticks to the closing ones), paired as CommonMark does: a run of
 // backticks opens a span that the next run of the same length closes, and a
-// run nothing closes is plain text.
+// run nothing closes is plain text. Outside a span, a backslash makes the
+// backtick after it plain text ("\`"), so that backtick opens nothing; inside
+// one, a backslash is just text, so it doesn't stop a run closing the span.
 func codeSpans(text string) [][2]int {
-	type run struct{ at, n int }
+	type run struct {
+		at, n   int
+		escaped bool // its first backtick follows an odd number of backslashes
+	}
 	var runs []run
 	for i := 0; i < len(text); {
 		if text[i] != '`' {
@@ -89,14 +94,25 @@ func codeSpans(text string) [][2]int {
 		for j < len(text) && text[j] == '`' {
 			j++
 		}
-		runs = append(runs, run{i, j - i})
+		slashes := 0
+		for k := i - 1; k >= 0 && text[k] == '\\'; k-- {
+			slashes++
+		}
+		runs = append(runs, run{i, j - i, slashes%2 == 1})
 		i = j
 	}
 	var spans [][2]int
 	for i := 0; i < len(runs); i++ {
+		at, n := runs[i].at, runs[i].n
+		if runs[i].escaped { // the rest of the run, if any, may still open one
+			at, n = at+1, n-1
+		}
+		if n == 0 {
+			continue
+		}
 		for j := i + 1; j < len(runs); j++ {
-			if runs[j].n == runs[i].n {
-				spans = append(spans, [2]int{runs[i].at + runs[i].n, runs[j].at})
+			if runs[j].n == n {
+				spans = append(spans, [2]int{at + n, runs[j].at})
 				i = j
 				break
 			}
