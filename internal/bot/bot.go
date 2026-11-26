@@ -6,7 +6,6 @@ package bot
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -153,6 +152,10 @@ type Bot struct {
 	// repliesWaiting holds the PRs (prKey) whose thread replies wait for the
 	// review of a new push (see replyThreads), so that review's end answers them.
 	repliesWaiting map[string]bool
+	// commandsTaken holds the review-request comments (by ID) whose review
+	// was queued but that couldn't be recorded as handled: a later scan
+	// records them instead of queuing the review again (see markCommand).
+	commandsTaken map[int64]bool
 	// active holds each PR (prKey) a worker is running a job for, with the
 	// jobs for that PR taken off the queue meanwhile. Those run next on the
 	// same worker, in order, so no two jobs for one PR ever overlap.
@@ -204,6 +207,7 @@ func New(st *store.Store, dataDir string, log *slog.Logger) *Bot {
 		running:         map[string]bool{},
 		after:           map[string]job{},
 		repliesWaiting:  map[string]bool{},
+		commandsTaken:   map[int64]bool{},
 		active:          map[string][]job{},
 		roundRobin:      map[int64]int{},
 		orgBusy:         map[int64]int{},
@@ -878,32 +882,50 @@ func (b *Bot) loadSkill(st settings.Settings) *skill.Skill {
 
 // ---------- actions used by the web UI ----------
 
+// refusal is a reason ReviewNow turned a request down, written for the person
+// who asked. Any other error it returns is a failure (the database's, say),
+// which isn't for showing on a pull request.
+type refusal struct{ msg string }
+
+func (r refusal) Error() string { return r.msg }
+
+func refusef(format string, args ...any) error { return refusal{fmt.Sprintf(format, args...)} }
+
 // ReviewNow queues an immediate review, ignoring debounce, drafts and skip flags.
 // ReviewNow queues a manual review of a PR of accountID's (the account the
 // caller checked the person may act for).
 func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
 	if b.Stopped() {
-		return errors.New("reviews are stopped for now (an administrator is about to restart the bot); ask again once they're back")
+		return refusef("reviews are stopped for now (an administrator is about to restart the bot); ask again once they're back")
 	}
 	b.prMu.Lock()
 	pr, err := b.store.GetPR(repo, number)
-	if err != nil || pr == nil || pr.AccountID != accountID {
+	if err != nil {
 		b.prMu.Unlock()
-		return fmt.Errorf("PR %s#%d is not tracked", repo, number)
+		return err
+	}
+	if pr == nil || pr.AccountID != accountID {
+		b.prMu.Unlock()
+		return refusef("PR %s#%d is not tracked", repo, number)
+	}
+	if !pr.Open {
+		// Its review would only be skipped as it starts.
+		b.prMu.Unlock()
+		return refusef("%s#%d is closed", repo, number)
 	}
 	if pr.Status == "reviewing" {
 		b.prMu.Unlock()
-		return fmt.Errorf("a review of %s#%d is already in progress", repo, number)
+		return refusef("a review of %s#%d is already in progress", repo, number)
 	}
 	if !allowedRepo(b.Settings(), repo) {
 		b.prMu.Unlock()
-		return fmt.Errorf("%s is paused: the \"Only these orgs\" setting excludes its owner", repo)
+		return refusef("%s is paused: the \"Only these orgs\" setting excludes its owner", repo)
 	}
 	// Unlike the per-PR round limit, the daily limit binds reviews asked for
 	// by hand too: it's the administrator's, not the organization's.
 	if q, full := b.dailyCapped(pr); full {
 		b.prMu.Unlock()
-		return dailyLimitError(q)
+		return refusal{dailyLimitError(q).Error()}
 	}
 	pr.Status = "pending"
 	pr.NotBefore = 0
@@ -913,8 +935,13 @@ func (b *Bot) ReviewNow(repo string, number int, accountID int64) error {
 	if err != nil {
 		return err
 	}
-	if !b.enqueue(job{kind: jobReview, repo: repo, number: number, force: true, account: accountID, org: accountID}) {
-		return fmt.Errorf("a review of %s#%d is already queued", repo, number)
+	switch b.push(job{kind: jobReview, repo: repo, number: number, force: true, account: accountID, org: accountID}) {
+	case alreadyQueued:
+		return refusef("a review of %s#%d is already queued", repo, number)
+	case queueFull:
+		// The bot's state, not a reason to turn the request down: one from a
+		// PR comment is tried again.
+		return fmt.Errorf("the review queue is full; ask again in a moment")
 	}
 	b.logf("info", repo, number, "manual review requested")
 	return nil

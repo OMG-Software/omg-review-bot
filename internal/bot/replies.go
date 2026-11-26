@@ -300,7 +300,8 @@ func mentionRE(slug string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)(^|[^\w-])@` + regexp.QuoteMeta(slug) + `(\[bot\])?($|[^\w-])`)
 }
 
-// replyMentions answers PR conversation comments that @mention the bot.
+// replyMentions answers PR conversation comments that @mention the bot, and
+// acts on the ones that ask it for a review ("@<app-name> review").
 func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, mc *jobClient, cl *github.Client, pr *store.PR, login string) error {
 	slug := b.botSlug()
 	if slug == "" {
@@ -310,13 +311,24 @@ func (b *Bot) replyMentions(ctx context.Context, st settings.Settings, mc *jobCl
 	if err != nil {
 		return err
 	}
-	re := mentionRE(slug)
+	re, cmd := mentionRE(slug), reviewCommandRE(slug)
 	for i, c := range ics {
 		if c.User.Login == login || isBotUser(c.User) || !re.MatchString(c.Body) || b.store.IsHandled(c.ID) {
 			continue
 		}
 		if c.CreatedAt.Unix() < pr.TrackedAt {
 			_ = b.store.MarkHandled(c.ID, "mention-skipped", pr.Repo, pr.Number, 0)
+			continue
+		}
+		if asksForReview(cmd, c.Body) {
+			if b.commandTaken(pr, c.ID) {
+				continue
+			}
+			if err := b.reviewCommand(ctx, cl, pr, c); err != nil {
+				// Tried again on a later check; the comments after it are
+				// answered meanwhile.
+				b.logf("warn", pr.Repo, pr.Number, "review request from @%s: %v", c.User.Login, err)
+			}
 			continue
 		}
 		b.setCurrent(ctx, pr, "Answering @%s on %s#%d", c.User.Login, pr.Repo, pr.Number)

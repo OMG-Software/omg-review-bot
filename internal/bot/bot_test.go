@@ -66,6 +66,9 @@ type fakeGitHub struct {
 	fileReads     []string          // "ref:path" of each file read, guideline docs aside
 	failReview    bool              // posting a review fails (a 400)
 	onReview      func()            // runs once after recording a review, before responding
+	people        []map[string]any  // PR conversation comments by people, listed before the bot's
+	perms         map[string]string // login -> repository permission; others have "read"
+	permCalls     int               // repository permission lookups
 }
 
 // projectDocs are the repository's guideline files in the fake.
@@ -206,8 +209,11 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 		case p == "/repos/acme/web/issues/7/comments" && f.failList:
 			w.WriteHeader(http.StatusBadGateway)
 		case p == "/repos/acme/web/issues/7/comments":
-			// The comments posted so far, as last edited.
+			// People's comments, then the bot's posted so far, as last edited.
 			out := []any{}
+			for _, c := range f.people {
+				out = append(out, c)
+			}
 			for i, body := range f.posted {
 				id := int64(9001 + i)
 				if e, ok := f.edited[id]; ok {
@@ -225,6 +231,22 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 			f.edited[id] = body["body"]
 			f.editLog = append(f.editLog, body["body"])
 			send(map[string]any{"id": id, "user": bot, "body": body["body"]})
+		case strings.HasPrefix(p, "/repos/acme/web/collaborators/") && strings.HasSuffix(p, "/permission"):
+			f.permCalls++
+			login := strings.TrimSuffix(strings.TrimPrefix(p, "/repos/acme/web/collaborators/"), "/permission")
+			perm, ok := f.perms[login]
+			switch {
+			case !ok:
+				perm = "read" // anyone, on a public repository
+			case perm == "404": // an account GitHub doesn't know
+				w.WriteHeader(http.StatusNotFound)
+				send(map[string]any{"message": login + " is not a user"})
+				return
+			case perm == "502":
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			send(map[string]any{"permission": perm, "user": map[string]any{"login": login, "type": "User"}})
 		case strings.HasPrefix(p, "/repos/acme/web/git/trees/"):
 			f.treeCalls++
 			tree := []any{map[string]any{"path": "main.go", "type": "blob"}, map[string]any{"path": "pkg", "type": "tree"}}
