@@ -41,7 +41,9 @@ const toolNamespace = "repo"
 
 // responsesTurn is an assistant turn with tool calls as the server sent it:
 // its output items (reasoning, text and calls), in order, sent back as
-// they came to the model that wrote them (see Message.Native).
+// they came to the model that wrote them (see Message.Native). Their IDs
+// stay: the API's input items take them, and Codex, the client this
+// sign-in is made for, sends them back with store false too.
 type responsesTurn struct {
 	model string
 	items []json.RawMessage
@@ -132,7 +134,7 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 					refusal.WriteString(p.Refusal)
 				}
 			}
-			turn.items = append(turn.items, withoutID(raw))
+			turn.items = append(turn.items, raw)
 		case "function_call":
 			if it.Status != "" && it.Status != "completed" {
 				// Cut off while its arguments were being written: not run,
@@ -145,13 +147,13 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 				id = fmt.Sprintf("call_%d", len(calls))
 			}
 			calls = append(calls, ToolCall{ID: id, Name: bareToolName(it.Name), Arguments: rawArgs(it.Arguments)})
-			turn.items = append(turn.items, withoutID(raw))
+			turn.items = append(turn.items, raw)
 		case "reasoning":
 			for _, s := range it.Summary {
 				reasoning.WriteString(s.Text)
 			}
 			if it.Encrypted != "" { // without it, there's nothing to send back
-				turn.items = append(turn.items, withoutID(raw))
+				turn.items = append(turn.items, raw)
 			}
 		}
 	}
@@ -232,21 +234,6 @@ func bareToolName(name string) string {
 		}
 	}
 	return name
-}
-
-// withoutID drops an output item's id: with store false the server keeps
-// nothing, so an item sent back mustn't refer to one it would look up.
-func withoutID(raw json.RawMessage) json.RawMessage {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) != nil {
-		return raw
-	}
-	delete(m, "id")
-	b, err := json.Marshal(m)
-	if err != nil {
-		return raw
-	}
-	return b
 }
 
 // responseObject is the part of a response the bot reads.

@@ -190,12 +190,13 @@ func TestResponsesToolTurn(t *testing.T) {
 	if len(in) != 4 {
 		t.Fatalf("input = %v", in)
 	}
-	// The reasoning goes back ahead of the call it led to, as it came.
+	// The reasoning goes back ahead of the call it led to, as it came (IDs
+	// and all).
 	rs, call, out := in[1].(map[string]any), in[2].(map[string]any), in[3].(map[string]any)
-	if rs["type"] != "reasoning" || rs["encrypted_content"] != "enc-1" || rs["id"] != nil {
+	if rs["type"] != "reasoning" || rs["encrypted_content"] != "enc-1" || rs["id"] != "rs_1" {
 		t.Errorf("reasoning sent back = %v", rs)
 	}
-	if call["type"] != "function_call" || call["call_id"] != "call_1" || call["name"] != "repo.read_file" || call["id"] != nil {
+	if call["type"] != "function_call" || call["call_id"] != "call_1" || call["name"] != "repo.read_file" || call["id"] != "fc_1" {
 		t.Errorf("call sent back = %v", call)
 	}
 	if out["type"] != "function_call_output" || out["call_id"] != "call_1" || out["output"] != "package a" {

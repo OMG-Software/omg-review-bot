@@ -341,7 +341,7 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	body := map[string]any{
 		"model":    o.cfg.Model,
-		"messages": openAIMessages(req.Messages, o.cfg.Model),
+		"messages": openAIMessages(req.Messages, o.source()),
 		"stream":   false,
 	}
 	if !o.noTemp.Load() {
@@ -441,17 +441,24 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 		Duration:         time.Since(start),
 	}
 	if len(calls) > 0 && hasJSONItems(c.Message.ReasoningDetails) {
-		resp.Native = openAITurn{model: o.cfg.Model, details: c.Message.ReasoningDetails}
+		resp.Native = openAITurn{from: o.source(), details: c.Message.ReasoningDetails}
 	}
 	return resp, nil
 }
 
 // openAITurn is the structured reasoning an assistant turn with tool calls
 // came with (OpenRouter's reasoning_details), sent back unchanged with the
-// tool results, but only to the model that wrote it.
+// tool results, but only to the server and model that wrote it.
 type openAITurn struct {
-	model   string
+	from    string // its client's source
 	details json.RawMessage
+}
+
+// source names the provider, server and model the client asks: a native
+// turn goes back only to the same three (a model of the same name at
+// another provider, in a failover, wouldn't know what to do with it).
+func (o *openAI) source() string {
+	return o.cfg.Provider + "\x00" + o.base + "\x00" + o.cfg.Model
 }
 
 // hasJSONItems reports whether raw is a JSON array with something in it.
@@ -460,9 +467,9 @@ func hasJSONItems(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &items) == nil && len(items) > 0
 }
 
-// openAIMessages encodes messages for /v1/chat/completions to model, with
-// tool calls and their results in OpenAI's shape.
-func openAIMessages(msgs []Message, model string) []map[string]any {
+// openAIMessages encodes messages for /v1/chat/completions to source (see
+// openAI.source), with tool calls and their results in OpenAI's shape.
+func openAIMessages(msgs []Message, source string) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		e := map[string]any{"role": m.Role, "content": m.Content}
@@ -473,7 +480,7 @@ func openAIMessages(msgs []Message, model string) []map[string]any {
 					"function": map[string]any{"name": tc.Name, "arguments": string(argsObject(tc.Arguments))}})
 			}
 			e["tool_calls"] = tcs
-			if t, ok := m.Native.(openAITurn); ok && t.model == model {
+			if t, ok := m.Native.(openAITurn); ok && t.from == source {
 				e["reasoning_details"] = t.details
 			} else if m.Reasoning != "" {
 				e["reasoning_content"] = m.Reasoning

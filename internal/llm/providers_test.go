@@ -120,15 +120,25 @@ func TestOpenRouterReasoningDetails(t *testing.T) {
 	if b, _ := json.Marshal(sent["reasoning_details"]); string(b) != details || sent["reasoning_content"] != nil {
 		t.Errorf("assistant turn sent back = %v", sent)
 	}
-	// Another model gets the plain reasoning, not the first one's details.
+	// In a failover, another model, or a model of the same name at another
+	// provider or address, gets the plain reasoning, not the details.
 	other, got2 := chatServer(t, apiError{200, okChat})
-	c2, _ := New(Config{Provider: "openrouter", BaseURL: other.URL + "/api/v1", APIKey: "sk-or", Model: "vendor/other"})
-	if _, err := c2.Chat(context.Background(), Request{Messages: turn, Tools: []Tool{readTool}}); err != nil {
-		t.Fatal(err)
-	}
-	sent = (<-got2).body["messages"].([]any)[1].(map[string]any)
-	if sent["reasoning_details"] != nil || sent["reasoning_content"] != "Look first." {
-		t.Errorf("assistant turn sent to another model = %v", sent)
+	for _, f := range []struct {
+		cfg  Config
+		seen <-chan seen
+	}{
+		{Config{Provider: "openrouter", BaseURL: srv.URL + "/api/v1", APIKey: "sk-or", Model: "vendor/other"}, got},
+		{Config{Provider: "lmstudio", BaseURL: srv.URL + "/api/v1", Model: "google/gemini-x"}, got},
+		{Config{Provider: "openrouter", BaseURL: other.URL + "/api/v1", APIKey: "sk-or", Model: "google/gemini-x"}, got2},
+	} {
+		c2, _ := New(f.cfg)
+		if _, err := c2.Chat(context.Background(), Request{Messages: turn, Tools: []Tool{readTool}}); err != nil {
+			t.Fatal(err)
+		}
+		sent = (<-f.seen).body["messages"].([]any)[1].(map[string]any)
+		if sent["reasoning_details"] != nil || sent["reasoning_content"] != "Look first." {
+			t.Errorf("%s at %s (%s): assistant turn = %v", f.cfg.Model, f.cfg.Provider, f.cfg.BaseURL, sent)
+		}
 	}
 }
 
