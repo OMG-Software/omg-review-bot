@@ -1,0 +1,151 @@
+package web
+
+import (
+	"html"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/OMG-Software/omg-review-bot/internal/chatgpt/chatgpttest"
+	"github.com/OMG-Software/omg-review-bot/internal/settings"
+)
+
+// TestChatGPTSignInFlow: an organization's owner adds a ChatGPT plan model
+// (no key, OpenAI's address whatever the form says), signs it in by pasting
+// back the address the sign-in ended on, and signs it out. A sign-in is
+// finished once; one no model holds any more is ended at OpenAI.
+func TestChatGPTSignInFlow(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn() // alice owns acme
+	oa := chatgpttest.New(t)
+	s.b.UseChatGPTAuth(oa.Client())
+
+	_, hdr := s.post("/orgs/acme/models/add", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"chatgpt"},
+		"base_url": {"https://evil.example.com/v1"}, "api_key": {"sk-not-for-this"}, "model": {"gpt-b"}})
+	if loc := hdr.Get("Location"); strings.Contains(loc, "err=") {
+		t.Fatalf("adding a ChatGPT plan model: %s", loc)
+	}
+	model := func() settings.LLM {
+		t.Helper()
+		m, err := s.b.OrgModels(acmeID)
+		if err != nil || len(m.Configs) != 1 {
+			t.Fatalf("own models = %+v, %v", m, err)
+		}
+		return m.Configs[0]
+	}
+	if c := model(); c.BaseURL != settings.ChatGPTBaseURL || c.APIKey != "" || c.SignedIn() {
+		t.Fatalf("ChatGPT plan model = %+v", c)
+	}
+	if _, body, _ := s.get("/orgs/acme/models"); !strings.Contains(body, "Not signed in") || !strings.Contains(body, "Sign in with ChatGPT") {
+		t.Error("models page doesn't offer the sign-in")
+	}
+
+	start := func() string {
+		t.Helper()
+		_, hdr := s.post("/orgs/acme/models/m1/chatgpt-start", url.Values{})
+		if loc := hdr.Get("Location"); strings.Contains(loc, "err=") || !strings.HasSuffix(loc, "#model-m1") {
+			t.Fatalf("start: %s", loc)
+		}
+		_, body, _ := s.get("/orgs/acme/models")
+		link := regexp.MustCompile(`href="(` + regexp.QuoteMeta(oa.URL) + `/authorize\?[^"]+)"`).FindStringSubmatch(body)
+		if link == nil || !strings.Contains(body, "Finish signing in") {
+			t.Fatal("models page doesn't show the sign-in link and paste box")
+		}
+		return html.UnescapeString(link[1])
+	}
+	finish := func(pasted string) string {
+		t.Helper()
+		_, hdr := s.post("/orgs/acme/models/m1/chatgpt-finish", url.Values{"callback": {pasted}})
+		loc, _ := url.QueryUnescape(hdr.Get("Location"))
+		return loc
+	}
+
+	callback := oa.Approve(t, start())
+	if loc := finish("not the address"); !strings.Contains(loc, "err=") {
+		t.Errorf("a wrong paste was accepted: %s", loc)
+	}
+	// The attempt survives a wrong paste.
+	if loc := finish(callback); strings.Contains(loc, "err=") || !strings.Contains(loc, "dev@example.com") {
+		t.Fatalf("finish: %s", loc)
+	}
+	c := model()
+	if !c.SignedIn() || c.AccountEmail != "dev@example.com" || c.ChatGPTClient != "client-abc" || c.AccountSubject != "user-123" {
+		t.Fatalf("signed-in model = %+v", c)
+	}
+	if loc := finish(callback); !strings.Contains(loc, "already finished") {
+		t.Errorf("a sign-in finished twice: %s", loc)
+	}
+	_, body, _ := s.get("/orgs/acme/models")
+	if !strings.Contains(body, "Signed in as <strong>dev@example.com</strong>") || !strings.Contains(body, "Sign out") {
+		t.Error("models page doesn't show the sign-in")
+	}
+	if strings.Contains(body, "rt-") || strings.Contains(body, "at-") {
+		t.Error("models page shows a token")
+	}
+	var logged []string
+	if acts, err := s.st.RecentActivity(acmeID, 20, "", 0); err == nil {
+		for _, a := range acts {
+			logged = append(logged, a.Message)
+		}
+	}
+	if !strings.Contains(strings.Join(logged, " | "), "in to ChatGPT as dev@example.com") {
+		t.Error("the sign-in isn't in the organization's activity")
+	}
+
+	// Signing in again replaces the sign-in, and ends the old one.
+	first := c.Account
+	if loc := finish(oa.Approve(t, start())); strings.Contains(loc, "err=") {
+		t.Fatalf("signing in again: %s", loc)
+	}
+	if again := model(); again.Account == first || !again.SignedIn() {
+		t.Errorf("after signing in again: %+v", again)
+	}
+	waitRevokes(t, oa, 1)
+
+	// Changing the provider drops the sign-in.
+	s.post("/orgs/acme/models/m1/update", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"openai-api"},
+		"base_url": {"https://api.openai.com/v1"}, "api_key": {"sk-openai"}, "model": {"gpt-b"}})
+	if c := model(); c.SignedIn() || c.Provider != settings.ProviderOpenAI || c.ChatGPTClient != "" {
+		t.Errorf("after changing provider: %+v", c)
+	}
+	waitRevokes(t, oa, 2)
+
+	// And back, signed in, then out.
+	s.post("/orgs/acme/models/m1/update", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"chatgpt"}, "model": {"gpt-b"}})
+	finish(oa.Approve(t, start()))
+	if !model().SignedIn() {
+		t.Fatal("not signed in")
+	}
+	if _, hdr := s.post("/orgs/acme/models/m1/chatgpt-signout", url.Values{}); strings.Contains(hdr.Get("Location"), "err=") {
+		t.Fatalf("sign out: %s", hdr.Get("Location"))
+	}
+	if c := model(); c.SignedIn() || c.AccountEmail != "" {
+		t.Errorf("after signing out: %+v", c)
+	}
+	waitRevokes(t, oa, 3)
+
+	// A model of another provider can't be signed in.
+	s.post("/orgs/acme/models/m1/update", url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"openai-api"},
+		"base_url": {"https://api.openai.com/v1"}, "api_key": {"sk-openai"}, "model": {"gpt-b"}})
+	if _, hdr := s.post("/orgs/acme/models/m1/chatgpt-start", url.Values{}); !strings.Contains(hdr.Get("Location"), "err=") {
+		t.Error("a sign-in was started for a model of another provider")
+	}
+	if code, _ := s.post("/orgs/other/models/m1/chatgpt-start", url.Values{}); code == http.StatusSeeOther {
+		t.Error("a sign-in was started in an organization alice doesn't own")
+	}
+}
+
+func waitRevokes(t *testing.T, oa *chatgpttest.Server, n int) {
+	t.Helper()
+	for range 200 {
+		if len(oa.Revoked()) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%d sign-ins ended at OpenAI, want %d", len(oa.Revoked()), n)
+}

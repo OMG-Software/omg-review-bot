@@ -44,6 +44,9 @@ type Server struct {
 	// modelLocks holds a *sync.Mutex per organization, doing the same for
 	// changes to its own models (see modelsLock).
 	modelLocks sync.Map
+	// signIns holds the ChatGPT sign-ins started on the models pages, until
+	// the address each ended on is pasted back (see chatgptAction).
+	signIns sync.Map
 
 	// unreconciled holds the IDs of people whose access sign-in couldn't
 	// update: none of their sessions count until a sign-in does. It's kept

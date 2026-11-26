@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,15 @@ type modelScope struct {
 	// own: an organization's own models, which must be reached at a public
 	// https address (see settings.CheckOwn).
 	own bool
+}
+
+// set is whose models these are, as the bot names a set: 0 for the
+// instance's, else the organization's ID.
+func (sc modelScope) set() int64 {
+	if sc.org != nil {
+		return sc.org.ID
+	}
+	return 0
 }
 
 // instanceModels is the scope of the instance's models (routes are adminOnly).
@@ -77,6 +87,9 @@ type modelView struct {
 	settings.LLM
 	HasKey bool
 	Usage  store.ConfigUsage // its use over the last usageDays days
+	// SignInURL starts the ChatGPT sign-in the viewer began for it, waiting
+	// for the address it ended on ("" when there's none).
+	SignInURL string
 }
 
 // usageDays is the period the models page counts each model's use over.
@@ -105,11 +118,8 @@ func (s *Server) modelsPage(w http.ResponseWriter, r *http.Request, sc modelScop
 	shown := m
 	shown.Configs = make([]settings.LLM, len(m.Configs))
 	views := make([]modelView, len(m.Configs))
-	var set int64 // whose models' use to count: the instance's, or the organization's own
-	if sc.org != nil {
-		set = sc.org.ID
-	}
-	usage, uerr := s.store.ConfigUsageSince(set, store.DayWindowStart(usageDays, time.Now()))
+	// Whose models' use to count: the instance's, or the organization's own.
+	usage, uerr := s.store.ConfigUsageSince(sc.set(), store.DayWindowStart(usageDays, time.Now()))
 	if uerr != nil {
 		s.log.Warn("model usage", "err", uerr)
 	}
@@ -118,12 +128,15 @@ func (s *Server) modelsPage(w http.ResponseWriter, r *http.Request, sc modelScop
 		c.APIKey = ""
 		shown.Configs[i] = c
 		views[i] = modelView{LLM: c, HasKey: key, Usage: usage[c.ID]}
+		if p, ok := s.pendingSignIn(sc, c.ID, me(r)); ok && !readOnly {
+			views[i].SignInURL = p.url
+		}
 	}
 	d := map[string]any{
 		"Base": sc.base, "Own": sc.own, "M": shown, "Configs": views, "ReadOnly": readOnly,
 		"Strategies": settings.Strategies, "Providers": settings.Providers, "New": settings.NewLLM(),
 		"Max": settings.MaxModels, "Full": len(m.Configs) >= settings.MaxModels, "Unreadable": err != nil,
-		"UsageDays": usageDays, "UsageKnown": uerr == nil,
+		"UsageDays": usageDays, "UsageKnown": uerr == nil, "ChatGPT": settings.ProviderChatGPT,
 	}
 	if sc.org != nil {
 		// Only the names of the instance's models: members can see this page.
@@ -194,26 +207,39 @@ func (s *Server) modelsLock(sc modelScope) *sync.Mutex {
 }
 
 // modelsChange loads the scope's models, applies change and saves them,
-// then redirects back with msg or the error.
-func (s *Server) modelsChange(w http.ResponseWriter, r *http.Request, sc modelScope, change func(*settings.Models) (string, error)) {
+// then redirects back with msg or the error, which it returns.
+func (s *Server) modelsChange(w http.ResponseWriter, r *http.Request, sc modelScope, change func(*settings.Models) (string, error)) error {
+	msg, err := s.applyModels(r, sc, change)
+	if err != nil {
+		redirectErr(w, r, sc.base, err)
+		return err
+	}
+	redirectMsg(w, r, sc.base, upperFirst(msg)+".")
+	return nil
+}
+
+// applyModels is modelsChange without the redirect. The ChatGPT sign-ins
+// of models the change removed (or signed in again, or moved to another
+// provider) are ended once it's saved.
+func (s *Server) applyModels(r *http.Request, sc modelScope, change func(*settings.Models) (string, error)) (string, error) {
 	mu := s.modelsLock(sc)
 	mu.Lock()
 	defer mu.Unlock()
 	m, err := s.loadModels(sc)
 	if err != nil && sc.org != nil && r.PathValue("action") != "delete" {
-		redirectErr(w, r, sc.base, err)
-		return
+		return "", err
 	}
+	before := settings.Models{Configs: slices.Clone(m.Configs)}
 	msg, err := change(&m)
 	if err == nil {
 		err = s.saveModels(sc, m)
 	}
 	if err != nil {
-		redirectErr(w, r, sc.base, err)
-		return
+		return "", err
 	}
+	s.bot.ForgetChatGPT(sc.set(), before, m)
 	s.logModels(sc, r, msg)
-	redirectMsg(w, r, sc.base, upperFirst(msg)+".")
+	return msg, nil
 }
 
 // modelsAction handles the page's forms: the strategy, adding, changing,
@@ -318,6 +344,8 @@ func (s *Server) modelsAction(w http.ResponseWriter, r *http.Request, sc modelSc
 		})
 	case "test", "list", "limits":
 		s.modelsProbe(w, r, sc)
+	case "chatgpt-start", "chatgpt-finish", "chatgpt-cancel", "chatgpt-signout":
+		s.chatgptAction(w, r, sc, id, where)
 	default:
 		s.notFound(w, r)
 	}
@@ -345,7 +373,7 @@ func (s *Server) modelsProbe(w http.ResponseWriter, r *http.Request, sc modelSco
 	if r.PathValue("action") == "list" {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		models, err := s.bot.ListModels(ctx, c, sc.own)
+		models, err := s.bot.ListModels(ctx, c, sc.set())
 		msg := fmt.Sprintf("%d models available.", len(models))
 		if err == nil && len(models) == 0 {
 			msg = "The server returned no models. Load or pull one first."
@@ -356,7 +384,7 @@ func (s *Server) modelsProbe(w http.ResponseWriter, r *http.Request, sc modelSco
 	if r.PathValue("action") == "limits" {
 		ctx, cancel := context.WithTimeout(r.Context(), limitsTimeout)
 		defer cancel()
-		lim, err := s.bot.ModelLimits(ctx, c, sc.own)
+		lim, err := s.bot.ModelLimits(ctx, c, sc.set())
 		if err != nil {
 			respond(w, "", fmt.Errorf("couldn't read %s's token limits: %w", c.Model, err), nil)
 			return
@@ -368,7 +396,7 @@ func (s *Server) modelsProbe(w http.ResponseWriter, r *http.Request, sc modelSco
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(c.TimeoutSeconds)*time.Second)
 	defer cancel()
-	msg, err := s.bot.TestModel(ctx, c, sc.own)
+	msg, err := s.bot.TestModel(ctx, c, sc.set())
 	respond(w, msg, err, nil)
 }
 
@@ -401,9 +429,13 @@ func (s *Server) formMaximums(r *http.Request, sc modelScope, cur settings.LLM) 
 		mx.err = err // the change itself reports it
 		return mx
 	}
+	if c.Provider == settings.ProviderChatGPT && !c.SignedIn() {
+		mx.err = errors.New(`sign in with ChatGPT first, then press "Use model maximums"`)
+		return mx
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), limitsTimeout)
 	defer cancel()
-	mx.lim, mx.err = s.bot.ModelLimits(ctx, c, sc.own)
+	mx.lim, mx.err = s.bot.ModelLimits(ctx, c, sc.set())
 	return mx
 }
 

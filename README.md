@@ -5,8 +5,10 @@
 # omg-review-bot
 
 A self-hosted GitHub pull request reviewer. It's a single Go binary for Windows or Linux that
-reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama**) or with
-**Ollama Cloud**. It follows a **review skill** (`SKILL.md`) that you install. We recommend
+reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama**), a hosted one
+(**Ollama Cloud**, **OpenRouter**, the **Anthropic API** or the **OpenAI API**), or the models of
+your **ChatGPT plan** (Sign in with ChatGPT). It follows a **review skill** (`SKILL.md`) that you
+install. We recommend
 [code-change-review](https://github.com/OMG-Software/code-change-review-skill).
 
 - **Webhooks or polling.** It connects as a GitHub App. With a public address it acts on webhooks
@@ -121,11 +123,12 @@ In **Settings → Models → Manage models**:
 2. Click **Load models** and choose one.
 3. Leave **Context tokens** and **Max output tokens** empty to use the model's maximums: the bot
    reads them from the model's server when you save (or click **Use model maximums** to see them
-   first). LM Studio, Ollama, OpenRouter, vLLM and llama.cpp's server report them. A server that
-   reports a context window but no output cap gets half the window for output, leaving the other
-   half for the prompt. A server that reports nothing gets 131072 / 16384, and the page says so.
-   For LM Studio, load the model with that context length; for Ollama the context sets `num_ctx`,
-   which also sets how much memory the model takes, so lower it if your machine can't hold it.
+   first). LM Studio, Ollama, OpenRouter, the Anthropic API, vLLM and llama.cpp's server report
+   them. A server that reports a context window but no output cap gets half the window for output,
+   leaving the other half for the prompt. A server that reports nothing gets 131072 / 16384, and the
+   page says so. For LM Studio, load the model with that context length; for Ollama the context sets
+   `num_ctx`, which also sets how much memory the model takes, so lower it if your machine can't
+   hold it.
 4. Click **Test model**, then **Save**.
 
 You can add more models (up to 8) and choose how they're used:
@@ -315,12 +318,13 @@ or straight away with **Repositories → Sync from GitHub**).
    public**. Public means any GitHub account *can* install it; it isn't listed in the Marketplace.
    GitHub lets you make it private again only while it's installed on its own account alone.
 2. **Limit which accounts are reviewed.** In **Settings → GitHub App**, list the orgs you serve
-   under **Only these orgs/accounts**, one per line, *before* you share the install link. While
-   the list is empty every installation is reviewed, so anyone who installs the public App gets
-   their PRs reviewed on your model (and your API key, with Ollama Cloud). An installation the list
-   leaves out never becomes an organization in the bot: its repositories aren't listed, polled or
-   reviewed, and nobody gets access through it. Taking an org that's already in the bot off the
-   list pauses it instead; its repositories, settings and history are kept.
+   under **Only these orgs/accounts**, one per line, *before* you share the install link. While the
+   list is empty every installation is reviewed, so anyone who installs the public App gets their
+   PRs reviewed on your model (and your API key or ChatGPT plan, with a hosted provider). An
+   installation the list leaves out never becomes an organization in the bot: its repositories
+   aren't listed, polled or reviewed, and nobody gets access through it. Taking an org that's
+   already in the bot off the list pauses it instead; its repositories, settings and history are
+   kept.
 3. **Send the install link** to an owner of each org. It's on the bot's **Organizations** page
    (**Add an organization → Install the GitHub App**), and is
    `https://github.com/apps/<app-name>/installations/new`. They pick their org and choose all
@@ -376,18 +380,60 @@ every *Poll interval*.
 | LM Studio | `http://localhost:1234/v1` | Context length is set when you load the model in LM Studio; the bot can't change it. |
 | Ollama (local) | `http://localhost:11434` | Uses Ollama's native `/api/chat` so the bot can set `num_ctx`. Ollama's OpenAI-compatible endpoint can't, and its small default silently drops the start of long prompts. |
 | Ollama Cloud | `https://ollama.com` | Needs an API key from ollama.com. |
+| OpenRouter | `https://openrouter.ai/api/v1` | Needs an API key from openrouter.ai. Its catalog reports each model's context window and output cap. |
+| Anthropic API (Claude) | `https://api.anthropic.com` | Needs an API key from the [Claude Console](https://platform.claude.com/). Uses Anthropic's official Go SDK: streamed answers, the system prompt and tool conversations cached, the JSON schema as structured output, no temperature (current Claude models refuse one). The Models API gives each model's limits. |
+| OpenAI API (ChatGPT models) | `https://api.openai.com/v1` | Needs an API key from platform.openai.com, billed to that API account. Sends `max_completion_tokens`; a model that refuses a temperature (reasoning models) is asked again without one. |
+| ChatGPT plan | `https://api.openai.com/v1` | No API key: sign in with a ChatGPT account, and reviews use its plan. See [Using a ChatGPT plan](#using-a-chatgpt-plan). |
 | Other OpenAI-compatible | e.g. `http://host:8000/v1` | vLLM, llama.cpp server, and others. |
 
 To use a model on another machine, set the base URL to that machine. In LM Studio, enable
 *Serve on local network*. For Ollama, start it with `OLLAMA_HOST=0.0.0.0`.
 
+### Using a ChatGPT plan
+
+The **ChatGPT plan** provider uses OpenAI's
+[Sign in with ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source)
+(a preview for open-source apps): instead of an API key, a ChatGPT account is signed in and the
+model's reviews and replies count against that account's plan.
+
+1. Add a model with the **ChatGPT plan** provider and a model name (after signing in, **Load
+   models** lists those the account may use). It takes no key, and its address is always OpenAI's.
+2. On its card, click **Sign in with ChatGPT**, then **Open the ChatGPT sign-in**. Sign in and
+   allow the use of your ChatGPT plan.
+3. The sign-in ends on a `http://127.0.0.1:1455/auth/callback?…` page. Unless the bot runs on the
+   computer you're using, that page won't load: that's expected. Copy its whole address from the
+   address bar, paste it on the model's card and click **Finish signing in**, within 15 minutes.
+
+The bot then keeps the sign-in and renews its access token as it expires. Each renewal replaces the
+refresh token, so renewals of one sign-in run one at a time. Signing out, removing the model or
+changing its provider ends the sign-in at OpenAI. A sign-in that didn't allow the plan's use isn't
+kept, but the next one asks for it again.
+
+Things to know:
+- Use only your own account. The sign-in is stored encrypted, bound to the set of models it was
+  made for (the instance's, or one org's), and only that model uses it.
+- The plan's [usage limits](https://chatgpt.com/settings/usage) apply. When they're used up,
+  reviews fail with a message that links there; with **Failover**, the next model takes over.
+- The preview limits what a request can use
+  ([preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)):
+  answers are streamed and not stored at OpenAI, there's no temperature or output cap (the
+  **Max output tokens** setting only sizes the bot's prompts), and the repository tools are offered
+  inside a namespace. Errors from the preview, such as an account that isn't eligible, are shown as
+  OpenAI gives them.
+
+**Why there's no "Sign in with Claude".** Anthropic doesn't permit third-party apps to offer
+Claude.ai sign-in or to use Free, Pro, Max or Ultra plan credentials on their users' behalf ([Claude
+Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)). Use the
+**Anthropic API** provider with an API key from the Claude Console instead.
+
 **What works well:** code models of 14B parameters or more with at least a 32k context, for
 example Qwen2.5-Coder 32B, Qwen3-Coder 30B-A3B or Devstral. Small general models (around 4B)
 produce valid output but tend to summarize the PR and find nothing.
 
-**Reasoning models** (Qwen3, DeepSeek-R1, …) work. Their `<think>` blocks are removed, and
-reasoning returned in a separate field is ignored. However, they spend output tokens on thinking
-before answering. If a review fails with *"used all its output tokens on reasoning"*, raise
+**Reasoning models** (Qwen3, DeepSeek-R1, …) work. Their `<think>` blocks are removed, and reasoning
+returned in a separate field is ignored, except that it's sent back with tool calls where a server
+needs it (Claude's signed thinking, DeepSeek's thinking mode). However, they spend output tokens on
+thinking before answering. If a review fails with *"used all its output tokens on reasoning"*, raise
 **Max output tokens** (8192 or more) or use a non-reasoning model.
 
 Leave **Enforce JSON schema output** on unless your server rejects `response_format` (OpenAI
@@ -935,8 +981,15 @@ a public issue.
 
 - The UI listens on `127.0.0.1` only by default. Until an admin password is set, anyone who can
   open the UI can set one, so set it right away if you change `-listen`.
-- The GitHub App private key and model API key are stored unencrypted in `data/prbot.db`. Keep
-  the `data` folder private; it's gitignored.
+- The GitHub App private key and the instance's model API keys are stored unencrypted in
+  `data/prbot.db`. Keep the `data` folder private; it's gitignored. Orgs' own models and every
+  ChatGPT sign-in are stored encrypted (see `secret.key` above); a sign-in only decrypts for the set
+  of models it was made for, so one org's model can't use another's.
+- An Anthropic API model without a key of its own sends none: the bot never uses the host's
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` or other Anthropic environment settings.
+- A ChatGPT sign-in uses an authorization code with PKCE. The verifier never leaves the bot; the
+  pasted address is checked against the sign-in it started, and its ID token against OpenAI's
+  published keys, issuer, audience, expiry and nonce. Its tokens go only to OpenAI.
 - The bot's only GitHub actions are posting reviews, review replies and PR comments. The App
   permissions above are the minimum it needs.
 - PR titles, descriptions and code are untrusted. They're given to the model as data, and the
@@ -1000,7 +1053,8 @@ a new version, change `Version` in `internal/version/version.go`.
 | `cmd/prbot` | Entry point, flags, Windows service / signal handling |
 | `internal/bot` | Polling, webhook events (`webhook.go`), the job queue and worker, reviews, replies, prompts, fix checks and approval (`resolve.go`), ignore-file patterns (`filter.go`), project guidelines (`guidelines.go`) and making model output safe to post (`sanitize.go`) |
 | `internal/github` | GitHub App auth (JWT, installation tokens), the REST calls used, GraphQL for review threads, and sign-in and webhook signatures (`oauth.go`) |
-| `internal/llm` | OpenAI-compatible and native Ollama clients, JSON extraction |
+| `internal/llm` | OpenAI-compatible (OpenAI API, OpenRouter and others), native Ollama, Anthropic (official SDK) and ChatGPT plan (Responses API) clients, JSON extraction |
+| `internal/chatgpt` | Sign in with ChatGPT: authorization code with PKCE, ID token checks, token renewal and revocation |
 | `internal/skill` | `SKILL.md` parsing, zip install, language-aware reference selection |
 | `internal/diff` | Unified-diff parsing and line-numbered rendering |
 | `internal/store` | SQLite schema, migrations and queries; users, orgs, memberships, deliveries and statistics (`tenancy.go`) |

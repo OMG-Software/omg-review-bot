@@ -44,14 +44,21 @@
   });
 
   // Switching provider fills in its default URL unless a custom one was
-  // typed (each model form has its own pair).
+  // typed (each model form has its own pair). A ChatGPT plan model signs in
+  // instead, so its key and address fields are hidden.
   document.addEventListener("change", (e) => {
     const provider = e.target.closest("select[data-provider]");
-    const base = provider && provider.form && provider.form.querySelector("input[data-base]");
+    const form = provider && provider.form;
+    const base = form && form.querySelector("input[data-base]");
     if (!base) return;
+    const chosen = provider.selectedOptions[0];
     const defaults = new Set([...provider.options].map((o) => o.dataset.base).filter(Boolean));
-    const def = provider.selectedOptions[0].dataset.base;
+    const def = chosen.dataset.base;
     if (!base.value || defaults.has(base.value)) base.value = def || "";
+    const signIn = "signin" in chosen.dataset;
+    if (signIn) base.value = def || "";
+    for (const el of form.querySelectorAll("[data-key-field]")) el.hidden = signIn;
+    for (const el of form.querySelectorAll("[data-signin-note]")) el.hidden = !signIn;
   });
 
   // "Generate" fills a secret field with a random value and shows it, so it

@@ -18,6 +18,8 @@
   }
 }
 * { box-sizing: border-box; }
+/* hidden wins over the display of .row, label.check and the like. */
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.5 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
 a { color: var(--link); text-decoration: none; }

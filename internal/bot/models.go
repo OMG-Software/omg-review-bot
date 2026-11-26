@@ -158,10 +158,12 @@ type modelClient interface {
 // addresses. Tests turn it off to serve them from httptest.
 var ownPublicOnly = true
 
-// newClient returns the client for one configuration. Organizations' own
-// models are reached only at public https addresses.
-func newClient(cfg settings.LLM, own bool) (llm.Client, error) {
-	return llm.New(llm.Config{
+// newClient returns the client for one configuration of set (0: the
+// instance's models, else the organization's own). Organizations' own
+// models are reached only at public https addresses. A ChatGPT plan model
+// uses its sign-in, which only opens for the set it was made for.
+func (b *Bot) newClient(cfg settings.LLM, set int64) (llm.Client, error) {
+	lc := llm.Config{
 		Provider:      cfg.Provider,
 		BaseURL:       cfg.BaseURL,
 		APIKey:        cfg.APIKey,
@@ -169,8 +171,12 @@ func newClient(cfg settings.LLM, own bool) (llm.Client, error) {
 		ContextTokens: cfg.ContextTokens,
 		Structured:    cfg.StructuredOutput,
 		Timeout:       time.Duration(cfg.TimeoutSeconds) * time.Second,
-		PublicOnly:    own && ownPublicOnly,
-	})
+		PublicOnly:    set != 0 && ownPublicOnly,
+	}
+	if cfg.Provider == settings.ProviderChatGPT && cfg.SignedIn() {
+		lc.Tokens = chatgptTokens{b: b, id: cfg.Account, set: set}
+	}
+	return llm.New(lc)
 }
 
 // tuned calls one model with its own temperature and output cap: callers
@@ -299,14 +305,14 @@ func (f *failover) skip(err error) bool {
 // modelUses builds the clients for st's models in use, in order. One that
 // can't be built (a malformed address, say) is left out, and named in
 // skipped, so the others still serve: it's an error only if none can be.
-func modelUses(st settings.Settings) (uses []tuned, skipped, err error) {
+func (b *Bot) modelUses(st settings.Settings) (uses []tuned, skipped, err error) {
 	cfgs := st.Models.InUse()
 	if len(cfgs) == 0 {
 		return nil, nil, errors.New("no model is configured")
 	}
 	var errs []error
 	for _, c := range cfgs {
-		lc, err := newClient(c, st.OwnModels != 0)
+		lc, err := b.newClient(c, st.OwnModels)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", c.Label(), err))
 			continue
@@ -321,7 +327,7 @@ func modelUses(st settings.Settings) (uses []tuned, skipped, err error) {
 
 // usableModels is modelUses, logging the models left out.
 func (b *Bot) usableModels(st settings.Settings, pr *store.PR) ([]tuned, error) {
-	uses, skipped, err := modelUses(st)
+	uses, skipped, err := b.modelUses(st)
 	for i := range uses {
 		uses[i].meter = b.meterCall
 	}
@@ -460,10 +466,11 @@ func abs(n int) int {
 	return n
 }
 
-// TestModel sends a tiny prompt to one model configuration. own marks an
-// organization's own model, reached only at public https addresses.
-func (b *Bot) TestModel(ctx context.Context, cfg settings.LLM, own bool) (string, error) {
-	lc, err := newClient(cfg, own)
+// TestModel sends a tiny prompt to one model configuration of set (0: the
+// instance's, else an organization's own, reached only at public https
+// addresses).
+func (b *Bot) TestModel(ctx context.Context, cfg settings.LLM, set int64) (string, error) {
+	lc, err := b.newClient(cfg, set)
 	if err != nil {
 		return "", err
 	}
@@ -486,8 +493,8 @@ func (b *Bot) TestModel(ctx context.Context, cfg settings.LLM, own bool) (string
 }
 
 // ListModels lists the models one configuration's server offers.
-func (b *Bot) ListModels(ctx context.Context, cfg settings.LLM, own bool) ([]string, error) {
-	lc, err := newClient(cfg, own)
+func (b *Bot) ListModels(ctx context.Context, cfg settings.LLM, set int64) ([]string, error) {
+	lc, err := b.newClient(cfg, set)
 	if err != nil {
 		return nil, err
 	}
@@ -495,8 +502,8 @@ func (b *Bot) ListModels(ctx context.Context, cfg settings.LLM, own bool) ([]str
 }
 
 // ModelLimits asks one configuration's server for its model's token limits.
-func (b *Bot) ModelLimits(ctx context.Context, cfg settings.LLM, own bool) (llm.Limits, error) {
-	lc, err := newClient(cfg, own)
+func (b *Bot) ModelLimits(ctx context.Context, cfg settings.LLM, set int64) (llm.Limits, error) {
+	lc, err := b.newClient(cfg, set)
 	if err != nil {
 		return llm.Limits{}, err
 	}

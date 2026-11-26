@@ -2,6 +2,7 @@ package settings
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +100,70 @@ func TestSetMaximums(t *testing.T) {
 	}
 	if d := NewLLM(); d.ContextTokens != FallbackContextTokens || d.MaxOutputTokens != FallbackOutputTokens {
 		t.Errorf("a new model's limits = %d/%d", d.ContextTokens, d.MaxOutputTokens)
+	}
+}
+
+// TestProviders: every provider has a label; hosted ones need a key; the
+// ChatGPT plan takes none, is pinned to OpenAI's address, and needs a
+// sign-in; a sign-in doesn't outlive a change of provider.
+func TestProviders(t *testing.T) {
+	for _, p := range Providers {
+		if p.ID == "" || p.Label == "" {
+			t.Errorf("provider %+v has no ID or label", p)
+		}
+		if _, ok := ProviderInfo(p.ID); !ok {
+			t.Errorf("ProviderInfo(%q) not found", p.ID)
+		}
+	}
+	for _, id := range []string{ProviderOpenRouter, ProviderAnthropic, ProviderOpenAI, "ollama-cloud"} {
+		if p, _ := ProviderInfo(id); !p.Key || p.Base == "" {
+			t.Errorf("%s: %+v, want a key and a default address", id, p)
+		}
+		m := Models{Configs: []LLM{{Provider: id, Model: "x"}}}
+		m.Normalize()
+		if c := m.Configs[0]; c.BaseURL != DefaultBaseURL(id) {
+			t.Errorf("%s: base URL %q", id, c.BaseURL)
+		}
+		if issues := m.Issues(); len(issues) != 1 || !strings.Contains(issues[0], "API key") {
+			t.Errorf("%s without a key: issues %v", id, issues)
+		}
+		if err := CheckOwn(m.Configs[0]); err == nil || !strings.Contains(err.Error(), "API key") {
+			t.Errorf("%s without a key: CheckOwn = %v", id, err)
+		}
+		m.Configs[0].APIKey = "k"
+		if issues := m.Issues(); len(issues) != 0 {
+			t.Errorf("%s with a key: issues %v", id, issues)
+		}
+		if err := CheckOwn(m.Configs[0]); err != nil {
+			t.Errorf("%s with a key: CheckOwn = %v", id, err)
+		}
+	}
+
+	c := LLM{Provider: ProviderChatGPT, BaseURL: "https://evil.example.com/v1", APIKey: "sk-x", Model: "gpt-b",
+		Account: "a1", AccountEmail: "dev@example.com", ChatGPTClient: "client-abc"}
+	c.Normalize()
+	if c.BaseURL != ChatGPTBaseURL || c.APIKey != "" || c.Account != "a1" || !c.SignedIn() {
+		t.Errorf("ChatGPT plan model = %+v, want OpenAI's address, no key, its sign-in kept", c)
+	}
+	if err := CheckOwn(c); err != nil {
+		t.Errorf("CheckOwn(ChatGPT plan) = %v", err)
+	}
+	out := Models{Configs: []LLM{{Provider: ProviderChatGPT, Model: "gpt-b"}}}
+	out.Normalize()
+	if issues := out.Issues(); len(issues) != 1 || !strings.Contains(issues[0], "Sign in with ChatGPT") {
+		t.Errorf("ChatGPT plan without a sign-in: issues %v", issues)
+	}
+	if err := CheckOwn(out.Configs[0]); err != nil {
+		t.Errorf("a ChatGPT plan model can't be added before its sign-in: %v", err)
+	}
+	c.Provider = ProviderOpenAI
+	c.Normalize()
+	if c.Account != "" || c.AccountEmail != "" || c.ChatGPTClient != "" || c.SignedIn() {
+		t.Errorf("sign-in kept after the provider changed: %+v", c)
+	}
+	u := LLM{Provider: "something-new"}
+	u.Normalize()
+	if u.Provider != "lmstudio" {
+		t.Errorf("unknown provider became %q", u.Provider)
 	}
 }

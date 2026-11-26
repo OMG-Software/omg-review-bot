@@ -153,8 +153,11 @@ func (m Models) Issues() []string {
 		if c.Model == "" {
 			out = append(out, "LLM model is not set"+name)
 		}
-		if c.Provider == "ollama-cloud" && c.APIKey == "" {
-			out = append(out, "Ollama Cloud needs an API key"+name)
+		if p, _ := ProviderInfo(c.Provider); p.Key && c.APIKey == "" {
+			out = append(out, p.Label+" needs an API key"+name)
+		}
+		if c.Provider == ProviderChatGPT && !c.SignedIn() {
+			out = append(out, "Sign in with ChatGPT to use the plan's models"+name)
 		}
 	}
 	return out
@@ -175,7 +178,7 @@ func (l LLM) Label() string {
 func (l *LLM) Normalize() {
 	l.Name = textutil.Truncate(strings.TrimSpace(l.Name), 60)
 	l.Provider = strings.TrimSpace(l.Provider)
-	if DefaultBaseURL(l.Provider) == "" && l.Provider != "openai" {
+	if _, ok := ProviderInfo(l.Provider); !ok {
 		l.Provider = "lmstudio"
 	}
 	l.BaseURL = strings.TrimRight(strings.TrimSpace(l.BaseURL), "/")
@@ -183,6 +186,14 @@ func (l *LLM) Normalize() {
 		l.BaseURL = DefaultBaseURL(l.Provider)
 	}
 	l.APIKey = strings.TrimSpace(l.APIKey)
+	if l.Provider == ProviderChatGPT {
+		// The sign-in's tokens go to OpenAI only, and it takes no key.
+		l.BaseURL, l.APIKey = ChatGPTBaseURL, ""
+	} else {
+		// A sign-in belongs to the ChatGPT model it was made for; with the
+		// provider changed, its tokens are dropped (see bot.DropUnusedChatGPT).
+		l.Account, l.AccountEmail, l.AccountSubject, l.ChatGPTClient = "", "", "", ""
+	}
 	l.Model = strings.TrimSpace(l.Model)
 	l.Temperature = clampF(l.Temperature, 0, 2)
 	l.ContextTokens = clamp(l.ContextTokens, MinContextTokens, MaxContextTokens)
@@ -249,9 +260,11 @@ func CheckOwn(l LLM) error {
 	if l.BaseURL == "" {
 		return errors.New("enter the model server's base URL")
 	}
-	if l.Provider == "ollama-cloud" && l.APIKey == "" {
-		return errors.New("an Ollama Cloud model needs an API key") // as Models.Issues requires
+	if p, _ := ProviderInfo(l.Provider); p.Key && l.APIKey == "" {
+		return fmt.Errorf("a model from %s needs an API key", p.Label) // as Models.Issues requires
 	}
+	// A ProviderChatGPT model is added before its sign-in, which is made on
+	// the saved model: until then Models.Issues names what's missing.
 	if err := netguard.CheckURL(l.BaseURL); err != nil {
 		return fmt.Errorf("the base URL must be a public https address: %w", err)
 	}
