@@ -700,6 +700,40 @@ FROM reviews WHERE started_at>=? AND (?=-1 OR account_id=?) GROUP BY 1`, start.U
 	return out, nil
 }
 
+// OrgDayPosted is one organization's reviews posted on one UTC day.
+type OrgDayPosted struct {
+	Day       time.Time // midnight UTC
+	AccountID int64
+	Login     string // "" if the organization isn't stored
+	Posted    int
+}
+
+// PostedPerDayByOrg counts each organization's reviews posted on each of the
+// last `days` days (UTC): ReviewsPerDay's days for every organization, split
+// by organization. A day an organization posted none of is left out.
+func (s *Store) PostedPerDayByOrg(days int, now time.Time) ([]OrgDayPosted, error) {
+	rows, err := s.db.Query(`SELECT date(r.started_at,'unixepoch'), r.account_id, COALESCE(o.login,''), COUNT(*)
+FROM reviews r LEFT JOIN orgs o ON o.id=r.account_id
+WHERE r.started_at>=? AND r.status='posted' GROUP BY 1, 2 ORDER BY 1, 2`, DayWindowStart(days, now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrgDayPosted
+	for rows.Next() {
+		var day string
+		var c OrgDayPosted
+		if err := rows.Scan(&day, &c.AccountID, &c.Login, &c.Posted); err != nil {
+			return nil, err
+		}
+		if c.Day, err = time.Parse("2006-01-02", day); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // RepoStats summarizes one repository's reviews.
 type RepoStats struct {
 	AccountID        int64

@@ -34,13 +34,24 @@ func rangeDays(r *http.Request, ranges []int, def int) int {
 // charted by week, as a year of daily columns would be a pixel wide.
 const weeklyAfter = 120
 
+// weekSpans splits n days into weeks, the last ending with the last day and
+// a part week, if any, first: each is its days' [start, end) indices.
+func weekSpans(n int) [][2]int {
+	var out [][2]int
+	for end := n; end > 0; end -= 7 {
+		out = append(out, [2]int{max(0, end-7), end})
+	}
+	slices.Reverse(out)
+	return out
+}
+
 // byWeek sums days up into weeks, the last ending with the last day.
 func byWeek(days []store.DayStats) []store.DayStats {
-	var out []store.DayStats
-	for end := len(days); end > 0; end -= 7 {
-		start := max(0, end-7)
-		w := store.DayStats{Day: days[start].Day, Span: end - start}
-		for _, d := range days[start:end] {
+	spans := weekSpans(len(days))
+	out := make([]store.DayStats, len(spans))
+	for k, sp := range spans {
+		w := store.DayStats{Day: days[sp[0]].Day, Span: sp[1] - sp[0]}
+		for _, d := range days[sp[0]:sp[1]] {
 			w.Posted += d.Posted
 			w.Errors += d.Errors
 			w.Findings += d.Findings
@@ -50,9 +61,19 @@ func byWeek(days []store.DayStats) []store.DayStats {
 				w.Sev[i] += d.Sev[i]
 			}
 		}
-		out = append(out, w)
+		out[k] = w
 	}
-	slices.Reverse(out)
+	return out
+}
+
+// sumSpans sums vals over each span of weekSpans.
+func sumSpans(vals []int, spans [][2]int) []int {
+	out := make([]int, len(spans))
+	for k, sp := range spans {
+		for _, v := range vals[sp[0]:sp[1]] {
+			out[k] += v
+		}
+	}
 	return out
 }
 
@@ -139,10 +160,12 @@ func (s *Server) metricsData(accountID int64, days int) map[string]any {
 	}
 	stats, err := s.store.ReviewStatsSince(accountID, since)
 	warn("reviews", err)
-	perDay, err := s.store.ReviewsPerDay(accountID, days, now)
+	daily, err := s.store.ReviewsPerDay(accountID, days, now)
 	warn("days", err)
-	if days > weeklyAfter {
-		perDay = byWeek(perDay)
+	weekly := days > weeklyAfter
+	perDay := daily
+	if weekly {
+		perDay = byWeek(daily)
 	}
 	// Every repository, so each chart ranks over all of them; the table
 	// shows the most reviewed.
@@ -177,6 +200,9 @@ func (s *Server) metricsData(accountID int64, days int) map[string]any {
 		orgs, err := s.store.OrgMetricsSince(since)
 		warn("organizations", err)
 		d["Orgs"], d["OrgSevRows"], d["OrgCount"] = orgs, orgSevRows(orgs, repoChartRows), len(orgs)
+		counts, err := s.store.PostedPerDayByOrg(days, now)
+		warn("days by organization", err)
+		d["OrgDays"] = splitByOrg(daily, counts, weekly)
 	}
 	return d
 }

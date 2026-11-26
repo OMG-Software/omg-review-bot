@@ -56,9 +56,9 @@ func TestMetricsPages(t *testing.T) {
 	if n := strings.Count(body, `class="table-view"`); n != 4 {
 		t.Errorf("acme's metrics have %d table views, want 4", n)
 	}
-	// Another organization's repositories and models stay out of it, and an
-	// instance model's server isn't named to members.
-	for _, leak := range []string{"other/secret", "Secret own model", "secret-70b", "shared-7b", "Production", "plain-13b"} {
+	// Another organization's repositories, models and reviews stay out of
+	// it, and an instance model's server isn't named to members.
+	for _, leak := range []string{"other/secret", "Secret own model", "secret-70b", "shared-7b", "Production", "plain-13b", "by organization"} {
 		if strings.Contains(body, leak) {
 			t.Errorf("acme's metrics show %q", leak)
 		}
@@ -81,6 +81,7 @@ func TestMetricsPages(t *testing.T) {
 		t.Fatalf("every organization's metrics for an administrator = %d", code)
 	}
 	for _, want := range []string{"acme/web", "other/secret", "Findings by organization and level", "Secret own model",
+		"Reviews posted per day by organization", `<span class="viz-swatch viz-c2"></span>other</li>`,
 		"secret-70b", "other's own", "plain-13b", "Production shared-7b", "/orgs/acme/reviews?repo="} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the administrators' metrics lack %q", want)
@@ -88,6 +89,8 @@ func TestMetricsPages(t *testing.T) {
 	}
 	if _, body, _ := s.get("/"); !strings.Contains(body, "Most active repositories") || !strings.Contains(body, `href="/metrics"`) {
 		t.Error("the dashboard has no chart of the most active repositories, or no link to the metrics")
+	} else if !strings.Contains(body, "Reviews posted per day by organization") || !strings.Contains(body, `<span class="viz-swatch viz-c1"></span>acme</li>`) {
+		t.Error("the dashboard doesn't split the reviews per day by organization")
 	}
 }
 
@@ -178,8 +181,81 @@ func TestRepoNames(t *testing.T) {
 			t.Errorf("name %d = %q, want %q", i, names[i], w)
 		}
 	}
-	if segClass(0, 3.9) != "viz-seg viz-s1 short" || segClass(4, 4) != "viz-seg viz-s5" {
-		t.Errorf("segment classes: %q %q", segClass(0, 3.9), segClass(4, 4))
+	if a, b := segClass(sevColor(0), 3.9), segClass(sevColor(4), 4); a != "viz-seg viz-s1 short" || b != "viz-seg viz-s5" {
+		t.Errorf("segment classes: %q %q", a, b)
+	}
+}
+
+// TestSplitByOrg: each organization is a series in a fixed order, by
+// account ID, with no organization and then the folded ones last; past the
+// palette, the least active share one series.
+func TestSplitByOrg(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	days := make([]store.DayStats, 10)
+	for i := range days {
+		days[i].Day = start.AddDate(0, 0, i)
+	}
+	labels := func(o orgDays) string {
+		var out []string
+		for _, s := range o.Series {
+			out = append(out, fmt.Sprintf("%s=c%d", s.Label, s.Slot))
+		}
+		return strings.Join(out, " ")
+	}
+
+	// A login on two accounts is one series; reviews linked to no stored
+	// organization come after every organization, though account 0 is the
+	// lowest; a day outside the chart's is left out.
+	o := splitByOrg(days, []store.OrgDayPosted{
+		{Day: start, AccountID: 0, Posted: 1},
+		{Day: start, AccountID: 7, Login: "globex", Posted: 4},
+		{Day: start, AccountID: 12, Login: "Acme", Posted: 2}, // installed again
+		{Day: start.AddDate(0, 0, 1), AccountID: 5, Login: "acme", Posted: 3},
+		{Day: start.AddDate(0, 0, -1), AccountID: 9, Login: "earlier", Posted: 50},
+	}, false)
+	if got := labels(o); got != "Acme=c1 globex=c2 (no organization)=c3" {
+		t.Errorf("series = %s", got)
+	}
+	if fmt.Sprint(o.Series[0].Posted[:3]) != "[2 3 0]" || len(o.Series[0].Posted) != len(days) {
+		t.Errorf("acme's two accounts = %v", o.Series[0].Posted)
+	}
+
+	// Nine organizations: the seven most active keep a color each, in
+	// account order; the two least share the "other" series.
+	var counts []store.OrgDayPosted
+	for id := int64(1); id <= 9; id++ {
+		counts = append(counts, store.OrgDayPosted{Day: start, AccountID: id, Login: fmt.Sprintf("org%d", id), Posted: int(id)})
+	}
+	o = splitByOrg(days, counts, false)
+	if got := labels(o); got != "org3=c1 org4=c2 org5=c3 org6=c4 org7=c5 org8=c6 org9=c7 2 other organizations=c0" {
+		t.Errorf("series = %s", got)
+	}
+	if other := o.Series[len(o.Series)-1]; other.Posted[0] != 1+2 || other.Color() != "viz-c0" {
+		t.Errorf("other organizations = %+v", other)
+	}
+	if o = splitByOrg(days, counts[1:], false); len(o.Series) != maxOrgSeries || o.Series[0].Label != "org2" {
+		t.Errorf("eight organizations aren't folded: %s", labels(o))
+	}
+
+	// By week, each series is summed over the same weeks as the totals.
+	counts = counts[:0]
+	for i := range days {
+		days[i].Posted = 2
+		counts = append(counts, store.OrgDayPosted{Day: days[i].Day, AccountID: 1, Login: "acme", Posted: 1},
+			store.OrgDayPosted{Day: days[i].Day, AccountID: 2, Login: "globex", Posted: 1})
+	}
+	o = splitByOrg(days, counts, true)
+	if len(o.Days) != 2 || o.Days[0].Posted != 6 || o.Days[1].Posted != 14 ||
+		fmt.Sprint(o.Series[0].Posted) != "[3 7]" || fmt.Sprint(o.Series[1].Posted) != "[3 7]" {
+		t.Errorf("by week: days %+v, series %+v", o.Days, o.Series)
+	}
+	chart := string(orgDayChart(o))
+	for _, want := range []string{`aria-label="Reviews posted per week by organization, last 10 days"`,
+		`<span class="viz-swatch viz-c1"></span>acme</li>`, `<span class="viz-swatch viz-c2"></span>globex</li>`,
+		"Week of Sun 4 Jan: 14 reviews posted (acme: 7 · globex: 7)", "viz-seg viz-c2"} {
+		if !strings.Contains(chart, want) {
+			t.Errorf("the chart lacks %q", want)
+		}
 	}
 }
 
@@ -202,7 +278,7 @@ func TestByWeek(t *testing.T) {
 		t.Errorf("labels: %q %q %q", periodUnit(w), periodUnit(days), periodLabel(w[1]))
 	}
 	// The charts' names say the period they cover, by day or by week.
-	for _, got := range []string{string(dayChart(w)), string(sevDayChart(w)), string(dayChart(days))} {
+	for _, got := range []string{string(dayChart(w)), string(sevDayChart(w)), string(dayChart(days)), string(orgDayChart(splitByOrg(days, nil, true)))} {
 		if !strings.Contains(got, `, last 10 days"`) {
 			t.Errorf("a chart's name doesn't say it covers 10 days: %.160s", got)
 		}

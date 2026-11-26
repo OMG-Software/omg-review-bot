@@ -84,6 +84,23 @@
 </figure>
 {{end}}
 
+{{/* Reviews posted per day (or week) split by organization, on the pages of
+   every organization; with one organization or none, the plain chart.
+   Dot: an orgDays. */}}
+{{define "org-day-chart"}}
+{{if gt (len .Series) 1}}
+<figure class="chart">
+  {{$u := periodUnit .Days}}<figcaption><b>Reviews posted per {{$u}} by organization</b> <span class="muted">(UTC; hover a {{$u}} for its numbers)</span></figcaption>
+  {{orgDayChart .}}
+  <details class="table-view"><summary>Show as a table</summary>
+    <div class="table-scroll"><table class="num"><thead><tr><th>{{if eq $u "week"}}Week of{{else}}Day{{end}}</th>{{range .Series}}<th class="n">{{.Label}}</th>{{end}}<th class="n">Total</th><th class="n">Findings</th><th class="n">P1–P2</th><th class="n">Failed</th></tr></thead><tbody>
+    {{range $i, $d := .Days}}<tr><td>{{$d.Day.Format "Mon 2 Jan"}}</td>{{range $.Series}}<td class="n">{{index .Posted $i}}</td>{{end}}<td class="n">{{$d.Posted}}</td><td class="n">{{$d.Findings}}</td><td class="n">{{$d.Serious}}</td><td class="n">{{$d.Errors}}</td></tr>{{end}}
+    </tbody></table></div>
+  </details>
+</figure>
+{{else}}{{template "day-chart" .Days}}{{end}}
+{{end}}
+
 {{/* The review policy fields. Dot: a map with P (settings.Policy) and Severities. */}}
 {{define "policy-review"}}
 {{$p := .P}}

@@ -253,7 +253,7 @@ administrators sign in with GitHub as usual.
 findings by level, confirmed fixes, approvals, average review time and model tokens, plus a chart
 of reviews per day, a chart of the most active repositories and a breakdown by repository. Hover a
 bar for its numbers, or open **Show as a table**. The administrator's dashboard shows the same
-totals and most active repositories for every org.
+totals and most active repositories for every org, with each day's reviews split by org.
 
 **Metrics.** Each org's **Metrics** tab (for its members and owners) shows, for the last 7, 30 or
 90 days or a year, what the bot did and what it caught:
@@ -272,9 +272,11 @@ totals and most active repositories for every org.
   see the instance's models only as numbered placeholders ("Instance model 1"), never their names;
   the org's own models show their name and model.
 
-Administrators get the same page for every org together under **Metrics**, plus each org's
-findings by level and a table of orgs, and the server and owner of every model. Each model's card
-on the **Models** page shows its reviews, replies and failed calls over the last 30 days.
+Administrators get the same page for every org together under **Metrics**, plus each day's (or
+week's) reviews split by org, each org's findings by level and a table of orgs, and the server and
+owner of every model. The split colors up to eight orgs apart; with more, the most active seven
+get a color each and the rest share one. Each model's card on the **Models** page shows its
+reviews, replies and failed calls over the last 30 days.
 Model calls are counted from this version on and kept for 400 days; the other metrics come from
 the review history, so they cover earlier reviews too. The fix rate compares the fixes confirmed in
 a period with the findings posted in it, so a fix of an older finding counts: read it as an
