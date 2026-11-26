@@ -572,6 +572,20 @@ func (c *Client) UpdateIssueComment(ctx context.Context, fullName string, commen
 	return err
 }
 
+// Permission returns login's access to a repository: "admin", "write", "read"
+// or "none" (maintain counts as write, triage as read). Unlike a comment's
+// author association, it holds for org members whose membership is private.
+func (c *Client) Permission(ctx context.Context, fullName, login string) (string, error) {
+	var r struct {
+		Permission string `json:"permission"`
+	}
+	path := fmt.Sprintf("/repos/%s/collaborators/%s/permission", fullName, url.PathEscape(login))
+	if _, err := c.do(ctx, http.MethodGet, path, nil, nil, &r); err != nil {
+		return "", err
+	}
+	return r.Permission, nil
+}
+
 func (c *Client) Reviews(ctx context.Context, fullName string, number int) ([]Review, error) {
 	return list[Review](ctx, c, fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100", fullName, number), 0)
 }

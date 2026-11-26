@@ -41,7 +41,8 @@ reviews your org's PRs with a model you run yourself (**LM Studio** or **Ollama*
 - **Follows your project's rules.** It reads the repository's own docs (`CLAUDE.md`, `AGENTS.md`,
   `CONTRIBUTING.md`, style guides) from the base branch and reviews against them, citing the rule.
 - **Conversations.** It replies when someone answers one of its comments, and answers when
-  `@<app-name>` is mentioned in the PR conversation.
+  `@<app-name>` is mentioned in the PR conversation. Anyone with write access can comment
+  `@<app-name> review` to ask for a review, like **Review now** in the web UI.
 - **Web UI** for settings, the skill, repositories, PR status, review history (including the raw
   model output), review statistics with charts, and an activity log.
 
@@ -183,8 +184,8 @@ reviewed.
 
 > PRs that were already open the first time a repo is watched are marked `baseline` and skipped,
 > so a backlog doesn't tie up your GPU for hours. To review one, open it on the **Pull requests**
-> page and click **Review now**. To review the whole backlog, tick *Also review PRs that were
-> already open* in Settings before syncing.
+> page and click **Review now**, or comment `@<app-name> review` on the PR. To review the whole
+> backlog, tick *Also review PRs that were already open* in Settings before syncing.
 
 ## Organizations and sign-in
 
@@ -600,6 +601,16 @@ is resolved with no answer, and otherwise the reply is answered against the new 
 When someone writes `@<app-name>` in the PR conversation, the bot answers there, using the
 changed-file list, its latest review summary and the recent comments.
 
+**Asking for a review from the PR.** Comment `@<app-name> review` on its own line in the PR
+conversation (for example `@omg-review-bot review`), and the bot queues a review just as
+**Review now** does: it covers the whole PR, goes past *Most reviews per PR* and ignores the
+wait after push, drafts and skip labels, but not the daily review limit. The usual "Queued for
+review" comment confirms it. Only people with write access to the repository can ask; anyone
+else, or a request the bot can't take (a review already queued or running, the daily limit
+reached), gets a reply saying why. The command must be a line of its own, so a question such as
+"@<app-name> reviewing this, why…?" is answered as a mention, and a quoted request isn't taken
+as a new one. Like other mentions, it needs *Replies / mentions* to have mentions on.
+
 The bot ignores other bots, replies at most *Max bot replies per thread* times per thread, and
 never answers the same message twice. As a backup, PRs with activity in the last 14 days are
 re-checked for replies every 15 minutes.
@@ -627,7 +638,7 @@ defaults; an org owner can override them for their org (see
 | Skip labels | `no-bot-review`, `skip-review` | |
 | Project guideline files | `CLAUDE.md`, `AGENTS.md`, root `CONTRIBUTING.md`, style guides … | See [Project guidelines](#project-guidelines). Empty = off. |
 | Ignore files | lockfiles, `go.sum`, `vendor/`, `node_modules/`, `dist/`, `*.min.js`, `*.map`, `*.pb.go`, `*.snap`, `*.svg` | gitignore-style patterns |
-| Replies / mentions | on / on | Max 5 bot replies per thread |
+| Replies / mentions | on / on | Max 5 bot replies per thread. With mentions off, `@<app-name> review` is ignored too. |
 | Poll interval | 60 s | Repo list refreshes every 15 min |
 | While webhooks arrive, poll every | 900 s | Used instead of *Poll interval* while webhook deliveries arrive (one in the last 24 h) |
 | Public URL / Client ID / Client secret / Webhook secret | empty | See [Organizations and sign-in](#organizations-and-sign-in) and [Webhooks](#webhooks) |
