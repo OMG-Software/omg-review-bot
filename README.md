@@ -410,8 +410,8 @@ changing its provider asks OpenAI to end the sign-in, trying again for a few min
 can't be reached. If OpenAI never confirms it, or the sign-in can't be decrypted (as with an org's
 models that can't be read), the org's activity says so; disconnect the app in ChatGPT's settings
 to be sure it's ended. A sign-in that didn't allow the plan's use isn't kept, but the next one asks
-for it again. Signing a model in again takes the same ChatGPT account: to use another, sign the
-model out first.
+for it again. Signing a model in again takes the same ChatGPT account, and OpenAI skips its account
+picker for it: to use another, sign the model out first.
 
 Things to know:
 - Use only your own account. The sign-in is stored encrypted, bound to the set of models it was

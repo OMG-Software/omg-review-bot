@@ -41,12 +41,16 @@ const toolNamespace = "repo"
 
 // responsesTurn is an assistant turn with tool calls as the server sent it:
 // its output items (reasoning, text and calls), in order, sent back as
-// they came to the model that wrote them (see Message.Native). Their IDs
-// stay: the API's input items take them, and Codex, the client this
-// sign-in is made for, sends them back with store false too.
+// they came to the model and sign-in that wrote them (see Message.Native).
+// Their IDs stay: the API's input items take them, and Codex, the client
+// this sign-in is made for, sends them back with store false too. The
+// sign-in counts as well as the model: two models of one name can be
+// signed in to two accounts, and one account's encrypted reasoning isn't
+// for the other's.
 type responsesTurn struct {
-	model string
-	items []json.RawMessage
+	model  string
+	tokens TokenSource
+	items  []json.RawMessage
 }
 
 // encryptedWords are how a server names the encrypted reasoning when it
@@ -62,7 +66,7 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 	if c.cfg.Model == "" {
 		return nil, errors.New("no model selected")
 	}
-	instructions, input := responsesInput(req.Messages, c.cfg.Model)
+	instructions, input := responsesInput(req.Messages, c.cfg.Model, c.cfg.Tokens)
 	body := map[string]any{
 		"model":  c.cfg.Model,
 		"input":  input,
@@ -102,7 +106,7 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	var text, refusal, reasoning strings.Builder
 	var calls []ToolCall
-	turn := responsesTurn{model: c.cfg.Model}
+	turn := responsesTurn{model: c.cfg.Model, tokens: c.cfg.Tokens}
 	truncated := false
 	for _, raw := range res.Output {
 		var it struct {
@@ -184,8 +188,9 @@ func (c *responses) Chat(ctx context.Context, req Request) (*Response, error) {
 }
 
 // responsesInput splits messages into the instructions (the system prompt:
-// system messages are refused in the input) and the input items for model.
-func responsesInput(msgs []Message, model string) (string, []any) {
+// system messages are refused in the input) and the input items for model,
+// signed in with tokens.
+func responsesInput(msgs []Message, model string, tokens TokenSource) (string, []any) {
 	var system []string
 	in := make([]any, 0, len(msgs))
 	for _, m := range msgs {
@@ -196,8 +201,9 @@ func responsesInput(msgs []Message, model string) (string, []any) {
 			in = append(in, map[string]any{"type": "function_call_output", "call_id": m.ToolCallID, "output": m.Content})
 		case "assistant":
 			// The model's own turn goes back as it came, its reasoning
-			// with it; another model gets just the text and the calls.
-			if t, ok := m.Native.(responsesTurn); ok && t.model == model {
+			// with it; another model, or another sign-in, gets just the
+			// text and the calls.
+			if t, ok := m.Native.(responsesTurn); ok && t.model == model && t.tokens == tokens {
 				for _, it := range t.items {
 					in = append(in, it)
 				}

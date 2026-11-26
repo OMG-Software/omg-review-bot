@@ -92,11 +92,11 @@ func (b *Bot) chatgptHostID() (string, error) {
 	return id, b.store.Set(chatgptHostKey, id)
 }
 
-// StartChatGPT starts signing a ChatGPT account in for a model: cur is the
-// model as saved, whose earlier sign-in (if any) is signed in again. It
-// returns the attempt, to keep until the callback comes, and the address
+// StartChatGPT starts signing a ChatGPT account in for a model of set: cur
+// is the model as saved, whose earlier sign-in (if any) is signed in again.
+// It returns the attempt, to keep until the callback comes, and the address
 // that starts it in the browser.
-func (b *Bot) StartChatGPT(cur settings.LLM) (chatgpt.Attempt, string, error) {
+func (b *Bot) StartChatGPT(set int64, cur settings.LLM) (chatgpt.Attempt, string, error) {
 	host, err := b.chatgptHostID()
 	if err != nil {
 		return chatgpt.Attempt{}, "", fmt.Errorf("couldn't read the bot's host ID: %w", err)
@@ -107,6 +107,9 @@ func (b *Bot) StartChatGPT(cur settings.LLM) (chatgpt.Attempt, string, error) {
 	}
 	if cur.ChatGPTClient != "" {
 		a.Subject = cur.AccountSubject // the account the client is for
+		if cur.SignedIn() {
+			a.IDTokenHint = b.chatgptIDToken(cur.Account, set)
+		}
 	}
 	// A client kept without a sign-in is one whose plan use was declined
 	// (see FinishChatGPT): asked for again, not just signed in.
@@ -214,6 +217,23 @@ func (b *Bot) currentChatGPT(id string, set int64) (chatgpt.Credentials, error) 
 	return u.cred, nil
 }
 
+// chatgptIDToken is a sign-in's ID token, "" if it can't be read. It only
+// names the account (an expired one does as well), so any copy will do and
+// the sign-in's lock, held through a renewal, isn't waited for.
+func (b *Bot) chatgptIDToken(id string, set int64) string {
+	if x, ok := b.chatgptUnsaved.Load(id); ok {
+		if u := x.(unsavedSignIn); u.set == set {
+			return u.cred.IDToken
+		}
+		return ""
+	}
+	cred, err := b.loadChatGPT(id, set)
+	if err != nil {
+		return ""
+	}
+	return cred.IDToken
+}
+
 // DropChatGPT deletes a sign-in of set and ends it at OpenAI.
 func (b *Bot) DropChatGPT(id string, set int64) {
 	if id == "" {
@@ -243,32 +263,35 @@ func (b *Bot) DropChatGPT(id string, set int64) {
 	b.revokeChatGPT(set, cred)
 }
 
-// DropAllChatGPT drops every sign-in of set: how they're ended when the
-// set's models, which name them, can't be read.
-func (b *Bot) DropAllChatGPT(set int64) {
+// ChatGPTSignIns lists the IDs of every sign-in stored for set: the ones to
+// drop when the set's models, which name them, can't be read.
+func (b *Bot) ChatGPTSignIns(set int64) []string {
 	keys, err := b.store.Keys(chatgptKeys(set))
 	if err != nil {
 		b.log.Warn("list ChatGPT sign-ins", "err", err)
-		return
+		return nil
 	}
-	for _, k := range keys {
-		b.DropChatGPT(strings.TrimPrefix(k, chatgptKeys(set)), set)
+	for i, k := range keys {
+		keys[i] = strings.TrimPrefix(k, chatgptKeys(set))
 	}
+	return keys
 }
 
-// ForgetChatGPT drops the sign-ins of set that before's models named and
-// after's no longer do: a model removed, signed in again, or changed to
-// another provider.
-func (b *Bot) ForgetChatGPT(set int64, before, after settings.Models) {
+// ForgottenChatGPT lists the sign-ins that before's models named and
+// after's no longer do (a model removed, signed in again, or changed to
+// another provider): the ones to drop once after is saved.
+func ForgottenChatGPT(before, after settings.Models) []string {
 	kept := map[string]bool{}
 	for _, c := range after.Configs {
 		kept[c.Account] = true
 	}
+	var gone []string
 	for _, c := range before.Configs {
 		if c.Account != "" && !kept[c.Account] {
-			b.DropChatGPT(c.Account, set)
+			gone = append(gone, c.Account)
 		}
 	}
+	return gone
 }
 
 // revokeChatGPT ends a sign-in at OpenAI, in the background (the bot has

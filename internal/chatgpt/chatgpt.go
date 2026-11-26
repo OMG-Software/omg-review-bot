@@ -113,6 +113,11 @@ type Attempt struct {
 	// it in again; "" registers a new one.
 	ClientID  string
 	LoginHint string // the account's email, to sign the same one in again
+	// IDTokenHint is the account's last ID token (expired or not), sent
+	// with ClientID so OpenAI skips its account picker. It names the
+	// account, so the address that carries it is shown only to the person
+	// signing in, and kept out of logs.
+	IDTokenHint string
 	// Subject is the account (the ID token's sub) ClientID was registered
 	// for: a sign-in for any other is refused. "" checks nothing.
 	Subject string
@@ -166,6 +171,9 @@ func (c *Client) AuthorizeURL(a Attempt) string {
 		q.Set("client_id", a.ClientID)
 		if a.LoginHint != "" {
 			q.Set("login_hint", a.LoginHint)
+		}
+		if a.IDTokenHint != "" {
+			q.Set("id_token_hint", a.IDTokenHint)
 		}
 		if a.Consent {
 			q.Set("prompt", "consent")

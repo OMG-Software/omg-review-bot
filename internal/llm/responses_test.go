@@ -203,15 +203,18 @@ func TestResponsesToolTurn(t *testing.T) {
 		t.Errorf("output = %v", out)
 	}
 
-	// Another model (a failover) gets the call, not this one's reasoning.
+	// In a failover, another model, or a model of the same name signed in
+	// to another account, gets the call, not this one's reasoning.
 	other, got2 := planServer(t, "", completed(planText))
-	c2, _ := New(Config{Provider: "chatgpt", BaseURL: other.URL + "/v1", Model: "gpt-c", Tokens: &tokens{}})
-	if _, err := c2.Chat(context.Background(), Request{Messages: turn, Tools: []Tool{readTool}}); err != nil {
-		t.Fatal(err)
-	}
-	in = (<-got2).body["input"].([]any)
-	if len(in) != 3 || in[1].(map[string]any)["type"] != "function_call" {
-		t.Errorf("input to another model = %v", in)
+	for _, model := range []string{"gpt-c", "gpt-b"} {
+		c2, _ := New(Config{Provider: "chatgpt", BaseURL: other.URL + "/v1", Model: model, Tokens: &tokens{}})
+		if _, err := c2.Chat(context.Background(), Request{Messages: turn, Tools: []Tool{readTool}}); err != nil {
+			t.Fatal(err)
+		}
+		in = (<-got2).body["input"].([]any)
+		if len(in) != 3 || in[1].(map[string]any)["type"] != "function_call" || in[1].(map[string]any)["id"] != nil {
+			t.Errorf("input to %s at another sign-in = %v", model, in)
+		}
 	}
 }
 

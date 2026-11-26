@@ -99,7 +99,7 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 			fail(errors.New("save the model with the ChatGPT plan as its provider first"))
 			return
 		}
-		a, u, err := s.bot.StartChatGPT(c)
+		a, u, err := s.bot.StartChatGPT(sc.set(), c)
 		if err != nil {
 			fail(fmt.Errorf("couldn't start the ChatGPT sign-in: %w", err))
 			return

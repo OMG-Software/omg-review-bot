@@ -85,6 +85,10 @@ var ErrRefused = errors.New("the model declined to answer")
 // TokenSource gives a client a bearer token that expires (a ChatGPT
 // sign-in's). refused is a token the server just refused ("" if none): the
 // one returned is another, renewed if no other call has renewed it yet.
+//
+// A TokenSource must be comparable, and equal only to another for the same
+// sign-in: a tool turn's encrypted reasoning goes back only to the sign-in
+// that wrote it.
 type TokenSource interface {
 	Token(ctx context.Context, refused string) (string, error)
 }

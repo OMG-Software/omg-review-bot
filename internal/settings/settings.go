@@ -53,10 +53,13 @@ type LLM struct {
 	NoTools bool `json:"no_tools,omitempty"`
 
 	// A ProviderChatGPT model's sign-in. Account names its sealed tokens
-	// (see bot.SaveChatGPT), empty while it's signed out. The client OpenAI
+	// (see bot.storeChatGPT), empty while it's signed out. The client OpenAI
 	// issued at its first sign-in, and the account's subject and email, are
-	// kept after a sign-out to sign the same account in again. None of them
-	// is secret, and none is read from a form: only a sign-in sets them.
+	// kept while it's signed in, to sign the same account in again, and
+	// after a sign-in that declined the plan's use, to ask for it again. A
+	// sign-out clears them all, so the next sign-in can be another account.
+	// None of them is secret, and none is read from a form: only a sign-in
+	// sets them.
 	Account        string `json:"account,omitempty"`
 	AccountEmail   string `json:"account_email,omitempty"`
 	AccountSubject string `json:"account_subject,omitempty"`

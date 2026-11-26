@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/bot"
 	"github.com/OMG-Software/omg-review-bot/internal/llm"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
 	"github.com/OMG-Software/omg-review-bot/internal/store"
@@ -222,12 +223,28 @@ func (s *Server) modelsChange(w http.ResponseWriter, r *http.Request, sc modelSc
 // of models the change removed (or signed in again, or moved to another
 // provider) are ended once it's saved.
 func (s *Server) applyModels(r *http.Request, sc modelScope, change func(*settings.Models) (string, error)) (string, error) {
+	msg, gone, err := s.saveModelsChange(r, sc, change)
+	if err != nil {
+		return "", err
+	}
+	// Ended after the models lock is let go: ending one waits for a renewal
+	// of it in progress, which other saves needn't. With the models saved,
+	// nothing reaches these sign-ins any more.
+	for _, id := range gone {
+		s.bot.DropChatGPT(id, sc.set())
+	}
+	return msg, nil
+}
+
+// saveModelsChange makes and saves the change under the models lock. It
+// returns the change's message and the sign-ins no saved model names now.
+func (s *Server) saveModelsChange(r *http.Request, sc modelScope, change func(*settings.Models) (string, error)) (string, []string, error) {
 	mu := s.modelsLock(sc)
 	mu.Lock()
 	defer mu.Unlock()
 	m, loadErr := s.loadModels(sc)
 	if loadErr != nil && sc.org != nil && r.PathValue("action") != "delete" {
-		return "", loadErr
+		return "", nil, loadErr
 	}
 	before := settings.Models{Configs: slices.Clone(m.Configs)}
 	msg, err := change(&m)
@@ -235,17 +252,16 @@ func (s *Server) applyModels(r *http.Request, sc modelScope, change func(*settin
 		err = s.saveModels(sc, m)
 	}
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
+	gone := bot.ForgottenChatGPT(before, m)
 	if loadErr != nil {
 		// An unreadable set was removed: which sign-ins its models named
 		// can't be told, so all of the set's go.
-		s.bot.DropAllChatGPT(sc.set())
-	} else {
-		s.bot.ForgetChatGPT(sc.set(), before, m)
+		gone = s.bot.ChatGPTSignIns(sc.set())
 	}
 	s.logModels(sc, r, msg)
-	return msg, nil
+	return msg, gone, nil
 }
 
 // modelsAction handles the page's forms: the strategy, adding, changing,

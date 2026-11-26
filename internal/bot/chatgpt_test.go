@@ -42,7 +42,7 @@ func chatgptBot(t *testing.T) (*Bot, *store.Store, *chatgpttest.Server) {
 // models page does.
 func signInChatGPT(t *testing.T, b *Bot, srv *chatgpttest.Server, set int64, cur settings.LLM) (string, chatgpt.Credentials) {
 	t.Helper()
-	a, u, err := b.StartChatGPT(cur)
+	a, u, err := b.StartChatGPT(set, cur)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestChatGPTSignInSealed(t *testing.T) {
 		t.Errorf("set 7's sign-in under set 8 = %v", err)
 	}
 	host := srv.LastAuthorize.Get("ext_agent_host_id")
-	if _, u, _ := b.StartChatGPT(settings.LLM{}); !strings.Contains(u, url.QueryEscape(host)) || !strings.HasPrefix(host, "urn:uuid:") {
+	if _, u, _ := b.StartChatGPT(7, settings.LLM{}); !strings.Contains(u, url.QueryEscape(host)) || !strings.HasPrefix(host, "urn:uuid:") {
 		t.Errorf("host ID %q not kept for the next sign-in (%s)", host, u)
 	}
 }
@@ -172,17 +172,36 @@ func TestChatGPTSignInEnded(t *testing.T) {
 func TestChatGPTNoPlanUsage(t *testing.T) {
 	b, _, srv := chatgptBot(t)
 	srv.Scopes = "openid profile email offline_access"
-	a, u, _ := b.StartChatGPT(settings.LLM{})
+	a, u, _ := b.StartChatGPT(7, settings.LLM{})
 	cb, _ := chatgpt.ParseCallback(srv.Approve(t, u))
 	id, who, err := b.FinishChatGPT(context.Background(), 7, a, cb)
 	if !errors.Is(err, chatgpt.ErrNoPlanUsage) || id != "" || who.ClientID != "client-abc" || who.RefreshToken != "" {
 		t.Fatalf("FinishChatGPT = %q, %+v, %v", id, who, err)
 	}
 	waitRevoked(t, srv, 1)
-	_, u, _ = b.StartChatGPT(settings.LLM{ChatGPTClient: who.ClientID, AccountEmail: who.Email})
+	_, u, _ = b.StartChatGPT(7, settings.LLM{ChatGPTClient: who.ClientID, AccountEmail: who.Email})
 	q, _ := url.ParseQuery(strings.SplitN(u, "?", 2)[1])
-	if q.Get("client_id") != "client-abc" || q.Get("prompt") != "consent" || q.Get("login_hint") != "dev@example.com" {
+	if q.Get("client_id") != "client-abc" || q.Get("prompt") != "consent" || q.Get("login_hint") != "dev@example.com" || q.Has("id_token_hint") {
 		t.Errorf("sign-in after a decline = %v", q)
+	}
+}
+
+// TestChatGPTSignInAgainHint: signing a model in again names its account
+// with the sign-in's ID token, so OpenAI skips its account picker; only the
+// model's own set's sign-in is read for it.
+func TestChatGPTSignInAgainHint(t *testing.T) {
+	b, _, srv := chatgptBot(t)
+	id, who := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	stored, _ := b.loadChatGPT(id, 7)
+	cur := settings.LLM{Account: id, ChatGPTClient: who.ClientID, AccountEmail: who.Email, AccountSubject: who.Subject}
+	_, u, _ := b.StartChatGPT(7, cur)
+	q, _ := url.ParseQuery(strings.SplitN(u, "?", 2)[1])
+	if stored.IDToken == "" || q.Get("id_token_hint") != stored.IDToken || q.Get("client_id") != who.ClientID || q.Has("prompt") {
+		t.Errorf("sign-in again = %v, want the ID token %q as the hint", q, stored.IDToken)
+	}
+	_, u, _ = b.StartChatGPT(8, cur)
+	if q, _ := url.ParseQuery(strings.SplitN(u, "?", 2)[1]); q.Has("id_token_hint") {
+		t.Errorf("another set's sign-in gave its ID token: %v", q)
 	}
 }
 
@@ -198,16 +217,20 @@ func waitRevoked(t *testing.T, srv *chatgpttest.Server, n int) []string {
 	return nil
 }
 
-// TestForgetChatGPT: a sign-in no model names any more is deleted and
-// ended at OpenAI; the others are kept.
+// TestForgetChatGPT: a sign-in no model names any more is the one to drop,
+// and dropping it deletes it and ends it at OpenAI; the others are kept.
 func TestForgetChatGPT(t *testing.T) {
 	b, st, srv := chatgptBot(t)
 	a1, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
 	a2, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
 	gone, _ := b.loadChatGPT(a1, 7)
-	before := settings.Models{Configs: []settings.LLM{{ID: "m1", Account: a1}, {ID: "m2", Account: a2}}}
-	after := settings.Models{Configs: []settings.LLM{{ID: "m2", Account: a2}}}
-	b.ForgetChatGPT(7, before, after)
+	before := settings.Models{Configs: []settings.LLM{{ID: "m1", Account: a1}, {ID: "m2", Account: a2}, {ID: "m3"}}}
+	after := settings.Models{Configs: []settings.LLM{{ID: "m2", Account: a2}, {ID: "m3"}}}
+	drop := ForgottenChatGPT(before, after)
+	if !slices.Equal(drop, []string{a1}) {
+		t.Fatalf("to drop = %v, want [%s]", drop, a1)
+	}
+	b.DropChatGPT(drop[0], 7)
 	if _, ok, _ := st.Get(chatgptKey(a1, 7)); ok {
 		t.Error("the removed model's sign-in is still stored")
 	}
@@ -345,7 +368,7 @@ func TestChatGPTOtherAccount(t *testing.T) {
 	_, who := signInChatGPT(t, b, srv, 7, settings.LLM{})
 	srv.Subject = "user-999"
 	cur := settings.LLM{Account: "x", ChatGPTClient: who.ClientID, AccountEmail: who.Email, AccountSubject: who.Subject}
-	a, u, _ := b.StartChatGPT(cur)
+	a, u, _ := b.StartChatGPT(7, cur)
 	cb, _ := chatgpt.ParseCallback(srv.Approve(t, u))
 	if id, got, err := b.FinishChatGPT(context.Background(), 7, a, cb); !errors.Is(err, chatgpt.ErrOtherAccount) || id != "" || got.Subject != "user-999" {
 		t.Errorf("FinishChatGPT = %q, %+v, %v", id, got, err)
@@ -379,13 +402,20 @@ func TestChatGPTRevokeRetried(t *testing.T) {
 	t.Error("an unconfirmed revocation isn't in the set's activity")
 }
 
-// TestDropAllChatGPT: every sign-in of a set is dropped, and no other set's.
-func TestDropAllChatGPT(t *testing.T) {
+// TestChatGPTSignIns: every sign-in of a set is listed, and no other set's.
+func TestChatGPTSignIns(t *testing.T) {
 	b, st, srv := chatgptBot(t)
-	signInChatGPT(t, b, srv, 7, settings.LLM{})
-	signInChatGPT(t, b, srv, 7, settings.LLM{})
+	s1, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	s2, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
 	kept, _ := signInChatGPT(t, b, srv, 8, settings.LLM{})
-	b.DropAllChatGPT(7)
+	ids, want := b.ChatGPTSignIns(7), []string{s1, s2}
+	slices.Sort(want) // listed in key order
+	if !slices.Equal(ids, want) {
+		t.Fatalf("set 7's sign-ins = %v, want %v", ids, want)
+	}
+	for _, id := range ids {
+		b.DropChatGPT(id, 7)
+	}
 	if keys, _ := st.Keys(chatgptKeys(7)); len(keys) != 0 {
 		t.Errorf("set 7's sign-ins left: %v", keys)
 	}
