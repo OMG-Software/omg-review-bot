@@ -130,7 +130,9 @@ func fenceRun(line string) (run, rest string) {
 		return "", ""
 	}
 	n := len(t) - len(strings.TrimLeft(t, t[:1]))
-	if n < 3 {
+	if n < 3 || (t[0] == '`' && strings.Contains(t[n:], "`")) {
+		// A backtick fence's info string can't hold a backtick: "```a```"
+		// is a code span in a paragraph, not a fence.
 		return "", ""
 	}
 	return t[:n], t[n:]
