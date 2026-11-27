@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,28 +60,43 @@ func signInKey(sc modelScope, id string, v *viewer) string {
 
 // signInGen is the model id of sc's sign-in generation: how many times,
 // since the bot started, it's been signed in or out, moved to another
-// provider or removed. Attempts live only as long as the bot, so the count
-// needn't outlive it either.
+// provider or removed, or its whole set removed unread. Both counts only
+// go up, so their sum changes whenever either does. Attempts live only as
+// long as the bot, so the counts needn't outlive it either.
 func (s *Server) signInGen(sc modelScope, id string) uint64 {
-	x, _ := s.signInGens.Load(modelKey(sc, id))
+	return s.signInCount(modelKey(sc, id)) + s.signInCount(setKey(sc))
+}
+
+// setKey names sc's set-wide count among signInGens' model keys.
+func setKey(sc modelScope) string { return strconv.FormatInt(sc.set(), 10) }
+
+func (s *Server) signInCount(key string) uint64 {
+	x, _ := s.signInGens.Load(key)
 	n, _ := x.(uint64)
 	return n
 }
 
+// The counts move on only under the models lock of their set, which a
+// finishing attempt holds to check them.
+func (s *Server) moveOn(key string) { s.signInGens.Store(key, s.signInCount(key)+1) }
+
 // signInChanged moves on the sign-in generation of each of before's models
-// whose sign-in after changes, or that after removes. The caller holds the
-// models lock, as a finishing attempt does to check it.
+// whose sign-in after changes, or that after removes.
 func (s *Server) signInChanged(sc modelScope, before, after settings.Models) {
 	for _, c := range before.Configs {
 		if a, ok := after.Get(c.ID); !ok || a.Provider != c.Provider || a.Account != c.Account || a.ChatGPTClient != c.ChatGPTClient {
-			s.signInGens.Store(modelKey(sc, c.ID), s.signInGen(sc, c.ID)+1)
+			s.moveOn(modelKey(sc, c.ID))
 		}
 	}
 }
 
-// forgetSignIns drops the attempts started for sc's models.
-func (s *Server) forgetSignIns(sc modelScope) {
-	prefix := fmt.Sprintf("%d/", sc.set())
+// setSignInsChanged moves on the sign-in generation of all of sc's models,
+// as when the set is removed without being read (which models it held
+// can't be told), and drops the attempts waiting for them. One already
+// finishing, no longer waiting, is refused by the generation.
+func (s *Server) setSignInsChanged(sc modelScope) {
+	s.moveOn(setKey(sc))
+	prefix := modelKey(sc, "")
 	s.signIns.Range(func(k, _ any) bool {
 		if strings.HasPrefix(k.(string), prefix) {
 			s.signIns.Delete(k)

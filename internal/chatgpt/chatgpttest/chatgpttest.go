@@ -46,6 +46,9 @@ type Server struct {
 	NoReplacement bool
 	// OnRefresh, if set, runs as each renewal is answered.
 	OnRefresh func()
+	// OnExchange, if set, runs before each sign-in's code is exchanged
+	// (not under the stand-in's lock, so it can wait on the test).
+	OnExchange func()
 
 	codes   map[string]grant
 	live    map[string]string // refresh token → client
@@ -147,6 +150,9 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	if f.Get("resource") != chatgpt.Resource {
 		oauthErr(w, "invalid_target")
 		return
+	}
+	if f.Get("grant_type") == "authorization_code" && s.OnExchange != nil {
+		s.OnExchange()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

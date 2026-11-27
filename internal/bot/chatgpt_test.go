@@ -428,7 +428,9 @@ func TestChatGPTSignIns(t *testing.T) {
 }
 
 // TestChatGPTUndeletable: a sign-in that can't be deleted is still ended at
-// OpenAI, and the error says it's left stored.
+// OpenAI, the error says it's left stored, and a model's call that comes
+// after (as from a review already running) doesn't renew it from the copy
+// left: the renewal would replace the refresh token being revoked.
 func TestChatGPTUndeletable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "t.db")
@@ -441,6 +443,7 @@ func TestChatGPTUndeletable(t *testing.T) {
 	srv := chatgpttest.New(t)
 	b.chatgptAuth = srv.Client()
 	id, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	expire(t, b, id, 7) // so a call would renew it
 	cred, _ := b.loadChatGPT(id, 7)
 
 	db, err := sql.Open("sqlite", path)
@@ -454,8 +457,32 @@ func TestChatGPTUndeletable(t *testing.T) {
 	if err := b.DropChatGPT(id, 7); err == nil || !strings.Contains(err.Error(), "couldn't delete") || !strings.Contains(err.Error(), "still asked to end it") {
 		t.Errorf("DropChatGPT = %v, want that it's left stored but ended", err)
 	}
+	if _, err := (chatgptTokens{b: b, id: id, set: 7}).Token(context.Background(), ""); !errors.Is(err, chatgpt.ErrSignInEnded) {
+		t.Errorf("token after the sign-in was dropped = %v, want ErrSignInEnded", err)
+	}
 	if r := waitRevoked(t, srv, 1); !slices.Contains(r, cred.RefreshToken) {
 		t.Errorf("revoked %v, want %q", r, cred.RefreshToken)
+	}
+	if srv.Refreshes != 0 {
+		t.Errorf("renewed %d times after it was dropped", srv.Refreshes)
+	}
+}
+
+// TestChatGPTDropUnreadable: dropping a sign-in that can't be read says to
+// end it in ChatGPT's settings, as the bot can't.
+func TestChatGPTDropUnreadable(t *testing.T) {
+	b, st, srv := chatgptBot(t)
+	id, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	raw, _, _ := st.Get(chatgptKey(id, 7))
+	_ = st.Set(chatgptKey(id, 8), raw) // set 7's: set 8 can't open it
+	if err := b.DropChatGPT(id, 8); err == nil || !strings.Contains(err.Error(), "disconnect the app in ChatGPT's settings") {
+		t.Errorf("DropChatGPT of an unreadable sign-in = %v", err)
+	}
+	if _, ok, _ := st.Get(chatgptKey(id, 8)); ok {
+		t.Error("the unreadable sign-in is still stored")
+	}
+	if _, err := b.loadChatGPT(id, 7); err != nil {
+		t.Errorf("set 7's own sign-in: %v", err)
 	}
 }
 

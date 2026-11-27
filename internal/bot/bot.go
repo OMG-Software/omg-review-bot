@@ -180,12 +180,15 @@ type Bot struct {
 	// set it). chatgptLocks holds a lock for each sign-in, whose rotating
 	// refresh token mustn't be used twice at once; chatgptUnsaved holds the
 	// renewals that couldn't be saved (unsavedSignIn), by sign-in ID;
-	// chatgptMu guards making the host ID. chatgptRetry replaces
-	// chatgptRevokeRetry (tests shorten it).
+	// chatgptEnded marks the sign-ins dropped (by key), which never renew
+	// again, even if their stored copy couldn't be deleted. chatgptMu guards
+	// making the host ID. chatgptRetry replaces chatgptRevokeRetry (tests
+	// shorten it).
 	chatgptAuth    *chatgpt.Client
 	chatgptOnce    sync.Once
 	chatgptLocks   sync.Map
 	chatgptUnsaved sync.Map
+	chatgptEnded   sync.Map
 	chatgptMu      sync.Mutex
 	chatgptRetry   []time.Duration
 	// roundRobin counts the jobs each set of models has started (key: the

@@ -245,6 +245,10 @@ func (b *Bot) DropChatGPT(id string, set int64) error {
 	mu := b.chatgptLock(id)
 	mu.Lock()
 	defer mu.Unlock()
+	// From now on, no call renews it (see chatgptTokens.Token): a renewal
+	// after this would replace the refresh token about to be revoked, and
+	// the replacement could stay live.
+	b.chatgptEnded.Store(chatgptKey(id, set), true)
 	_, ok, err := b.store.Get(chatgptKey(id, set))
 	if err != nil {
 		return fmt.Errorf("the bot couldn't read its ChatGPT sign-in to end it (%w): disconnect the app in ChatGPT's settings to be sure it's ended", err)
@@ -265,13 +269,14 @@ func (b *Bot) DropChatGPT(id string, set int64) error {
 		b.revokeChatGPT(set, cred)
 	}
 	switch {
-	case derr == nil:
-		return nil
-	case err != nil:
+	case err != nil && derr != nil:
 		return fmt.Errorf("the bot couldn't delete or read its stored ChatGPT sign-in (%w): disconnect the app in ChatGPT's settings to be sure it's ended", derr)
-	default:
+	case err != nil:
+		return errors.New("the bot couldn't read its stored ChatGPT sign-in to end it: disconnect the app in ChatGPT's settings to be sure it's ended")
+	case derr != nil:
 		return fmt.Errorf("the bot couldn't delete its stored ChatGPT sign-in (%w), though OpenAI is still asked to end it", derr)
 	}
+	return nil
 }
 
 // ChatGPTSignIns lists the IDs of every sign-in stored for set: the ones to
@@ -360,6 +365,9 @@ func (t chatgptTokens) Token(ctx context.Context, refused string) (string, error
 	mu := t.b.chatgptLock(t.id)
 	mu.Lock()
 	defer mu.Unlock()
+	if _, ended := t.b.chatgptEnded.Load(chatgptKey(t.id, t.set)); ended {
+		return "", chatgpt.ErrSignInEnded
+	}
 	cred, err := t.b.currentChatGPT(t.id, t.set)
 	if err != nil {
 		return "", err

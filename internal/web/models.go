@@ -232,10 +232,14 @@ func (s *Server) applyModels(r *http.Request, sc modelScope, change func(*settin
 	// nothing reaches these sign-ins any more. The change is made, so one
 	// that couldn't be deleted (or read) is told in its message, not as a
 	// failure.
+	told := map[string]bool{} // each problem once, however many it hit
 	for _, id := range gone {
 		if err := s.bot.DropChatGPT(id, sc.set()); err != nil {
 			s.log.Warn("end ChatGPT sign-in", "set", sc.set(), "err", err)
-			msg += ", but " + err.Error()
+			if !told[err.Error()] {
+				told[err.Error()] = true
+				msg += ", but " + err.Error()
+			}
 		}
 	}
 	return msg, nil
@@ -266,7 +270,7 @@ func (s *Server) saveModelsChange(r *http.Request, sc modelScope, change func(*s
 		// can't be told, so all of the set's go, and so do the sign-ins
 		// started for them.
 		gone = s.bot.ChatGPTSignIns(sc.set())
-		s.forgetSignIns(sc)
+		s.setSignInsChanged(sc)
 	}
 	s.logModels(sc, r, msg)
 	return msg, gone, nil

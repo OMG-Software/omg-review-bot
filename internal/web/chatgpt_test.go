@@ -260,6 +260,64 @@ func TestChatGPTAttemptForReplacedModel(t *testing.T) {
 	}
 }
 
+// TestChatGPTFinishAcrossUnreadableRemoval: a finish still waiting on OpenAI
+// when its set, unreadable, is removed, and a model added under its ID,
+// doesn't sign that model in: its new sign-in is ended.
+func TestChatGPTFinishAcrossUnreadableRemoval(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	oa := chatgpttest.New(t)
+	s.b.UseChatGPTAuth(oa.Client())
+	add := url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"chatgpt"}, "model": {"gpt-b"}}
+	s.post("/orgs/acme/models/add", add)
+	s.post("/orgs/acme/models/m1/chatgpt-start", url.Values{})
+	_, body, _ := s.get("/orgs/acme/models")
+	link := regexp.MustCompile(`href="(` + regexp.QuoteMeta(oa.URL) + `/authorize\?[^"]+)"`).FindStringSubmatch(body)
+	if link == nil {
+		t.Fatal("no sign-in link")
+	}
+	callback := oa.Approve(t, html.UnescapeString(link[1]))
+
+	exchanging, resume := make(chan struct{}), make(chan struct{})
+	oa.OnExchange = func() { close(exchanging); <-resume }
+	finished := make(chan string, 1)
+	go func() {
+		form := url.Values{"callback": {callback}}
+		req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/orgs/acme/models/m1/chatgpt-finish", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", s.ts.URL)
+		resp, err := s.cl.Do(req)
+		if err != nil {
+			finished <- err.Error()
+			return
+		}
+		resp.Body.Close()
+		loc, _ := url.QueryUnescape(resp.Header.Get("Location"))
+		finished <- loc
+	}()
+	<-exchanging // the attempt is taken, and its code at OpenAI
+	if err := s.st.SetOrgModels(acmeID, "v1:garbage"); err != nil {
+		t.Fatal(err)
+	}
+	s.post("/orgs/acme/models/x/delete", url.Values{"all": {"1"}})
+	s.post("/orgs/acme/models/add", add)
+	if m, _ := s.b.OrgModels(acmeID); len(m.Configs) != 1 || m.Configs[0].ID != "m1" {
+		t.Fatalf("models = %+v, want a new m1", m.Configs)
+	}
+	close(resume)
+	if loc := <-finished; !strings.Contains(loc, "changed while you were signing in") {
+		t.Errorf("finishing across the removal: %s", loc)
+	}
+	if m, _ := s.b.OrgModels(acmeID); m.Configs[0].SignedIn() {
+		t.Errorf("the new model was signed in: %+v", m.Configs[0])
+	}
+	waitRevokes(t, oa, 1)
+	if keys, _ := s.st.Keys("chatgpt:sign-in:"); len(keys) != 0 {
+		t.Errorf("the attempt's sign-in was kept: %v", keys)
+	}
+}
+
 func waitRevokes(t *testing.T, oa *chatgpttest.Server, n int) {
 	t.Helper()
 	for range 200 {
