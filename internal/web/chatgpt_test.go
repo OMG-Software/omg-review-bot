@@ -223,6 +223,43 @@ func TestChatGPTStaleAttempt(t *testing.T) {
 	}
 }
 
+// TestChatGPTAttemptForReplacedModel: an attempt started for a model that's
+// removed, and another added that takes its ID, doesn't sign the new one in,
+// though it looks just as the old one did (signed out, no client).
+func TestChatGPTAttemptForReplacedModel(t *testing.T) {
+	s := newTestSite(t)
+	s.seedOrgs()
+	s.signIn()
+	oa := chatgpttest.New(t)
+	s.b.UseChatGPTAuth(oa.Client())
+	add := url.Values{"context": {"200000"}, "max_output": {"32000"}, "provider": {"chatgpt"}, "model": {"gpt-b"}}
+	s.post("/orgs/acme/models/add", add)
+	s.post("/orgs/acme/models/m1/chatgpt-start", url.Values{})
+	_, body, _ := s.get("/orgs/acme/models")
+	link := regexp.MustCompile(`href="(` + regexp.QuoteMeta(oa.URL) + `/authorize\?[^"]+)"`).FindStringSubmatch(body)
+	if link == nil {
+		t.Fatal("no sign-in link")
+	}
+	callback := oa.Approve(t, html.UnescapeString(link[1]))
+
+	s.post("/orgs/acme/models/m1/delete", url.Values{})
+	s.post("/orgs/acme/models/add", add)
+	if m, _ := s.b.OrgModels(acmeID); len(m.Configs) != 1 || m.Configs[0].ID != "m1" {
+		t.Fatalf("models = %+v, want a new m1", m.Configs)
+	}
+	_, hdr := s.post("/orgs/acme/models/m1/chatgpt-finish", url.Values{"callback": {callback}})
+	if loc, _ := url.QueryUnescape(hdr.Get("Location")); !strings.Contains(loc, "changed while you were signing in") {
+		t.Errorf("finishing an attempt for a replaced model: %s", loc)
+	}
+	if m, _ := s.b.OrgModels(acmeID); m.Configs[0].SignedIn() {
+		t.Errorf("the new model was signed in: %+v", m.Configs[0])
+	}
+	waitRevokes(t, oa, 1)
+	if keys, _ := s.st.Keys("chatgpt:sign-in:"); len(keys) != 0 {
+		t.Errorf("the attempt's sign-in was kept: %v", keys)
+	}
+}
+
 func waitRevokes(t *testing.T, oa *chatgpttest.Server, n int) {
 	t.Helper()
 	for range 200 {

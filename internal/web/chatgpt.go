@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/chatgpt"
@@ -26,24 +27,66 @@ const signInTTL = 15 * time.Minute
 type pendingSignIn struct {
 	attempt chatgpt.Attempt
 	url     string // where the sign-in starts
-	// account is the model's sign-in when the attempt started: if it's
-	// changed by the time it finishes, someone else signed the model in
-	// or out meanwhile, and the attempt is out of date.
+	// gen and account are the model's sign-in generation and sign-in when
+	// the attempt started: if either has changed by the time it finishes,
+	// someone else signed the model in or out, changed its provider or
+	// removed it meanwhile, and the attempt is out of date.
+	gen     uint64
 	account string
 	expires time.Time
 }
 
 var errStaleSignIn = errors.New("the model's ChatGPT sign-in changed while you were signing in: start again")
 
-// stale reports whether c's sign-in changed since p started.
-func (p pendingSignIn) stale(c *settings.LLM) bool {
-	return c.Account != p.account || c.ChatGPTClient != p.attempt.ClientID
+// stale reports whether the model c, whose sign-in generation is now gen,
+// changed since p started. The generation catches a change that was undone
+// (signed in and out again, or removed and another model added with its
+// ID), which c's values alone can't.
+func (p pendingSignIn) stale(c *settings.LLM, gen uint64) bool {
+	return gen != p.gen || c.Account != p.account || c.ChatGPTClient != p.attempt.ClientID
+}
+
+// modelKey names the model id of sc among every set's.
+func modelKey(sc modelScope, id string) string {
+	return fmt.Sprintf("%d/%s", sc.set(), id)
 }
 
 // signInKey: an attempt belongs to the person who started it, for one model
 // of one set.
 func signInKey(sc modelScope, id string, v *viewer) string {
-	return fmt.Sprintf("%d/%s/%d", sc.set(), id, v.ID)
+	return fmt.Sprintf("%s/%d", modelKey(sc, id), v.ID)
+}
+
+// signInGen is the model id of sc's sign-in generation: how many times,
+// since the bot started, it's been signed in or out, moved to another
+// provider or removed. Attempts live only as long as the bot, so the count
+// needn't outlive it either.
+func (s *Server) signInGen(sc modelScope, id string) uint64 {
+	x, _ := s.signInGens.Load(modelKey(sc, id))
+	n, _ := x.(uint64)
+	return n
+}
+
+// signInChanged moves on the sign-in generation of each of before's models
+// whose sign-in after changes, or that after removes. The caller holds the
+// models lock, as a finishing attempt does to check it.
+func (s *Server) signInChanged(sc modelScope, before, after settings.Models) {
+	for _, c := range before.Configs {
+		if a, ok := after.Get(c.ID); !ok || a.Provider != c.Provider || a.Account != c.Account || a.ChatGPTClient != c.ChatGPTClient {
+			s.signInGens.Store(modelKey(sc, c.ID), s.signInGen(sc, c.ID)+1)
+		}
+	}
+}
+
+// forgetSignIns drops the attempts started for sc's models.
+func (s *Server) forgetSignIns(sc modelScope) {
+	prefix := fmt.Sprintf("%d/", sc.set())
+	s.signIns.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), prefix) {
+			s.signIns.Delete(k)
+		}
+		return true
+	})
 }
 
 // pendingSignIn returns the sign-in v started for the model id of sc and
@@ -85,6 +128,7 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 	fail := func(err error) { toModel(w, r, sc, id, "err", upperFirst(err.Error())) }
 	switch r.PathValue("action") {
 	case "chatgpt-start":
+		gen := s.signInGen(sc, id) // before the model is read: a change after counts
 		m, err := s.loadModels(sc)
 		if err != nil {
 			fail(err)
@@ -105,7 +149,7 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 			return
 		}
 		s.sweepSignIns()
-		s.signIns.Store(key, pendingSignIn{attempt: a, url: u, account: c.Account, expires: time.Now().Add(signInTTL)})
+		s.signIns.Store(key, pendingSignIn{attempt: a, url: u, gen: gen, account: c.Account, expires: time.Now().Add(signInTTL)})
 		toModel(w, r, sc, id, "msg", "Open the ChatGPT sign-in below, then paste back the address it ends on.")
 
 	case "chatgpt-cancel":
@@ -145,7 +189,7 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 			_, _ = s.applyModels(r, sc, func(m *settings.Models) (string, error) {
 				return "kept the ChatGPT app registration of a sign-in that didn't allow the plan's use",
 					setChatGPT(m, id, func(c *settings.LLM) error {
-						if p.stale(c) {
+						if p.stale(c, s.signInGen(sc, id)) {
 							return errStaleSignIn
 						}
 						c.ChatGPTClient, c.AccountEmail, c.AccountSubject = who.ClientID, who.Email, who.Subject
@@ -167,7 +211,7 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 		msg, err := s.applyModels(r, sc, func(m *settings.Models) (string, error) {
 			var label string
 			err := setChatGPT(m, id, func(c *settings.LLM) error {
-				if p.stale(c) {
+				if p.stale(c, s.signInGen(sc, id)) {
 					return errStaleSignIn
 				}
 				c.Account, c.AccountEmail, c.AccountSubject, c.ChatGPTClient = acct, who.Email, who.Subject, who.ClientID
@@ -177,7 +221,9 @@ func (s *Server) chatgptAction(w http.ResponseWriter, r *http.Request, sc modelS
 			return fmt.Sprintf("signed %s (%s) in to ChatGPT as %s", label, where, email), err
 		})
 		if err != nil {
-			s.bot.DropChatGPT(acct, sc.set()) // no model holds it
+			if derr := s.bot.DropChatGPT(acct, sc.set()); derr != nil { // no model holds it
+				s.log.Warn("end ChatGPT sign-in", "set", sc.set(), "err", derr)
+			}
 			fail(err)
 			return
 		}

@@ -234,33 +234,44 @@ func (b *Bot) chatgptIDToken(id string, set int64) string {
 	return cred.IDToken
 }
 
-// DropChatGPT deletes a sign-in of set and ends it at OpenAI.
-func (b *Bot) DropChatGPT(id string, set int64) {
+// DropChatGPT deletes a sign-in of set and ends it at OpenAI. An error says
+// what's left undone, worded to follow "but" in a message about the model
+// whose sign-in it was: the sign-in couldn't be read, or couldn't be
+// deleted. It's ended at OpenAI all the same if it could be read.
+func (b *Bot) DropChatGPT(id string, set int64) error {
 	if id == "" {
-		return
+		return nil
 	}
 	mu := b.chatgptLock(id)
 	mu.Lock()
 	defer mu.Unlock()
-	if _, ok, err := b.store.Get(chatgptKey(id, set)); err != nil || !ok {
-		if err != nil {
-			b.log.Warn("read ChatGPT sign-in", "err", err)
-		}
-		return
+	_, ok, err := b.store.Get(chatgptKey(id, set))
+	if err != nil {
+		return fmt.Errorf("the bot couldn't read its ChatGPT sign-in to end it (%w): disconnect the app in ChatGPT's settings to be sure it's ended", err)
+	}
+	if !ok {
+		return nil
 	}
 	cred, err := b.currentChatGPT(id, set)
-	if derr := b.store.Delete(chatgptKey(id, set)); derr != nil {
-		b.log.Warn("delete ChatGPT sign-in", "err", derr)
-		return
-	}
+	derr := b.store.Delete(chatgptKey(id, set))
+	// Ended even if it couldn't be deleted: no model names it now, and a
+	// copy left stored is of no use once OpenAI has ended it.
 	b.chatgptUnsaved.Delete(id)
 	b.chatgptLocks.Delete(id)
 	if err != nil {
 		// Its refresh token can't be read, so only the person can end it.
 		b.chatgptUnconfirmed(set, "")
-		return
+	} else {
+		b.revokeChatGPT(set, cred)
 	}
-	b.revokeChatGPT(set, cred)
+	switch {
+	case derr == nil:
+		return nil
+	case err != nil:
+		return fmt.Errorf("the bot couldn't delete or read its stored ChatGPT sign-in (%w): disconnect the app in ChatGPT's settings to be sure it's ended", derr)
+	default:
+		return fmt.Errorf("the bot couldn't delete its stored ChatGPT sign-in (%w), though OpenAI is still asked to end it", derr)
+	}
 }
 
 // ChatGPTSignIns lists the IDs of every sign-in stored for set: the ones to

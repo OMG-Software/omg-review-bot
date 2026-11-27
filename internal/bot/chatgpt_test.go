@@ -230,7 +230,9 @@ func TestForgetChatGPT(t *testing.T) {
 	if !slices.Equal(drop, []string{a1}) {
 		t.Fatalf("to drop = %v, want [%s]", drop, a1)
 	}
-	b.DropChatGPT(drop[0], 7)
+	if err := b.DropChatGPT(drop[0], 7); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok, _ := st.Get(chatgptKey(a1, 7)); ok {
 		t.Error("the removed model's sign-in is still stored")
 	}
@@ -423,6 +425,38 @@ func TestChatGPTSignIns(t *testing.T) {
 		t.Errorf("set 8's sign-in: %v", err)
 	}
 	waitRevoked(t, srv, 2)
+}
+
+// TestChatGPTUndeletable: a sign-in that can't be deleted is still ended at
+// OpenAI, and the error says it's left stored.
+func TestChatGPTUndeletable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	b := New(st, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := chatgpttest.New(t)
+	b.chatgptAuth = srv.Client()
+	id, _ := signInChatGPT(t, b, srv, 7, settings.LLM{})
+	cred, _ := b.loadChatGPT(id, 7)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`CREATE TRIGGER no_delete BEFORE DELETE ON kv WHEN OLD.key LIKE 'chatgpt:sign-in:%' BEGIN SELECT RAISE(ABORT, 'disk full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.DropChatGPT(id, 7); err == nil || !strings.Contains(err.Error(), "couldn't delete") || !strings.Contains(err.Error(), "still asked to end it") {
+		t.Errorf("DropChatGPT = %v, want that it's left stored but ended", err)
+	}
+	if r := waitRevoked(t, srv, 1); !slices.Contains(r, cred.RefreshToken) {
+		t.Errorf("revoked %v, want %q", r, cred.RefreshToken)
+	}
 }
 
 // TestChatGPTUnsavedThenRenewed: when a renewal kept unsaved still can't be

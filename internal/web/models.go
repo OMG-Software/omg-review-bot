@@ -229,9 +229,14 @@ func (s *Server) applyModels(r *http.Request, sc modelScope, change func(*settin
 	}
 	// Ended after the models lock is let go: ending one waits for a renewal
 	// of it in progress, which other saves needn't. With the models saved,
-	// nothing reaches these sign-ins any more.
+	// nothing reaches these sign-ins any more. The change is made, so one
+	// that couldn't be deleted (or read) is told in its message, not as a
+	// failure.
 	for _, id := range gone {
-		s.bot.DropChatGPT(id, sc.set())
+		if err := s.bot.DropChatGPT(id, sc.set()); err != nil {
+			s.log.Warn("end ChatGPT sign-in", "set", sc.set(), "err", err)
+			msg += ", but " + err.Error()
+		}
 	}
 	return msg, nil
 }
@@ -254,11 +259,14 @@ func (s *Server) saveModelsChange(r *http.Request, sc modelScope, change func(*s
 	if err != nil {
 		return "", nil, err
 	}
+	s.signInChanged(sc, before, m)
 	gone := bot.ForgottenChatGPT(before, m)
 	if loadErr != nil {
 		// An unreadable set was removed: which sign-ins its models named
-		// can't be told, so all of the set's go.
+		// can't be told, so all of the set's go, and so do the sign-ins
+		// started for them.
 		gone = s.bot.ChatGPTSignIns(sc.set())
+		s.forgetSignIns(sc)
 	}
 	s.logModels(sc, r, msg)
 	return msg, gone, nil

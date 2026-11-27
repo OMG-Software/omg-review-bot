@@ -47,6 +47,8 @@ type Server struct {
 	// signIns holds the ChatGPT sign-ins started on the models pages, until
 	// the address each ended on is pasted back (see chatgptAction).
 	signIns sync.Map
+	// signInGens holds each model's sign-in generation (see signInGen).
+	signInGens sync.Map
 
 	// unreconciled holds the IDs of people whose access sign-in couldn't
 	// update: none of their sessions count until a sign-in does. It's kept
