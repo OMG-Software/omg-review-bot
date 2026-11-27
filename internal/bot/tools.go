@@ -564,8 +564,9 @@ func (b *Bot) chatTools(ctx context.Context, lc llm.Client, st settings.Settings
 		}
 		content := textutil.Truncate(llm.StripThinking(resp.Content), 2000)
 		// Reasoning is sent back with the calls: some servers (DeepSeek's
-		// thinking mode) require it on a continued tool conversation.
-		msgs = append(msgs, llm.Message{Role: "assistant", Content: content, ToolCalls: resp.ToolCalls, Reasoning: resp.Reasoning})
+		// thinking mode) require it on a continued tool conversation. So is
+		// the turn as the server gave it (Claude's signed thinking, say).
+		msgs = append(msgs, llm.Message{Role: "assistant", Content: content, ToolCalls: resp.ToolCalls, Reasoning: resp.Reasoning, Native: resp.Native})
 		used += len(content) + len(resp.Reasoning)
 		for _, c := range resp.ToolCalls {
 			used += len(c.Arguments) // in the history from now on, run or not

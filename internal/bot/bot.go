@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/OMG-Software/omg-review-bot/internal/chatgpt"
 	"github.com/OMG-Software/omg-review-bot/internal/github"
 	"github.com/OMG-Software/omg-review-bot/internal/secret"
 	"github.com/OMG-Software/omg-review-bot/internal/settings"
@@ -175,6 +176,21 @@ type Bot struct {
 	// box seals organizations' own models (see secretBox; tests may set it).
 	boxMu sync.Mutex
 	box   *secret.Box
+	// chatgptAuth signs ChatGPT accounts in (see chatgptClient; tests may
+	// set it). chatgptLocks holds a lock for each sign-in, whose rotating
+	// refresh token mustn't be used twice at once; chatgptUnsaved holds the
+	// renewals that couldn't be saved (unsavedSignIn), by sign-in ID;
+	// chatgptEnded marks the sign-ins dropped (by key), which never renew
+	// again, even if their stored copy couldn't be deleted. chatgptMu guards
+	// making the host ID. chatgptRetry replaces chatgptRevokeRetry (tests
+	// shorten it).
+	chatgptAuth    *chatgpt.Client
+	chatgptOnce    sync.Once
+	chatgptLocks   sync.Map
+	chatgptUnsaved sync.Map
+	chatgptEnded   sync.Map
+	chatgptMu      sync.Mutex
+	chatgptRetry   []time.Duration
 	// roundRobin counts the jobs each set of models has started (key: the
 	// organization whose own set it is, 0 for the instance's).
 	roundRobin map[int64]int

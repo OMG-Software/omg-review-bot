@@ -38,7 +38,7 @@ func (g GitHub) SignInOn() bool { return g.ClientID != "" && g.ClientSecret != "
 type LLM struct {
 	ID               string  `json:"id,omitempty"`   // stable within its set ("m1", "m2", …)
 	Name             string  `json:"name,omitempty"` // shown in the UI; empty = the model's name
-	Provider         string  `json:"provider"`       // lmstudio | ollama | ollama-cloud | openai
+	Provider         string  `json:"provider"`       // one of Providers' IDs
 	BaseURL          string  `json:"base_url"`
 	APIKey           string  `json:"api_key"`
 	Model            string  `json:"model"`
@@ -51,7 +51,23 @@ type LLM struct {
 	// tools. Off (tools offered) by default, including for settings saved
 	// before the tools existed.
 	NoTools bool `json:"no_tools,omitempty"`
+
+	// A ProviderChatGPT model's sign-in. Account names its sealed tokens
+	// (see bot.storeChatGPT), empty while it's signed out. The client OpenAI
+	// issued at its first sign-in, and the account's subject and email, are
+	// kept while it's signed in, to sign the same account in again, and
+	// after a sign-in that declined the plan's use, to ask for it again. A
+	// sign-out clears them all, so the next sign-in can be another account.
+	// None of them is secret, and none is read from a form: only a sign-in
+	// sets them.
+	Account        string `json:"account,omitempty"`
+	AccountEmail   string `json:"account_email,omitempty"`
+	AccountSubject string `json:"account_subject,omitempty"`
+	ChatGPTClient  string `json:"chatgpt_client,omitempty"`
 }
+
+// SignedIn reports whether a ProviderChatGPT model has a sign-in to use.
+func (l LLM) SignedIn() bool { return l.Account != "" }
 
 type Review struct {
 	Enabled         bool     `json:"enabled"`
@@ -187,22 +203,48 @@ func EncodePolicy(base Settings, p Policy) (string, error) {
 // Provider describes an LLM backend choice shown in the UI.
 type Provider struct {
 	ID, Label, Base string
+	// Key: the hosted API needs an API key.
+	Key bool
 }
 
+// The providers whose IDs the code refers to.
+const (
+	ProviderOpenRouter = "openrouter"
+	ProviderAnthropic  = "anthropic"
+	ProviderOpenAI     = "openai-api" // OpenAI's own API ("openai" is any compatible server)
+	// ProviderChatGPT uses a ChatGPT plan through Sign in with ChatGPT: no
+	// API key, but a sign-in whose tokens the bot keeps and renews.
+	ProviderChatGPT = "chatgpt"
+)
+
+// ChatGPTBaseURL is the only address a ChatGPT sign-in's tokens are sent to:
+// a ProviderChatGPT model's base URL can't be changed.
+const ChatGPTBaseURL = "https://api.openai.com/v1"
+
 var Providers = []Provider{
-	{"lmstudio", "LM Studio", "http://localhost:1234/v1"},
-	{"ollama", "Ollama (local)", "http://localhost:11434"},
-	{"ollama-cloud", "Ollama Cloud", "https://ollama.com"},
-	{"openai", "Other OpenAI-compatible", ""},
+	{ID: "lmstudio", Label: "LM Studio", Base: "http://localhost:1234/v1"},
+	{ID: "ollama", Label: "Ollama (local)", Base: "http://localhost:11434"},
+	{ID: "ollama-cloud", Label: "Ollama Cloud", Base: "https://ollama.com", Key: true},
+	{ID: ProviderOpenRouter, Label: "OpenRouter", Base: "https://openrouter.ai/api/v1", Key: true},
+	{ID: ProviderAnthropic, Label: "Anthropic API (Claude)", Base: "https://api.anthropic.com", Key: true},
+	{ID: ProviderOpenAI, Label: "OpenAI API (ChatGPT models)", Base: "https://api.openai.com/v1", Key: true},
+	{ID: ProviderChatGPT, Label: "ChatGPT plan (Sign in with ChatGPT)", Base: ChatGPTBaseURL},
+	{ID: "openai", Label: "Other OpenAI-compatible", Base: ""},
+}
+
+// ProviderInfo returns the provider with id, and whether there is one.
+func ProviderInfo(id string) (Provider, bool) {
+	for _, p := range Providers {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return Provider{}, false
 }
 
 func DefaultBaseURL(provider string) string {
-	for _, p := range Providers {
-		if p.ID == provider {
-			return p.Base
-		}
-	}
-	return ""
+	p, _ := ProviderInfo(provider)
+	return p.Base
 }
 
 // Severity is one finding level. Rank 1 (P1) is the most severe.

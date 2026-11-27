@@ -5,12 +5,13 @@
   <label class="grow">Name <input name="name" value="{{.C.Name}}" placeholder="Optional, e.g. &quot;Fast&quot; or &quot;Hosted&quot;" maxlength="60"></label>
   <label>Provider
     <select name="provider" data-provider>
-      {{range .P}}<option value="{{.ID}}" data-base="{{.Base}}" {{if eq .ID $.C.Provider}}selected{{end}}>{{.Label}}</option>{{end}}
+      {{range .P}}<option value="{{.ID}}" data-base="{{.Base}}" {{if eq .ID "chatgpt"}}data-signin{{end}} {{if eq .ID $.C.Provider}}selected{{end}}>{{.Label}}</option>{{end}}
     </select></label>
-  <label class="grow">Base URL <input name="base_url" data-base value="{{.C.BaseURL}}" {{if .Own}}placeholder="https://api.example.com/v1" required{{end}}>
+  <label class="grow" data-key-field {{if eq .C.Provider "chatgpt"}}hidden{{end}}>Base URL <input name="base_url" data-base value="{{.C.BaseURL}}" {{if .Own}}placeholder="https://api.example.com/v1" required{{end}}>
     {{if .Own}}<small>Must be a public <code>https://</code> address.</small>{{end}}</label>
 </div>
-<div class="row">
+<p class="hint" data-signin-note {{if ne .C.Provider "chatgpt"}}hidden{{end}}>A ChatGPT plan model takes no API key: {{if .New}}add it, then sign in with ChatGPT on its card{{else}}sign in with ChatGPT below{{end}}. Reviews then use the signed-in account's ChatGPT plan and count against its usage limits.</p>
+<div class="row" data-key-field {{if eq .C.Provider "chatgpt"}}hidden{{end}}>
   <label class="grow">API key {{if .HasKey}}<span class="pill s-reviewed">saved</span>{{end}}
     <input name="api_key" type="password" autocomplete="off" placeholder="{{if .HasKey}}Leave empty to keep the saved key (re-enter it if you change the server){{else}}Only needed for hosted APIs{{end}}"></label>
   {{if .HasKey}}<label class="check"><input type="checkbox" name="api_key_clear"> Remove saved key</label>{{end}}
@@ -107,6 +108,7 @@
     <span id="models-{{$c.ID}}-result" class="result"></span>
   </fieldset>
   </form>
+  {{if eq $c.Provider $d.ChatGPT}}{{template "chatgpt-sign-in" (dict "C" $c "Base" $base "ReadOnly" $d.ReadOnly)}}{{end}}
 </section>
 {{end}}
 
@@ -124,5 +126,45 @@
   </form>
   {{end}}
 </section>
+{{end}}
+{{end}}
+
+{{define "chatgpt-sign-in"}}
+{{/* A ChatGPT plan model's sign-in. Dot: map with C (the modelView), Base, ReadOnly. */}}
+<h3>ChatGPT sign-in</h3>
+{{if .C.SignedIn}}
+<p>Signed in as <strong>{{or .C.AccountEmail "a ChatGPT account"}}</strong>. Reviews and replies with this model use that account's ChatGPT plan
+  and count against its <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">usage limits</a>.</p>
+{{else}}
+<p class="bad">Not signed in: this model can't be used until a ChatGPT account is signed in.</p>
+{{end}}
+{{if not .ReadOnly}}
+{{if .C.SignInURL}}
+<form method="post" action="{{.Base}}/{{.C.ID}}/chatgpt-finish">
+  <ol>
+    <li><a href="{{.C.SignInURL}}" target="_blank" rel="noopener noreferrer"><strong>Open the ChatGPT sign-in</strong></a>, sign in and allow the use of your ChatGPT plan.</li>
+    <li>It ends on a <code>http://127.0.0.1:1455/…</code> page that won't load unless the bot runs on this computer. That's expected: copy that page's whole address from the address bar.</li>
+    <li>Paste it here and finish, within 15 minutes of starting.</li>
+  </ol>
+  <div class="row">
+    <label class="grow">Address the sign-in ended on
+      <input name="callback" required autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:1455/auth/callback?code=…&amp;state=…"></label>
+  </div>
+  <div class="actions">
+    <button class="primary">Finish signing in</button>
+    <button formaction="{{.Base}}/{{.C.ID}}/chatgpt-cancel" formnovalidate>Cancel</button>
+  </div>
+</form>
+{{else}}
+<form method="post" action="{{.Base}}/{{.C.ID}}/chatgpt-start">
+  <div class="actions">
+    <button {{if not .C.SignedIn}}class="primary"{{end}}>{{if .C.SignedIn}}Sign in again{{else}}Sign in with ChatGPT{{end}}</button>
+    {{if .C.SignedIn}}<button formaction="{{.Base}}/{{.C.ID}}/chatgpt-signout"
+      data-confirm="Sign {{.C.Label}} out of ChatGPT? The sign-in is ended, and the model can't be used until an account signs in again.">Sign out</button>{{end}}
+  </div>
+</form>
+{{end}}
+<p class="hint">Sign in with your own ChatGPT account. The sign-in is stored encrypted, and only this model uses it.
+  Signing out, removing the model or changing its provider ends it.</p>
 {{end}}
 {{end}}

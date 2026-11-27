@@ -1,6 +1,8 @@
-// Package llm talks to local or hosted chat models: LM Studio (and any
-// OpenAI-compatible server) via /v1/chat/completions, and Ollama (local or
-// cloud) via its native /api/chat so the context window (num_ctx) can be set.
+// Package llm talks to local or hosted chat models: LM Studio, OpenRouter,
+// OpenAI's API (and any OpenAI-compatible server) via /v1/chat/completions;
+// Ollama (local or cloud) via its native /api/chat so the context window
+// (num_ctx) can be set; Anthropic's Messages API through its SDK; and a
+// ChatGPT plan through OpenAI's Responses API with a sign-in's tokens.
 package llm
 
 import (
@@ -15,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/OMG-Software/omg-review-bot/internal/netguard"
@@ -32,6 +35,11 @@ type Message struct {
 	// Reasoning is the reasoning an assistant message with tool calls came
 	// with, sent back on the next request (some servers require it).
 	Reasoning string `json:"-"`
+	// Native is the assistant turn as its client had it (Response.Native):
+	// sent back instead of the fields above to the same kind of server, so
+	// what they can't hold (Anthropic's signed thinking) isn't lost. Other
+	// clients ignore it.
+	Native any `json:"-"`
 }
 
 // Tool is a function the model may call. Parameters is its JSON schema.
@@ -65,6 +73,24 @@ type Response struct {
 	CompletionTokens int
 	Truncated        bool // the model hit its output token limit
 	Duration         time.Duration
+	// Native is the answer in its client's own form, if it keeps one: put
+	// it in the assistant Message that records this answer.
+	Native any
+}
+
+// ErrRefused means the model declined to answer (a safety refusal). The
+// request isn't at fault, so a failover tries the next model.
+var ErrRefused = errors.New("the model declined to answer")
+
+// TokenSource gives a client a bearer token that expires (a ChatGPT
+// sign-in's). refused is a token the server just refused ("" if none): the
+// one returned is another, renewed if no other call has renewed it yet.
+//
+// A TokenSource must be comparable, and equal only to another for the same
+// sign-in: a tool turn's encrypted reasoning goes back only to the sign-in
+// that wrote it.
+type TokenSource interface {
+	Token(ctx context.Context, refused string) (string, error)
 }
 
 // ErrToolsUnsupported means the server or model refused a request because it
@@ -157,7 +183,12 @@ type Config struct {
 	// which mustn't reach the bot's own machine or network. No proxy is used,
 	// since the check has to see the server's own address.
 	PublicOnly bool
+	// Tokens authorizes a "chatgpt" client in place of APIKey.
+	Tokens TokenSource
 }
+
+// appName names the bot to hosted APIs that show which app made a request.
+const appName = "OMG Review Bot"
 
 type Client interface {
 	Chat(ctx context.Context, req Request) (*Response, error)
@@ -207,12 +238,29 @@ func New(cfg Config) (Client, error) {
 	case "ollama", "ollama-cloud":
 		base = strings.TrimSuffix(strings.TrimSuffix(base, "/v1"), "/api")
 		return &ollama{cfg: cfg, base: base, hc: hc}, nil
+	case "anthropic":
+		return newAnthropic(cfg, base, hc), nil
+	case "chatgpt":
+		if cfg.Tokens == nil {
+			return nil, errors.New("the model isn't signed in to ChatGPT: save it, then press \"Sign in with ChatGPT\" on it")
+		}
+		return &responses{cfg: cfg, base: base, hc: hc}, nil
 	default:
 		return &openAI{cfg: cfg, base: base, hc: hc}, nil
 	}
 }
 
 func doJSON(ctx context.Context, hc *http.Client, method, u, apiKey string, in, out any) error {
+	h := http.Header{}
+	if apiKey != "" {
+		h.Set("Authorization", "Bearer "+apiKey)
+	}
+	return doJSONHeaders(ctx, hc, method, u, h, in, out)
+}
+
+// doJSONHeaders sends in (if not nil) as JSON with the headers h and decodes
+// the answer into out (if not nil). An answer that isn't 2xx is an *httpError.
+func doJSONHeaders(ctx context.Context, hc *http.Client, method, u string, h http.Header, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -229,8 +277,10 @@ func doJSON(ctx context.Context, hc *http.Client, method, u, apiKey string, in, 
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	for k, vs := range h {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -258,6 +308,35 @@ type openAI struct {
 	cfg  Config
 	base string
 	hc   *http.Client
+	// noTemp: the model refused a temperature, so none is sent again.
+	noTemp atomic.Bool
+}
+
+// headers are the headers of every request to the server.
+func (o *openAI) headers() http.Header {
+	h := http.Header{}
+	if o.cfg.APIKey != "" {
+		h.Set("Authorization", "Bearer "+o.cfg.APIKey)
+	}
+	if o.cfg.Provider == "openrouter" {
+		h.Set("X-Title", appName) // how OpenRouter's activity names the app
+	}
+	return h
+}
+
+func (o *openAI) do(ctx context.Context, method, u string, in, out any) error {
+	return doJSONHeaders(ctx, o.hc, method, u, o.headers(), in, out)
+}
+
+// temperatureWords are how a server names the temperature when it refuses
+// one (OpenAI's reasoning models take only their default).
+var temperatureWords = regexp.MustCompile(`(?i)\btemperature\b`)
+
+// temperatureRefused reports whether err is a bad request about the
+// temperature.
+func temperatureRefused(err error) bool {
+	var he *httpError
+	return errors.As(err, &he) && he.status == http.StatusBadRequest && temperatureWords.MatchString(he.body)
 }
 
 func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
@@ -265,13 +344,21 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 		return nil, errors.New("no model selected")
 	}
 	body := map[string]any{
-		"model":       o.cfg.Model,
-		"messages":    openAIMessages(req.Messages),
-		"stream":      false,
-		"temperature": req.Temperature,
+		"model":    o.cfg.Model,
+		"messages": openAIMessages(req.Messages, o.source()),
+		"stream":   false,
+	}
+	if !o.noTemp.Load() {
+		body["temperature"] = req.Temperature
 	}
 	if req.MaxTokens > 0 {
-		body["max_tokens"] = req.MaxTokens
+		// OpenAI's own API takes the output cap only by this name (its
+		// reasoning models refuse max_tokens); other servers know the old one.
+		if o.cfg.Provider == "openai-api" {
+			body["max_completion_tokens"] = req.MaxTokens
+		} else {
+			body["max_tokens"] = req.MaxTokens
+		}
 	}
 	if len(req.Tools) > 0 {
 		body["tools"] = toolDefs(req.Tools)
@@ -291,6 +378,10 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 			Message struct {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"` // OpenRouter's name for it
+				// OpenRouter's reasoning as the model gave it (signed or
+				// encrypted, for some), to send back with the tool results.
+				ReasoningDetails json.RawMessage `json:"reasoning_details"`
 				ToolCalls        []struct {
 					ID       string `json:"id"`
 					Function struct {
@@ -304,16 +395,33 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 		Usage struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
+			Details          struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	start := time.Now()
-	if err := doJSON(ctx, o.hc, http.MethodPost, o.base+"/chat/completions", o.cfg.APIKey, body, &out); err != nil {
+	err := o.do(ctx, http.MethodPost, o.base+"/chat/completions", body, &out)
+	if _, sent := body["temperature"]; sent && temperatureRefused(err) {
+		o.noTemp.Store(true)
+		delete(body, "temperature")
+		err = o.do(ctx, http.MethodPost, o.base+"/chat/completions", body, &out)
+	}
+	if err != nil {
 		return nil, toolsRefused(req, err)
 	}
 	if len(out.Choices) == 0 {
 		return nil, errors.New("model returned no choices")
 	}
 	c := out.Choices[0]
+	if c.Message.ReasoningContent == "" {
+		c.Message.ReasoningContent = c.Message.Reasoning
+	}
+	reasoned := c.Message.ReasoningContent
+	if reasoned == "" && out.Usage.Details.ReasoningTokens > 0 {
+		// OpenAI doesn't return its models' reasoning, only how much there was.
+		reasoned = fmt.Sprintf("(%d reasoning tokens)", out.Usage.Details.ReasoningTokens)
+	}
 	var calls []ToolCall
 	for i, tc := range c.Message.ToolCalls {
 		id := tc.ID
@@ -323,11 +431,11 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 		calls = append(calls, ToolCall{ID: id, Name: tc.Function.Name, Arguments: rawArgs(tc.Function.Arguments)})
 	}
 	if len(calls) == 0 {
-		if err := reasoningExhausted(c.Message.Content, c.Message.ReasoningContent, c.FinishReason == "length", req.MaxTokens); err != nil {
+		if err := reasoningExhausted(c.Message.Content, reasoned, c.FinishReason == "length", req.MaxTokens); err != nil {
 			return nil, err
 		}
 	}
-	return &Response{
+	resp := &Response{
 		Content:          c.Message.Content,
 		ToolCalls:        calls,
 		Reasoning:        c.Message.ReasoningContent,
@@ -335,12 +443,37 @@ func (o *openAI) Chat(ctx context.Context, req Request) (*Response, error) {
 		CompletionTokens: out.Usage.CompletionTokens,
 		Truncated:        c.FinishReason == "length",
 		Duration:         time.Since(start),
-	}, nil
+	}
+	if len(calls) > 0 && hasJSONItems(c.Message.ReasoningDetails) {
+		resp.Native = openAITurn{from: o.source(), details: c.Message.ReasoningDetails}
+	}
+	return resp, nil
 }
 
-// openAIMessages encodes messages for /v1/chat/completions, with tool calls
-// and their results in OpenAI's shape.
-func openAIMessages(msgs []Message) []map[string]any {
+// openAITurn is the structured reasoning an assistant turn with tool calls
+// came with (OpenRouter's reasoning_details), sent back unchanged with the
+// tool results, but only to the server and model that wrote it.
+type openAITurn struct {
+	from    string // its client's source
+	details json.RawMessage
+}
+
+// source names the provider, server and model the client asks: a native
+// turn goes back only to the same three (a model of the same name at
+// another provider, in a failover, wouldn't know what to do with it).
+func (o *openAI) source() string {
+	return o.cfg.Provider + "\x00" + o.base + "\x00" + o.cfg.Model
+}
+
+// hasJSONItems reports whether raw is a JSON array with something in it.
+func hasJSONItems(raw json.RawMessage) bool {
+	var items []json.RawMessage
+	return json.Unmarshal(raw, &items) == nil && len(items) > 0
+}
+
+// openAIMessages encodes messages for /v1/chat/completions to source (see
+// openAI.source), with tool calls and their results in OpenAI's shape.
+func openAIMessages(msgs []Message, source string) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		e := map[string]any{"role": m.Role, "content": m.Content}
@@ -351,7 +484,9 @@ func openAIMessages(msgs []Message) []map[string]any {
 					"function": map[string]any{"name": tc.Name, "arguments": string(argsObject(tc.Arguments))}})
 			}
 			e["tool_calls"] = tcs
-			if m.Reasoning != "" {
+			if t, ok := m.Native.(openAITurn); ok && t.from == source {
+				e["reasoning_details"] = t.details
+			} else if m.Reasoning != "" {
 				e["reasoning_content"] = m.Reasoning
 			}
 		}
@@ -369,7 +504,7 @@ func (o *openAI) Models(ctx context.Context) ([]string, error) {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := doJSON(ctx, o.hc, http.MethodGet, o.base+"/models", o.cfg.APIKey, nil, &out); err != nil {
+	if err := o.do(ctx, http.MethodGet, o.base+"/models", nil, &out); err != nil {
 		return nil, err
 	}
 	var ids []string
@@ -386,6 +521,10 @@ type ollama struct {
 	cfg  Config
 	base string
 	hc   *http.Client
+}
+
+func (o *ollama) do(ctx context.Context, method, u string, in, out any) error {
+	return doJSON(ctx, o.hc, method, u, o.cfg.APIKey, in, out)
 }
 
 func (o *ollama) Chat(ctx context.Context, req Request) (*Response, error) {
@@ -431,7 +570,7 @@ func (o *ollama) Chat(ctx context.Context, req Request) (*Response, error) {
 		EvalCount       int    `json:"eval_count"`
 	}
 	start := time.Now()
-	if err := doJSON(ctx, o.hc, http.MethodPost, o.base+"/api/chat", o.cfg.APIKey, body, &out); err != nil {
+	if err := o.do(ctx, http.MethodPost, o.base+"/api/chat", body, &out); err != nil {
 		return nil, toolsRefused(req, err)
 	}
 	var calls []ToolCall
@@ -488,7 +627,7 @@ func (o *ollama) Models(ctx context.Context) ([]string, error) {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-	if err := doJSON(ctx, o.hc, http.MethodGet, o.base+"/api/tags", o.cfg.APIKey, nil, &out); err != nil {
+	if err := o.do(ctx, http.MethodGet, o.base+"/api/tags", nil, &out); err != nil {
 		return nil, err
 	}
 	var ids []string
@@ -537,7 +676,7 @@ func (o *openAI) Limits(ctx context.Context) (Limits, error) {
 		var v1 struct {
 			Models []map[string]any `json:"models"`
 		}
-		if err := doJSON(ctx, o.hc, http.MethodGet, root+"/api/v1/models", o.cfg.APIKey, nil, &v1); err == nil {
+		if err := o.do(ctx, http.MethodGet, root+"/api/v1/models", nil, &v1); err == nil {
 			for _, m := range v1.Models {
 				if key, _ := m["key"].(string); key == o.cfg.Model {
 					if l := lmStudioLimits(m); l.Context > 0 {
@@ -547,7 +686,7 @@ func (o *openAI) Limits(ctx context.Context) (Limits, error) {
 			}
 		}
 		var m map[string]any
-		err := doJSON(ctx, o.hc, http.MethodGet, root+"/api/v0/models/"+strings.ReplaceAll(url.PathEscape(o.cfg.Model), "%2F", "/"), o.cfg.APIKey, nil, &m)
+		err := o.do(ctx, http.MethodGet, root+"/api/v0/models/"+strings.ReplaceAll(url.PathEscape(o.cfg.Model), "%2F", "/"), nil, &m)
 		if err == nil {
 			if l := lmStudioLimits(m); l.Context > 0 {
 				return l, nil
@@ -558,7 +697,7 @@ func (o *openAI) Limits(ctx context.Context) (Limits, error) {
 	var list struct {
 		Data []map[string]any `json:"data"`
 	}
-	err := doJSON(ctx, o.hc, http.MethodGet, o.base+"/models", o.cfg.APIKey, nil, &list)
+	err := o.do(ctx, http.MethodGet, o.base+"/models", nil, &list)
 	listed := false
 	if err == nil {
 		for _, m := range list.Data {
@@ -591,7 +730,7 @@ func (o *openAI) Limits(ctx context.Context) (Limits, error) {
 			NCtx int `json:"n_ctx"`
 		} `json:"default_generation_settings"`
 	}
-	if err := doJSON(ctx, o.hc, http.MethodGet, root+"/props", o.cfg.APIKey, nil, &props); err == nil && props.Settings.NCtx > 0 {
+	if err := o.do(ctx, http.MethodGet, root+"/props", nil, &props); err == nil && props.Settings.NCtx > 0 {
 		return Limits{Context: props.Settings.NCtx}, nil
 	}
 	if firstErr != nil {
@@ -659,7 +798,7 @@ func (o *ollama) Limits(ctx context.Context) (Limits, error) {
 	var out struct {
 		ModelInfo map[string]any `json:"model_info"`
 	}
-	if err := doJSON(ctx, o.hc, http.MethodPost, o.base+"/api/show", o.cfg.APIKey, map[string]any{"model": o.cfg.Model}, &out); err != nil {
+	if err := o.do(ctx, http.MethodPost, o.base+"/api/show", map[string]any{"model": o.cfg.Model}, &out); err != nil {
 		return Limits{}, err
 	}
 	return ollamaLimits(out.ModelInfo)

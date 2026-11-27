@@ -379,6 +379,24 @@ func (s *Store) Delete(key string) error {
 	return err
 }
 
+// Keys lists the keys that start with prefix, in order.
+func (s *Store) Keys(prefix string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT key FROM kv WHERE substr(key, 1, length(?)) = ? ORDER BY key`, prefix, prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
 func (s *Store) GetJSON(key string, v any) (bool, error) {
 	raw, ok, err := s.Get(key)
 	if err != nil || !ok {
